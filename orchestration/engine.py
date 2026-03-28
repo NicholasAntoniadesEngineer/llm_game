@@ -27,12 +27,12 @@ class BuildEngine:
         self.district_index = 0
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
-        # Agents
+        # Agents — Historicus and Urbanista use sonnet for quality-critical 3D generation
         self.imperator = BaseAgent("imperator", "Imperator", IMPERATOR, CLAUDE_MODEL_FAST)
         self.planner = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_PLAN, CLAUDE_MODEL)
         self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, CLAUDE_MODEL)
-        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, CLAUDE_MODEL)
-        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, CLAUDE_MODEL)
+        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, "sonnet")
+        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, "sonnet")
         self.faber = BaseAgent("faber", "Faber", FABER, CLAUDE_MODEL_FAST)
         self.civis = BaseAgent("civis", "Civis", CIVIS, CLAUDE_MODEL_FAST)
 
@@ -224,6 +224,18 @@ class BuildEngine:
             await self._set_status("urbanista", "speaking")
             await self._chat("urbanista", "design", arch_result.get("commentary", "Design ready."))
             await self._set_status("urbanista", "idle")
+
+            # Validate Urbanista output
+            for td in arch_result.get("tiles", []):
+                spec = td.get("spec", {})
+                comps = spec.get("components", [])
+                if comps:
+                    comp_types = [c.get("type") for c in comps]
+                    total_h = sum(c.get("height", c.get("storyHeight", 0) * c.get("stories", 1)) for c in comps if c.get("type") not in ("door", "pilasters", "awning", "battlements"))
+                    if total_h > footprint_w * 2:
+                        logger.warning(f"[{name}] Total height {total_h:.2f} exceeds 2x footprint width {footprint_w}. Building may look wrong.")
+                    if not any(t in comp_types for t in ["colonnade", "block", "walls", "arcade"]):
+                        logger.warning(f"[{name}] No structural component found — building will be flat.")
 
             # Place tiles — ensure multi-tile buildings have anchors
             final_tiles = arch_result.get("tiles", [])
