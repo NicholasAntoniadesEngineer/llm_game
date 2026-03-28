@@ -23,11 +23,11 @@ class WorldRenderer {
         this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 2000);
 
         // Renderer — catch WebGL failures
-        let gl;
         try {
             this.renderer3d = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
         } catch (e) {
             container.innerHTML = '<p style="color:#ffd700;padding:40px;text-align:center;">WebGL unavailable. Try closing other browser tabs or restarting your browser.</p>';
+            this._failed = true;
             return;
         }
         this.renderer3d.setSize(container.clientWidth, container.clientHeight);
@@ -130,6 +130,7 @@ class WorldRenderer {
 
     // Public methods for UI buttons
     panCamera(dirX, dirZ) {
+        if (this._failed) return;
         const speed = this.cameraDistance * 0.05;
         const rightX = Math.sin(this.cameraAngle);
         const rightZ = -Math.cos(this.cameraAngle);
@@ -141,12 +142,14 @@ class WorldRenderer {
     }
 
     orbitCamera(dAngle, dPitch) {
+        if (this._failed) return;
         this.cameraAngle += dAngle;
         this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + dPitch));
         this._updateCamera();
     }
 
     zoomCamera(factor) {
+        if (this._failed) return;
         this.cameraDistance = Math.max(5, Math.min(500, this.cameraDistance * factor));
         this._updateCamera();
     }
