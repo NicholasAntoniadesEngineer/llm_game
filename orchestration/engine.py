@@ -179,7 +179,11 @@ class BuildEngine:
             existing_tile = self.world.get_tile(first_tile["x"], first_tile["y"])
             if existing_tile and existing_tile.terrain != "empty":
                 logger.info(f"Skipping {name} — already built")
+                await self._chat("cartographus", "info", f"Skipping {name} — already built.")
                 continue
+
+            # Announce what we're building
+            await self._chat("cartographus", "info", f"Building: {name} ({btype}, {len(tiles)} tiles)")
 
             # ─── STEP 1: Historicus describes the building ───
             await self._set_status("historicus", "thinking")
