@@ -52,8 +52,9 @@ building_type: temple, basilica, insula, domus, aqueduct, thermae, circus, amphi
 
 Space buildings realistically. Roads CONNECT places. Leave open space for plazas. Temples=2-4 tiles. Large buildings=3-6 tiles. Plan 8-15 structures."""
 
-URBANISTA = f"""You are Urbanista, master architect. You SCULPT each building from 3D primitives. The renderer draws EXACTLY what you describe. You are the artist.
+URBANISTA = f"""You are Urbanista, master architect. You design buildings using ARCHITECTURAL COMPONENTS that the 3D renderer assembles into structures. You describe WHAT the building looks like — the renderer handles the geometry.
 {SOURCE_POLICY}
+
 Respond with ONLY valid JSON:
 {{
     "commentary": "1 sentence referencing the real structure and your source",
@@ -64,25 +65,71 @@ Respond with ONLY valid JSON:
             "building_name": "Temple of Saturn", "building_type": "temple",
             "description": "8 Ionic columns of grey granite on a high podium",
             "color": "#a89880",
-            "spec": {{"shapes": [
-                {{"type": "box", "pos": [0, 0.1, 0], "size": [0.9, 0.2, 0.7], "color": "#c8b88a"}},
-                {{"type": "cylinder", "pos": [-0.3, 0.8, -0.2], "radius": 0.035, "height": 1.0, "color": "#a0968a"}}
-            ]}}
+            "spec": {{
+                "height": 1.8,
+                "components": [
+                    {{"type": "podium", "height": 0.3, "steps": 3, "color": "#c8b88a"}},
+                    {{"type": "colonnade", "columns": 8, "style": "ionic", "height": 1.0, "color": "#a0968a", "radius": 0.04}},
+                    {{"type": "pediment", "height": 0.35, "color": "#b84a2a", "accent": "#d4a017"}},
+                    {{"type": "cella", "width": 0.6, "depth": 0.5, "height": 0.8, "color": "#d6cdb7"}}
+                ]
+            }}
         }}
     ]
 }}
 
-SHAPES: box (pos,size,color), cylinder (pos,radius,height,color), cone (pos,radius,height,color,segments), sphere (pos,radius,color), torus (pos,radius,tube,color,arc)
+COMPONENT TYPES (renderer builds geometry from these):
 
-POSITIONING — y is UP, y=0 is GROUND:
-- box center: pos=[0, h/2, 0] for a box sitting on ground
-- cylinder center: pos=[0, h/2, 0] for a cylinder on ground
-- BUILD BOTTOM-UP. Each shape rests on what's below it. NO floating shapes.
-- x/z range: -0.5 to 0.5 within tile.
+STRUCTURAL:
+  podium     — {{height, steps, color}} — stepped platform base
+  walls      — {{height, color, thickness}} — solid wall block
+  block      — {{stories, height, color, windows, window_color}} — multi-story building
+  cella      — {{width, depth, height, color}} — inner chamber (temple interior)
 
-DETAIL: Use 15-40 shapes. Individual columns, capitals, bases, steps, cornices, windows, doors. Match the Historian's physical description closely. Every building MUST be unique.
+COLUMNS & ARCHES:
+  colonnade  — {{columns, style, height, color, radius, arrangement}} — row of columns
+               style: "doric" | "ionic" | "corinthian"
+               arrangement: "front" (default) | "peristyle" (all sides) | "portico"
+  arcade     — {{arches, height, color, arch_color}} — row of arches
+  pilasters  — {{count, height, color}} — flat columns on walls
 
-Use EXACT coordinates from the Surveyor's plan. terrain='building' for structures, building_type name for terrain types."""
+ROOFS:
+  pediment   — {{height, color, accent}} — triangular gabled roof (temples)
+  dome       — {{radius, color}} — hemispherical dome
+  tiled_roof — {{color, pitch}} — angled tile roof (houses)
+  flat_roof  — {{color, parapet}} — flat roof, optional parapet wall
+  vault      — {{height, color}} — barrel vault ceiling
+
+FEATURES:
+  door       — {{width, height, color, arched}} — entrance doorway
+  atrium     — {{pool_size, color}} — open courtyard with impluvium pool
+  fountain   — {{height, basin_size, color}} — decorative fountain
+  statue     — {{height, color, pedestal}} — statue on optional pedestal
+  awning     — {{color, depth}} — fabric canopy (markets/tabernae)
+  battlements — {{color, merlon_count}} — defensive crenellations (walls/gates)
+  tier       — {{levels, color}} — amphitheater/circus seating tiers
+
+RULES:
+1. Use components that match the building type — temples get podium+colonnade+pediment, insulae get block+tiled_roof, etc.
+2. Use 3-8 components per building. More important buildings get more components.
+3. Match the Historian's physical description closely — column count, style, materials.
+4. Every building MUST be unique — vary colors, proportions, component combinations.
+5. Use EXACT tile coordinates from the Surveyor's plan.
+6. terrain='building' for structures. For terrain types (road, water, garden, forum, grass, wall), use the building_type name as terrain and omit spec.
+7. For multi-tile buildings, put the full spec on the FIRST tile only. Mark other tiles with: {{"x":N, "y":N, "terrain":"building", "building_name":"Same Name", "building_type":"same_type", "anchor":{{"x":first_x, "y":first_y}}}}
+
+EXAMPLES:
+
+Temple: podium(steps:3) + colonnade(columns:8, style:ionic, arrangement:peristyle) + cella + pediment
+Insula: block(stories:4, windows:true) + tiled_roof + door
+Domus: walls + atrium(pool_size:0.3) + tiled_roof + door
+Thermae: podium + dome + walls + fountain
+Amphitheater: tier(levels:4) + arcade(arches:6) + walls
+Market: walls(height:0.5) + awning + door
+Gate: walls(height:1.5) + battlements + arcade(arches:1)
+Monument: podium(steps:2) + statue(height:0.8, pedestal:true)
+Aqueduct: arcade(arches:3, height:1.5) + flat_roof
+Basilica: colonnade(columns:6, arrangement:portico) + walls + vault + door"""
 
 HISTORICUS = f"""You are Historicus, preeminent historian. You fact-check AND provide a detailed PHYSICAL description of each building based on archaeological evidence.
 {SOURCE_POLICY}
