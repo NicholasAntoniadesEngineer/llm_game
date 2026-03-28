@@ -1,7 +1,7 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
 
-const TILE_SIZE = 6; // world units per tile — controls overall scale of everything
+const TILE_SIZE = 10; // world units per tile — controls overall scale of everything
 
 class WorldRenderer {
     constructor(container) {
@@ -49,19 +49,19 @@ class WorldRenderer {
         // Mediterranean lighting
         this.scene.add(new THREE.AmbientLight(0xffeedd, 0.45));
         const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
-        sun.position.set(180, 240, 120);
+        sun.position.set(300, 400, 200);
         sun.castShadow = true;
         sun.shadow.mapSize.set(2048, 2048);
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 800; sc.left = -300; sc.right = 300; sc.top = 300; sc.bottom = -300;
+        sc.near = 1; sc.far = 1200; sc.left = -500; sc.right = 500; sc.top = 500; sc.bottom = -500;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x87ceeb, 0x556b2f, 0.25));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
-        this.cameraDistance = 300;
-        this.cameraTarget = new THREE.Vector3(120, 0, 120);
+        this.cameraDistance = 450;
+        this.cameraTarget = new THREE.Vector3(200, 0, 200);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
 
