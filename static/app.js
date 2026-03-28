@@ -582,5 +582,29 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.key === "Escape") closeTileDetail();
     });
 
+    // Make nav panel draggable
+    const nav = document.getElementById("nav-controls");
+    if (nav) {
+        let dragging = false, offX = 0, offY = 0;
+        nav.addEventListener("mousedown", e => {
+            if (e.target.classList.contains("nav-btn")) return; // don't drag when clicking buttons
+            dragging = true;
+            offX = e.clientX - nav.getBoundingClientRect().left;
+            offY = e.clientY - nav.getBoundingClientRect().top;
+            nav.style.cursor = "grabbing";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", e => {
+            if (!dragging) return;
+            nav.style.left = (e.clientX - offX) + "px";
+            nav.style.top = (e.clientY - offY) + "px";
+            nav.style.bottom = "auto";
+            nav.style.right = "auto";
+        });
+        document.addEventListener("mouseup", () => {
+            if (dragging) { dragging = false; nav.style.cursor = "grab"; }
+        });
+    }
+
     connect();
 });

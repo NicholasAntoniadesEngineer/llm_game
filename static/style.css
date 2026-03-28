@@ -502,6 +502,8 @@ body {
     border-radius: 8px;
     padding: 10px 14px;
     backdrop-filter: blur(6px);
+    cursor: grab;
+    user-select: none;
 }
 
 .nav-section {
