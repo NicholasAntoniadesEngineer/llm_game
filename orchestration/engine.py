@@ -91,10 +91,17 @@ class BuildEngine:
             f"Research and map the city of {SCENARIO['location']} during {SCENARIO['period']}.\n"
             f"Time span: {SCENARIO['year_start']} to {SCENARIO['year_end']}.\n"
             f"Ruler context: {SCENARIO['ruler']}.\n"
-            f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters).\n\n"
-            f"Based on your knowledge of the REAL historical and archaeological layout, "
-            f"plan the districts of this city. Decide what areas exist, where they go on the grid, "
-            f"and what major structures belong in each. YOU are the expert — research and decide."
+            f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters, so the grid covers {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m).\n\n"
+            f"You are a world expert on the archaeology and topography of ancient {SCENARIO['location']}.\n"
+            f"RESEARCH DEEPLY: What districts existed at this exact time? Which buildings had been built? "
+            f"Which hadn't been constructed yet? What was the terrain like?\n\n"
+            f"For each district, describe:\n"
+            f"- Its real name and historical function\n"
+            f"- Its approximate real-world footprint in meters (then convert to tile coordinates)\n"
+            f"- The specific buildings that existed there at this time (name each one)\n"
+            f"- Major roads that bordered or crossed it\n"
+            f"- Natural features (hills, river, valleys)\n\n"
+            f"Be historically precise: if the Colosseum wasn't built until 80 CE, don't include it in 200 BCE."
         )
         await self._set_status("cartographus", "speaking")
         await self._chat("cartographus", "research", result.get("commentary", "Research complete."))
@@ -134,16 +141,29 @@ class BuildEngine:
             # ─── Cartographus surveys the specific district ───
             await self._set_status("cartographus", "thinking")
             survey = await self.surveyor.generate(
-                f"Survey: {district['name']}\n"
+                f"Survey district: {district['name']}\n"
                 f"Description: {district.get('description', '')}\n"
-                f"Grid region: {region_str} (each tile ≈ 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT})\n"
+                f"Grid region: {region_str} (each tile = 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT} = {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m)\n"
                 f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
-                f"Known buildings: {', '.join(district.get('buildings', []))}\n"
+                f"Known buildings to place: {', '.join(district.get('buildings', []))}\n"
                 f"Already built in nearby areas:\n{existing}\n\n"
-                f"Map exact positions for EVERY structure, road, and open space.\n"
-                f"- Place roads (1-2 tiles wide) connecting buildings and district edges so they link to adjacent districts.\n"
-                f"- Leave open plazas/forum areas (3x3+ tiles) — they are NOT filled with buildings.\n"
-                f"- Space buildings realistically with gaps for streets between them."
+                f"MAP THE COMPLETE DISTRICT with historically accurate layout:\n\n"
+                f"1. BUILDINGS: Place every named building with correct footprint size.\n"
+                f"   - Research the REAL dimensions. Temple of Saturn was ~40m x 22m = 4x2 tiles.\n"
+                f"   - Use rectangular tile footprints that match the real building shape.\n\n"
+                f"2. ROADS: Place road tiles for EVERY street. Roman streets were real physical features:\n"
+                f"   - Name each road if known (Via Sacra, Clivus Palatinus, etc.)\n"
+                f"   - Roads are 1-2 tiles wide and must form connected paths\n"
+                f"   - Every building must be accessible from the road network\n\n"
+                f"3. OPEN SPACES: Forums, plazas, gardens are NOT empty — they are explicit tiles:\n"
+                f"   - Place 'forum' tiles for paved public spaces\n"
+                f"   - Place 'garden' tiles for planted areas\n"
+                f"   - Place 'water' tiles for fountains, pools, or the Tiber\n\n"
+                f"4. SPACING: Use historically accurate distances between structures:\n"
+                f"   - Buildings that shared walls: adjacent tiles (0 gap)\n"
+                f"   - Buildings separated by a street: 1-2 tile gap filled with road tiles\n"
+                f"   - Buildings across a forum: forum tiles between them\n\n"
+                f"Include a 'description' and 'historical_note' for EVERY structure."
             )
             await self._set_status("cartographus", "speaking")
             await self._chat("cartographus", "survey", survey.get("commentary", "Survey complete."))
