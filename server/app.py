@@ -3,10 +3,11 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from world.state import WorldState
@@ -30,9 +31,13 @@ static_dir = Path(__file__).parent.parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
+ASSET_VERSION = str(int(time.time()))  # cache-bust on every server restart
+
 @app.get("/")
 async def index():
-    return FileResponse(str(static_dir / "index.html"))
+    html = (static_dir / "index.html").read_text()
+    html = html.replace("__ASSET_VERSION__", ASSET_VERSION)
+    return HTMLResponse(html)
 
 
 @app.websocket("/ws")
