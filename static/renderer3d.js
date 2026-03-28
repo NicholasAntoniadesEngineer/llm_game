@@ -58,17 +58,35 @@ class WorldRenderer {
 
     _setupControls() {
         const el = this.renderer3d.domElement;
-        el.addEventListener("mousedown", e => { this.isDragging = true; this.prevMouse = { x: e.clientX, y: e.clientY }; });
+        this.dragButton = -1;
+
+        el.addEventListener("mousedown", e => {
+            this.dragButton = e.button;
+            this.isDragging = true;
+            this.prevMouse = { x: e.clientX, y: e.clientY };
+        });
         el.addEventListener("mousemove", e => {
             if (this.isDragging) {
-                this.cameraAngle -= (e.clientX - this.prevMouse.x) * 0.005;
-                this.cameraPitch = Math.max(0.1, Math.min(1.3, this.cameraPitch + (e.clientY - this.prevMouse.y) * 0.005));
+                const dx = e.clientX - this.prevMouse.x;
+                const dy = e.clientY - this.prevMouse.y;
+                if (this.dragButton === 2 || (this.dragButton === 0 && e.shiftKey)) {
+                    // Right-click drag or shift+left-click: pan
+                    const panSpeed = this.cameraDistance * 0.003;
+                    const cosA = Math.cos(this.cameraAngle);
+                    const sinA = Math.sin(this.cameraAngle);
+                    this.cameraTarget.x += (-dx * sinA + dy * cosA) * panSpeed;
+                    this.cameraTarget.z += (dx * cosA + dy * sinA) * panSpeed;
+                } else {
+                    // Left-click drag: orbit
+                    this.cameraAngle -= dx * 0.005;
+                    this.cameraPitch = Math.max(0.1, Math.min(1.3, this.cameraPitch + dy * 0.005));
+                }
                 this.prevMouse = { x: e.clientX, y: e.clientY };
                 this._updateCamera();
             }
             this._updateHover(e);
         });
-        el.addEventListener("mouseup", () => { this.isDragging = false; });
+        el.addEventListener("mouseup", () => { this.isDragging = false; this.dragButton = -1; });
         el.addEventListener("wheel", e => {
             this.cameraDistance = Math.max(8, Math.min(100, this.cameraDistance + e.deltaY * 0.05));
             this._updateCamera();
@@ -76,6 +94,15 @@ class WorldRenderer {
         }, { passive: false });
         el.addEventListener("click", e => this._onClick(e));
         el.addEventListener("contextmenu", e => e.preventDefault());
+
+        // WASD / arrow keys for panning
+        this._keysDown = new Set();
+        window.addEventListener("keydown", e => {
+            this._keysDown.add(e.key.toLowerCase());
+        });
+        window.addEventListener("keyup", e => {
+            this._keysDown.delete(e.key.toLowerCase());
+        });
     }
 
     _updateCamera() {
@@ -1045,6 +1072,23 @@ class WorldRenderer {
     _animate() {
         requestAnimationFrame(() => this._animate());
         const now = Date.now();
+
+        // WASD / arrow key panning
+        if (this._keysDown && this._keysDown.size > 0) {
+            const speed = this.cameraDistance * 0.015;
+            const cosA = Math.cos(this.cameraAngle);
+            const sinA = Math.sin(this.cameraAngle);
+            let fx = 0, fz = 0;
+            if (this._keysDown.has("w") || this._keysDown.has("arrowup"))    { fx += cosA; fz += sinA; }
+            if (this._keysDown.has("s") || this._keysDown.has("arrowdown"))  { fx -= cosA; fz -= sinA; }
+            if (this._keysDown.has("a") || this._keysDown.has("arrowleft"))  { fx += sinA; fz -= cosA; }
+            if (this._keysDown.has("d") || this._keysDown.has("arrowright")) { fx -= sinA; fz += cosA; }
+            if (fx || fz) {
+                this.cameraTarget.x += fx * speed;
+                this.cameraTarget.z += fz * speed;
+                this._updateCamera();
+            }
+        }
         this.buildingGroups.forEach(group => {
             if (group.userData.animStart) {
                 const t = Math.min(1, (now - group.userData.animStart) / 600);
