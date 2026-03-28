@@ -58,10 +58,15 @@ building_type: temple, basilica, insula, domus, aqueduct, thermae, circus, amphi
 
 PLACEMENT RULES — CRITICAL (each tile = 10 meters):
 - NO OVERLAPPING TILES. Every tile coordinate must be unique across ALL structures.
-- REALISTIC SPACING: Leave 1-2 tile gaps (10-20m) between buildings. This is where roads, alleys, and walkways go.
-- ROADS: Plan explicit road tiles connecting all major structures. Roman streets were 4-8m wide (1 tile). Main roads (Via Sacra) can be 2 tiles wide. Roads should form a coherent network, not dead ends.
-- OPEN SPACE: Forums and plazas should be 3x3 to 5x5 tiles of open forum/garden terrain. Real Roman fora were large open spaces surrounded by buildings, NOT filled with structures.
-- BUILDING SIZES (real scale): Temples=6-12 tiles (60-120m footprint). Basilicas/Thermae=9-18 tiles. Insulae=6-9 tiles. Domus=4-8 tiles. Markets/Tabernae=3-6 tiles. Amphitheaters/Circuses=12-20 tiles. Monuments=3-6 tiles.
+- HISTORICALLY ACCURATE SPACING: This is critical. Use real-world distances:
+  * Adjacent insulae on the same block: 0 gap (they shared walls)
+  * Roman street (via): 1 tile gap (4-8m wide) — place road tiles in the gap
+  * Major road (Via Sacra, Via Flaminia): 2 tile gap — place road tiles
+  * Open plaza/forum: 3-6 tiles of open space between surrounding buildings
+  * Garden/park between villas: 2-3 tile gap with garden tiles
+- ROADS: Plan explicit road tiles connecting all major structures. Roads should form a coherent NETWORK with intersections. Every building should be reachable by road.
+- OPEN SPACE: Forums and plazas should be 3x5 to 5x6 tiles of open forum terrain. SURROUNDED by buildings, not filled.
+- BUILDING SIZES: Temples=6-12 tiles. Basilicas/Thermae=9-18 tiles. Insulae=6-9 tiles. Domus=4-8 tiles. Markets/Tabernae=3-6 tiles. Amphitheaters/Circuses=12-20 tiles. Monuments=3-6 tiles.
 - Use rectangular footprints (e.g. 3x4, 2x6, 4x4).
 - Plan 8-15 structures per district PLUS roads and open spaces between them.
 - Align buildings to a grid pattern — Roman cities used orthogonal planning (cardo/decumanus).
@@ -188,13 +193,13 @@ For an INSULA (W=1.8, D=0.9, 2x1 tiles):
   Roof: 0.08
   Total: 0.81 ✓
 
-ALWAYS do this calculation. Check total height < 1.2 × W.
+ALWAYS do this calculation. Check total height < 1.8 × W.
 
 RULES:
-1. READ the Historian's description carefully. Translate every detail into components.
+1. READ the Historian's description carefully. Translate EVERY detail into components.
 2. DO THE MATH. Calculate column radius from width and count. Check total height.
 3. Every building is UNIQUE. Use the Historian's specific materials, colors, proportions.
-4. Use 4-10 components. Important buildings get more detail — pilasters, doors, statues, fountains.
+4. Use 6-15 components per building. MAJOR buildings (temples, basilicas, thermae) should have 10+. Add pilasters, doors, statues, fountains, battlements, multiple tiers. MORE DETAIL = BETTER.
 5. Use EXACT coordinates from the Surveyor's plan.
 6. terrain='building' for structures. For terrain (road, water, garden, forum, grass), use type as terrain, omit spec.
 7. Multi-tile: spec.anchor on EVERY tile. Anchor tile gets components, others reference:

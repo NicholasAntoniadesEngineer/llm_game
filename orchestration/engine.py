@@ -233,7 +233,7 @@ class BuildEngine:
             await self._set_status("urbanista", "idle")
 
             # Fix Urbanista output — rescale components to fit footprint
-            max_building_h = max(footprint_w, footprint_d) * 1.2
+            max_building_h = max(footprint_w, footprint_d) * 1.8
             for td in arch_result.get("tiles", []):
                 spec = td.get("spec", {})
                 comps = spec.get("components", [])

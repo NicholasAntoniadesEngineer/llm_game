@@ -1,7 +1,7 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
 
-const TILE_SIZE = 10; // world units per tile — controls overall scale of everything
+const TILE_SIZE = 14; // world units per tile — controls overall scale of everything
 
 class WorldRenderer {
     constructor(container) {
@@ -34,8 +34,8 @@ class WorldRenderer {
         this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer3d.toneMapping = THREE.LinearToneMapping;
-        this.renderer3d.toneMappingExposure = 1.0;
+        this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer3d.toneMappingExposure = 0.9;
         // Recover from context loss
         this.renderer3d.domElement.addEventListener("webglcontextlost", (e) => {
             e.preventDefault();
@@ -49,19 +49,19 @@ class WorldRenderer {
         // Mediterranean lighting — warm, natural, balanced
         this.scene.add(new THREE.AmbientLight(0xfff5e6, 0.5));
         const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
-        sun.position.set(300, 400, 200);
+        sun.position.set(400, 500, 250);
         sun.castShadow = true;
         sun.shadow.mapSize.set(4096, 4096);
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 1200; sc.left = -500; sc.right = 500; sc.top = 500; sc.bottom = -500;
+        sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x8ec4e8, 0x8a7e5a, 0.35));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
-        this.cameraDistance = 450;
-        this.cameraTarget = new THREE.Vector3(200, 0, 200);
+        this.cameraDistance = 600;
+        this.cameraTarget = new THREE.Vector3(280, 0, 280);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
 
@@ -198,7 +198,7 @@ class WorldRenderer {
         const gw = this.width * S + 10, gh = this.height * S + 10;
         const ground = new THREE.Mesh(
             new THREE.PlaneGeometry(gw, gh),
-            new THREE.MeshStandardMaterial({ color: 0xC4B17C, roughness: 1.0 })
+            new THREE.MeshStandardMaterial({ color: 0x8B7D5E, roughness: 0.95 })
         );
         ground.rotation.x = -Math.PI / 2;
         ground.position.set(this.width * S / 2, -0.02, this.height * S / 2);
