@@ -1,7 +1,7 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
 
-const TILE_SIZE = 4; // world units per tile — controls overall scale of everything
+const TILE_SIZE = 12; // world units per tile — controls overall scale of everything
 
 class WorldRenderer {
     constructor(container) {
@@ -20,7 +20,7 @@ class WorldRenderer {
         this.scene.fog = new THREE.Fog(0x7EC8E3, 800, 2500);
 
         // Camera
-        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 800);
+        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 3000);
 
         // Renderer
         this.renderer3d = new THREE.WebGLRenderer({ antialias: true });
@@ -35,19 +35,19 @@ class WorldRenderer {
         // Mediterranean lighting
         this.scene.add(new THREE.AmbientLight(0xffeedd, 0.45));
         const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
-        sun.position.set(120, 160, 80);
+        sun.position.set(350, 450, 250);
         sun.castShadow = true;
         sun.shadow.mapSize.set(4096, 4096);
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 500; sc.left = -200; sc.right = 200; sc.top = 200; sc.bottom = -200;
+        sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x87ceeb, 0x556b2f, 0.25));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
-        this.cameraDistance = 200;
-        this.cameraTarget = new THREE.Vector3(80, 0, 80);
+        this.cameraDistance = 500;
+        this.cameraTarget = new THREE.Vector3(240, 0, 240);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
 
