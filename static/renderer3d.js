@@ -17,7 +17,7 @@ class WorldRenderer {
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x7EC8E3);
-        this.scene.fog = new THREE.Fog(0x7EC8E3, 150, 500);
+        this.scene.fog = new THREE.Fog(0x7EC8E3, 800, 2500);
 
         // Camera
         this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 800);

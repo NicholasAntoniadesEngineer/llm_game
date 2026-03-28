@@ -18,24 +18,27 @@ body {
 .header {
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
     border-bottom: 2px solid #c9a84c;
-    padding: 12px 24px;
+    padding: 8px 20px;
+    margin-top: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
 }
 
 .header h1 {
-    font-size: 1.6rem;
+    font-size: 1.2rem;
     color: #ffd700;
     letter-spacing: 4px;
+    line-height: 1;
     text-transform: uppercase;
     font-weight: normal;
 }
 
 .header .subtitle {
-    font-size: 0.85rem;
+    font-size: 0.7rem;
     color: #8a7e6b;
     font-style: italic;
+    margin-top: 2px;
 }
 
 /* Agent status bar */
