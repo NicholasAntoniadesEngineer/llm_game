@@ -183,15 +183,47 @@ class BuildEngine:
                 await self._chat("cartographus", "info", f"Skipping {name} — already built.")
                 continue
 
+            # Calculate distances to nearby structures from master plan
+            def tile_center(tile_list):
+                if not tile_list: return (0, 0)
+                cx = sum(t["x"] for t in tile_list) / len(tile_list)
+                cy = sum(t["y"] for t in tile_list) / len(tile_list)
+                return (cx, cy)
+
+            my_center = tile_center(tiles)
+            neighbors = []
+            for other in master_plan:
+                if other.get("name") == name:
+                    continue
+                other_tiles = other.get("tiles", [])
+                if not other_tiles:
+                    continue
+                oc = tile_center(other_tiles)
+                dist_tiles = round(((my_center[0] - oc[0])**2 + (my_center[1] - oc[1])**2)**0.5, 1)
+                dist_meters = round(dist_tiles * 10)
+                neighbors.append({"name": other.get("name"), "type": other.get("building_type"), "distance_tiles": dist_tiles, "distance_m": dist_meters})
+            neighbors.sort(key=lambda n: n["distance_tiles"])
+            nearest = neighbors[:5]
+
+            neighbor_desc = "\n".join(
+                f"  - {n['name']} ({n['type']}): {n['distance_tiles']} tiles away ({n['distance_m']}m)"
+                for n in nearest
+            )
+
             # Announce what we're building
-            await self._chat("cartographus", "info", f"Building: {name} ({btype}, {len(tiles)} tiles)")
+            await self._chat("cartographus", "info",
+                f"Building: {name} ({btype}, {len(tiles)} tiles). "
+                f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else f"Building: {name} ({btype}, {len(tiles)} tiles)")
 
             # ─── STEP 1: Historicus describes the building ───
             await self._set_status("historicus", "thinking")
             hist_result = await self.historicus.generate(
                 f"Describe and fact-check: {name} ({btype})\n"
                 f"In {district['name']}, year {district.get('year', '')} ({district.get('period', '')})\n"
-                f"Context: {desc}\nInclude detailed physical appearance for the Architect."
+                f"Context: {desc}\n"
+                f"NEARBY STRUCTURES (distances are real-world meters):\n{neighbor_desc}\n\n"
+                f"Include detailed physical appearance for the Architect. "
+                f"Mention how this building relates spatially to its neighbors."
             )
 
             hist_desc = hist_result.get("commentary", "")
@@ -221,6 +253,7 @@ class BuildEngine:
                 f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
                 f"Anchor tile: ({anchor_x}, {anchor_y})\n"
                 f"All tiles: {json.dumps(tiles)}\n\n"
+                f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
                 f"HISTORIAN'S PHYSICAL DESCRIPTION (match this closely):\n{physical_desc}\n\n"
                 f"Surveyor context: {desc}\n\n"
                 f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
