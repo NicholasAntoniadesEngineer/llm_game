@@ -5,7 +5,7 @@ GRID_WIDTH = 40
 GRID_HEIGHT = 40
 
 # Agent execution
-CLAUDE_MODEL = "sonnet"
+CLAUDE_MODEL = "haiku"
 CLAUDE_MODEL_FAST = "haiku"
 STEP_DELAY = 0.3
 

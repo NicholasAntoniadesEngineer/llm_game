@@ -329,9 +329,10 @@ function updateMapContent() {
         </div>`;
     }
 
-    // Mini grid map — render district positions as colored blocks
+    // Interactive grid map — zoom and pan with mouse
     if (currentMasterPlan && currentMasterPlan.length > 0) {
-        html += `<canvas id="mini-map" width="200" height="200" style="border:1px solid #333;border-radius:4px;margin-bottom:12px;"></canvas>`;
+        html += `<canvas id="mini-map" width="500" height="500" style="border:1px solid #333;border-radius:4px;margin-bottom:12px;cursor:grab;width:100%;"></canvas>`;
+        html += `<p style="color:#888;font-size:0.7rem;margin-bottom:4px;">Scroll to zoom, drag to pan</p>`;
         html += `<p style="color:#e67e22;margin-bottom:8px;">${currentMasterPlan.length} structures planned:</p>`;
         for (const item of currentMasterPlan) {
             html += `<div class="plan-item">
@@ -348,31 +349,83 @@ function updateMapContent() {
 
     content.innerHTML = html;
 
-    // Draw mini map
+    // Draw mini map and attach zoom/pan controls
     if (currentMasterPlan) {
-        setTimeout(() => drawMiniMap(), 50);
+        setTimeout(() => { drawMiniMap(); setupMiniMapControls(); }, 50);
     }
+}
+
+// Mini-map state for zoom/pan
+let miniMapZoom = 12;
+let miniMapOffsetX = 0;
+let miniMapOffsetY = 0;
+let miniMapDragging = false;
+let miniMapPrevMouse = { x: 0, y: 0 };
+
+function setupMiniMapControls() {
+    const canvas = document.getElementById("mini-map");
+    if (!canvas) return;
+
+    canvas.addEventListener("wheel", e => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = (e.clientX - rect.left) / rect.width * canvas.width;
+        const my = (e.clientY - rect.top) / rect.height * canvas.height;
+
+        // Zoom toward mouse position
+        const oldZoom = miniMapZoom;
+        miniMapZoom = Math.max(3, Math.min(40, miniMapZoom * (e.deltaY < 0 ? 1.15 : 0.87)));
+        const ratio = miniMapZoom / oldZoom;
+        miniMapOffsetX = mx - (mx - miniMapOffsetX) * ratio;
+        miniMapOffsetY = my - (my - miniMapOffsetY) * ratio;
+        drawMiniMap();
+    }, { passive: false });
+
+    canvas.addEventListener("mousedown", e => {
+        miniMapDragging = true;
+        miniMapPrevMouse = { x: e.clientX, y: e.clientY };
+        canvas.style.cursor = "grabbing";
+    });
+    canvas.addEventListener("mousemove", e => {
+        if (!miniMapDragging) return;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        miniMapOffsetX += (e.clientX - miniMapPrevMouse.x) * scaleX;
+        miniMapOffsetY += (e.clientY - miniMapPrevMouse.y) * scaleY;
+        miniMapPrevMouse = { x: e.clientX, y: e.clientY };
+        drawMiniMap();
+    });
+    canvas.addEventListener("mouseup", () => { miniMapDragging = false; canvas.style.cursor = "grab"; });
+    canvas.addEventListener("mouseleave", () => { miniMapDragging = false; canvas.style.cursor = "grab"; });
 }
 
 function drawMiniMap() {
     const canvas = document.getElementById("mini-map");
     if (!canvas || !currentMasterPlan) return;
     const ctx = canvas.getContext("2d");
-    const scale = 5;
+    const W = canvas.width, H = canvas.height;
+    const s = miniMapZoom;
+    const ox = miniMapOffsetX, oy = miniMapOffsetY;
 
     // Background
     ctx.fillStyle = "#1a1a2e";
-    ctx.fillRect(0, 0, 200, 200);
+    ctx.fillRect(0, 0, W, H);
 
-    // Grid
+    // Grid lines
     ctx.strokeStyle = "#2a2a4a";
     ctx.lineWidth = 0.5;
     for (let i = 0; i <= 40; i++) {
-        ctx.beginPath(); ctx.moveTo(i * scale, 0); ctx.lineTo(i * scale, 200); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(0, i * scale); ctx.lineTo(200, i * scale); ctx.stroke();
+        const gx = i * s + ox, gy = i * s + oy;
+        if (gx >= 0 && gx <= W) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
+        if (gy >= 0 && gy <= H) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
     }
 
-    // Plot each structure
+    // Grid boundary
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ox, oy, 40 * s, 40 * s);
+
     const typeColors = {
         temple: "#ffd700", basilica: "#deb887", road: "#808080", forum: "#d4c67a",
         insula: "#cd853f", domus: "#d2691e", market: "#deb887", water: "#3498db",
@@ -381,18 +434,21 @@ function drawMiniMap() {
         bridge: "#a0a0a0", taberna: "#b8860b", warehouse: "#8b8378", grass: "#5a9a4a"
     };
 
+    // Plot structures
     for (const item of currentMasterPlan) {
         const color = typeColors[item.building_type] || "#d4a373";
         ctx.fillStyle = color;
         for (const t of (item.tiles || [])) {
-            ctx.fillRect(t.x * scale, t.y * scale, scale, scale);
+            ctx.fillRect(t.x * s + ox, t.y * s + oy, s - 0.5, s - 0.5);
         }
-        // Label
-        if (item.tiles && item.tiles.length > 0) {
+        // Labels scale with zoom
+        if (item.tiles && item.tiles.length > 0 && s >= 6) {
             const t = item.tiles[0];
+            const fontSize = Math.max(6, Math.min(14, s * 0.8));
             ctx.fillStyle = "#fff";
-            ctx.font = "4px sans-serif";
-            ctx.fillText(item.name.substring(0, 10), t.x * scale + 1, t.y * scale + 4);
+            ctx.font = `${fontSize}px sans-serif`;
+            const label = s >= 10 ? item.name : item.name.substring(0, 8);
+            ctx.fillText(label, t.x * s + ox + 2, t.y * s + oy + fontSize);
         }
     }
 }
