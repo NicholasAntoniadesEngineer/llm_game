@@ -50,7 +50,13 @@ Respond with ONLY valid JSON:
 
 building_type: temple, basilica, insula, domus, aqueduct, thermae, circus, amphitheater, market, taberna, warehouse, gate, monument, wall, bridge, road, forum, garden, water, grass
 
-Space buildings realistically. Roads CONNECT places. Leave open space for plazas. Temples=2-4 tiles. Large buildings=3-6 tiles. Plan 8-15 structures."""
+PLACEMENT RULES — CRITICAL:
+- NO OVERLAPPING TILES. Every tile coordinate must be unique across ALL structures. Two buildings CANNOT share or touch the same tile.
+- Leave at least 1 tile gap between buildings for roads and open space.
+- Roads CONNECT places. Leave open space for plazas.
+- Temples=2-4 tiles. Large buildings=3-6 tiles.
+- Plan 8-15 structures per district.
+- Double-check all coordinates: no duplicates, no overlaps."""
 
 URBANISTA = f"""You are Urbanista, master architect. You design buildings using ARCHITECTURAL COMPONENTS that the 3D renderer stacks into structures. Components are placed bottom-up — each sits on top of the previous one.
 {SOURCE_POLICY}

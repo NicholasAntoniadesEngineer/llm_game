@@ -434,21 +434,63 @@ function drawMiniMap() {
         bridge: "#a0a0a0", taberna: "#b8860b", warehouse: "#8b8378", grass: "#5a9a4a"
     };
 
-    // Plot structures
+    // Plot structure tiles
     for (const item of currentMasterPlan) {
         const color = typeColors[item.building_type] || "#d4a373";
         ctx.fillStyle = color;
         for (const t of (item.tiles || [])) {
             ctx.fillRect(t.x * s + ox, t.y * s + oy, s - 0.5, s - 0.5);
         }
-        // Labels scale with zoom
-        if (item.tiles && item.tiles.length > 0 && s >= 6) {
-            const t = item.tiles[0];
-            const fontSize = Math.max(6, Math.min(14, s * 0.8));
+    }
+
+    // Labels — with collision detection and dark background for readability
+    if (s >= 6) {
+        const fontSize = Math.max(7, Math.min(14, s * 0.7));
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        const placed = []; // [{x, y, w, h}] — occupied label regions
+
+        for (const item of currentMasterPlan) {
+            if (!item.tiles || item.tiles.length === 0) continue;
+
+            // Find center tile for label placement
+            let cx = 0, cy = 0;
+            for (const t of item.tiles) { cx += t.x; cy += t.y; }
+            cx /= item.tiles.length;
+            cy /= item.tiles.length;
+
+            const label = s >= 12 ? item.name : item.name.substring(0, 10);
+            const textW = ctx.measureText(label).width;
+            const textH = fontSize;
+            const pad = 2;
+            let lx = cx * s + ox + 2;
+            let ly = cy * s + oy + s * 0.5;
+
+            // Check for overlap and nudge down if colliding
+            let attempts = 0;
+            while (attempts < 5) {
+                const rect = { x: lx - pad, y: ly - textH - pad, w: textW + pad * 2, h: textH + pad * 2 };
+                const overlaps = placed.some(p =>
+                    rect.x < p.x + p.w && rect.x + rect.w > p.x &&
+                    rect.y < p.y + p.h && rect.y + rect.h > p.y
+                );
+                if (!overlaps) break;
+                ly += textH + pad * 2;
+                attempts++;
+            }
+            if (attempts >= 5) continue; // skip label if no room
+
+            // Dark background pill
+            const bgX = lx - pad, bgY = ly - textH;
+            ctx.fillStyle = "rgba(10, 12, 24, 0.85)";
+            ctx.beginPath();
+            ctx.roundRect(bgX, bgY, textW + pad * 2, textH + pad * 2, 3);
+            ctx.fill();
+
+            // Text
             ctx.fillStyle = "#fff";
-            ctx.font = `${fontSize}px sans-serif`;
-            const label = s >= 10 ? item.name : item.name.substring(0, 8);
-            ctx.fillText(label, t.x * s + ox + 2, t.y * s + oy + fontSize);
+            ctx.fillText(label, lx, ly);
+
+            placed.push({ x: bgX, y: bgY, w: textW + pad * 2, h: textH + pad * 2 });
         }
     }
 }
