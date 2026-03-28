@@ -1,0 +1,341 @@
+/* Roma Aeterna — Dark Roman Theme */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: "Georgia", "Times New Roman", serif;
+    background: #0d0d1a;
+    color: #e0d5c1;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* Header */
+.header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border-bottom: 2px solid #c9a84c;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.header h1 {
+    font-size: 1.6rem;
+    color: #ffd700;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    font-weight: normal;
+}
+
+.header .subtitle {
+    font-size: 0.85rem;
+    color: #8a7e6b;
+    font-style: italic;
+}
+
+/* Timeline bar */
+.timeline {
+    background: #141428;
+    border-bottom: 1px solid #2a2a4a;
+    padding: 8px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 0.85rem;
+}
+
+.timeline .period {
+    color: #ffd700;
+    font-weight: bold;
+}
+
+.timeline .year {
+    color: #8a7e6b;
+}
+
+.timeline .district {
+    color: #4a9eff;
+    margin-left: auto;
+}
+
+.timeline .status {
+    color: #2ecc71;
+    font-style: italic;
+}
+
+/* Main layout */
+.main {
+    display: flex;
+    height: calc(100vh - 90px);
+}
+
+/* Map panel */
+.map-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: #0f0f1f;
+    position: relative;
+    min-width: 0;
+}
+
+.map-panel canvas {
+    border: 2px solid #2a2a4a;
+    border-radius: 4px;
+    max-width: 100%;
+    max-height: 100%;
+    cursor: crosshair;
+    image-rendering: pixelated;
+}
+
+/* Chat panel */
+.chat-panel {
+    width: 420px;
+    min-width: 320px;
+    background: #121225;
+    border-left: 1px solid #2a2a4a;
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid #2a2a4a;
+    font-size: 0.9rem;
+    color: #8a7e6b;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chat-messages::-webkit-scrollbar {
+    width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+    background: #2a2a4a;
+    border-radius: 3px;
+}
+
+/* Chat message */
+.chat-msg {
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: #1a1a30;
+    border-left: 3px solid #444;
+    animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-msg .sender {
+    font-size: 0.75rem;
+    font-weight: bold;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.chat-msg .content {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: #ccc;
+}
+
+.chat-msg .meta {
+    font-size: 0.7rem;
+    color: #555;
+    margin-top: 6px;
+}
+
+/* Agent-specific colors */
+.chat-msg.praefectus { border-left-color: #ffd700; }
+.chat-msg.praefectus .sender { color: #ffd700; }
+
+.chat-msg.urbanista { border-left-color: #4a9eff; }
+.chat-msg.urbanista .sender { color: #4a9eff; }
+
+.chat-msg.historicus { border-left-color: #2ecc71; }
+.chat-msg.historicus .sender { color: #2ecc71; }
+
+.chat-msg.faber { border-left-color: #ff8c00; }
+.chat-msg.faber .sender { color: #ff8c00; }
+
+.chat-msg.civis { border-left-color: #e056a0; }
+.chat-msg.civis .sender { color: #e056a0; }
+
+/* Special message types */
+.chat-msg.fact-check {
+    background: #1a2a1a;
+}
+
+.chat-msg.rejected {
+    background: #2a1a1a;
+}
+
+.chat-msg.phase-announce {
+    background: linear-gradient(135deg, #1a1a30 0%, #1a2040 100%);
+    border-left-color: #ffd700;
+    border: 1px solid #333;
+    text-align: center;
+}
+
+.chat-msg.phase-announce .content {
+    color: #ffd700;
+    font-style: italic;
+}
+
+/* Typing indicator */
+.typing-indicator {
+    padding: 8px 12px;
+    font-size: 0.8rem;
+    color: #666;
+    font-style: italic;
+    display: none;
+}
+
+.typing-indicator.active {
+    display: block;
+}
+
+.typing-dots {
+    display: inline-block;
+}
+
+.typing-dots span {
+    animation: blink 1.4s infinite;
+    font-size: 1.2rem;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes blink {
+    0%, 20% { opacity: 0.2; }
+    50% { opacity: 1; }
+    80%, 100% { opacity: 0.2; }
+}
+
+/* Tile detail popup */
+.tile-detail {
+    display: none;
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1a1a30;
+    border: 1px solid #c9a84c;
+    border-radius: 8px;
+    padding: 16px 24px;
+    max-width: 500px;
+    z-index: 100;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.tile-detail.visible {
+    display: block;
+    animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateX(-50%) translateY(16px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.tile-detail h3 {
+    color: #ffd700;
+    font-size: 1rem;
+    margin-bottom: 8px;
+}
+
+.tile-detail p {
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: #bbb;
+    margin-bottom: 4px;
+}
+
+.tile-detail .historical-note {
+    color: #2ecc71;
+    font-style: italic;
+    font-size: 0.8rem;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #333;
+}
+
+.tile-detail .scene {
+    color: #e056a0;
+    font-style: italic;
+    font-size: 0.8rem;
+}
+
+.tile-detail .close-btn {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 1.1rem;
+}
+
+.tile-detail .close-btn:hover {
+    color: #fff;
+}
+
+/* Tooltip */
+#tooltip {
+    display: none;
+    position: fixed;
+    background: #1a1a30;
+    border: 1px solid #444;
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    color: #ddd;
+    border-radius: 4px;
+    pointer-events: none;
+    z-index: 200;
+    white-space: nowrap;
+}
+
+/* Connection status */
+.connection-status {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    z-index: 300;
+}
+
+.connection-status.connected {
+    background: rgba(46, 204, 113, 0.2);
+    color: #2ecc71;
+}
+
+.connection-status.disconnected {
+    background: rgba(231, 76, 60, 0.2);
+    color: #e74c3c;
+}

@@ -37,7 +37,10 @@ class BaseAgent:
                 return self._fallback_response()
 
             raw = stdout.decode().strip()
-            return self._parse_json(raw)
+            logger.info(f"[{self.role}] response ({len(raw)} chars)")
+            result = self._parse_json(raw)
+            logger.info(f"[{self.role}] parsed: {list(result.keys())}")
+            return result
 
         except FileNotFoundError:
             logger.error("claude CLI not found. Is it installed?")

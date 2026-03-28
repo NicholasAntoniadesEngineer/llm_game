@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roma Aeterna</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div>
+            <h1>Roma Aeterna</h1>
+            <div class="subtitle">Five AI agents build Ancient Rome — in real time</div>
+        </div>
+    </div>
+
+    <!-- Timeline bar -->
+    <div class="timeline">
+        <span>Period: <span class="period" id="timeline-period">—</span></span>
+        <span>Year: <span class="year" id="timeline-year">—</span></span>
+        <span class="district" id="timeline-district"></span>
+        <span class="status" id="timeline-status"></span>
+    </div>
+
+    <!-- Main layout -->
+    <div class="main">
+        <!-- Map panel -->
+        <div class="map-panel">
+            <canvas id="world-canvas"></canvas>
+        </div>
+
+        <!-- Chat panel -->
+        <div class="chat-panel">
+            <div class="chat-header">Agent Discussion</div>
+            <div class="chat-messages" id="chat-messages">
+                <!-- Messages appear here -->
+            </div>
+            <div class="typing-indicator" id="typing-indicator"></div>
+        </div>
+    </div>
+
+    <!-- Tile detail popup -->
+    <div class="tile-detail" id="tile-detail"></div>
+
+    <!-- Tooltip -->
+    <div id="tooltip"></div>
+
+    <!-- Connection status -->
+    <div class="connection-status" id="connection-status">Connecting...</div>
+
+    <!-- Scripts -->
+    <script src="/static/tiles.js"></script>
+    <script src="/static/renderer.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
