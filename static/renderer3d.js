@@ -85,13 +85,16 @@ class WorldRenderer {
                 const dx = e.clientX - this.prevMouse.x;
                 const dy = e.clientY - this.prevMouse.y;
                 if (this.dragButton === 2 || this.dragButton === 1 || (this.dragButton === 0 && e.shiftKey)) {
-                    // Right-click, middle-click, or shift+left: pan
+                    // Pan using camera's actual right/forward vectors projected onto ground
                     const panSpeed = this.cameraDistance * 0.002;
-                    const cosA = Math.cos(this.cameraAngle);
-                    const sinA = Math.sin(this.cameraAngle);
-                    // Pan direction matches mouse direction
-                    this.cameraTarget.x -= (dx * sinA + dy * cosA) * panSpeed;
-                    this.cameraTarget.z += (dx * cosA - dy * sinA) * panSpeed;
+                    // Camera right vector (perpendicular to look direction, on XZ plane)
+                    const rightX = Math.sin(this.cameraAngle);
+                    const rightZ = -Math.cos(this.cameraAngle);
+                    // Camera forward vector (projected onto XZ plane)
+                    const fwdX = -Math.cos(this.cameraAngle);
+                    const fwdZ = -Math.sin(this.cameraAngle);
+                    this.cameraTarget.x += (-dx * rightX + dy * fwdX) * panSpeed;
+                    this.cameraTarget.z += (-dx * rightZ + dy * fwdZ) * panSpeed;
                 } else {
                     // Left-click drag: orbit
                     this.cameraAngle -= dx * 0.004;
@@ -128,10 +131,12 @@ class WorldRenderer {
     // Public methods for UI buttons
     panCamera(dirX, dirZ) {
         const speed = this.cameraDistance * 0.05;
-        const cosA = Math.cos(this.cameraAngle);
-        const sinA = Math.sin(this.cameraAngle);
-        this.cameraTarget.x += (dirX * sinA + dirZ * cosA) * speed;
-        this.cameraTarget.z += (-dirX * cosA + dirZ * sinA) * speed;
+        const rightX = Math.sin(this.cameraAngle);
+        const rightZ = -Math.cos(this.cameraAngle);
+        const fwdX = -Math.cos(this.cameraAngle);
+        const fwdZ = -Math.sin(this.cameraAngle);
+        this.cameraTarget.x += (dirX * rightX + dirZ * fwdX) * speed;
+        this.cameraTarget.z += (dirX * rightZ + dirZ * fwdZ) * speed;
         this._updateCamera();
     }
 
@@ -1091,14 +1096,16 @@ class WorldRenderer {
         // Keyboard controls: WASD/arrows pan, QE orbit, RF zoom
         if (this._keysDown && this._keysDown.size > 0) {
             const panSpeed = this.cameraDistance * 0.008;
-            const cosA = Math.cos(this.cameraAngle);
-            const sinA = Math.sin(this.cameraAngle);
-            let fx = 0, fz = 0;
-            if (this._keysDown.has("w") || this._keysDown.has("arrowup"))    { fx += cosA; fz += sinA; }
-            if (this._keysDown.has("s") || this._keysDown.has("arrowdown"))  { fx -= cosA; fz -= sinA; }
-            if (this._keysDown.has("a") || this._keysDown.has("arrowleft"))  { fx += sinA; fz -= cosA; }
-            if (this._keysDown.has("d") || this._keysDown.has("arrowright")) { fx -= sinA; fz += cosA; }
-            if (fx || fz) { this.cameraTarget.x += fx * panSpeed; this.cameraTarget.z += fz * panSpeed; }
+            const rightX = Math.sin(this.cameraAngle);
+            const rightZ = -Math.cos(this.cameraAngle);
+            const fwdX = -Math.cos(this.cameraAngle);
+            const fwdZ = -Math.sin(this.cameraAngle);
+            let rx = 0, rz = 0;
+            if (this._keysDown.has("w") || this._keysDown.has("arrowup"))    { rx += fwdX; rz += fwdZ; }
+            if (this._keysDown.has("s") || this._keysDown.has("arrowdown"))  { rx -= fwdX; rz -= fwdZ; }
+            if (this._keysDown.has("a") || this._keysDown.has("arrowleft"))  { rx -= rightX; rz -= rightZ; }
+            if (this._keysDown.has("d") || this._keysDown.has("arrowright")) { rx += rightX; rz += rightZ; }
+            if (rx || rz) { this.cameraTarget.x += rx * panSpeed; this.cameraTarget.z += rz * panSpeed; }
             // Q/E rotate orbit
             if (this._keysDown.has("q")) this.cameraAngle += 0.02;
             if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
