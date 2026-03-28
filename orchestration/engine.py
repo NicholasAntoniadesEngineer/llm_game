@@ -231,17 +231,40 @@ class BuildEngine:
             await self._chat("urbanista", "design", arch_result.get("commentary", "Design ready."))
             await self._set_status("urbanista", "idle")
 
-            # Validate Urbanista output
+            # Fix Urbanista output — rescale components to fit footprint
+            max_building_h = max(footprint_w, footprint_d) * 1.2
             for td in arch_result.get("tiles", []):
                 spec = td.get("spec", {})
                 comps = spec.get("components", [])
-                if comps:
-                    comp_types = [c.get("type") for c in comps]
-                    total_h = sum(c.get("height", c.get("storyHeight", 0) * c.get("stories", 1)) for c in comps if c.get("type") not in ("door", "pilasters", "awning", "battlements"))
-                    if total_h > footprint_w * 2:
-                        logger.warning(f"[{name}] Total height {total_h:.2f} exceeds 2x footprint width {footprint_w}. Building may look wrong.")
-                    if not any(t in comp_types for t in ["colonnade", "block", "walls", "arcade"]):
-                        logger.warning(f"[{name}] No structural component found — building will be flat.")
+                if not comps:
+                    continue
+
+                # Calculate total height the renderer will produce
+                foundation_h = sum(c.get("height", 0) for c in comps if c.get("type") == "podium")
+                structural_h = max((c.get("height", 0) if c.get("type") != "block" else c.get("storyHeight", 0.2) * c.get("stories", 1) for c in comps if c.get("type") in ("colonnade", "block", "walls", "arcade")), default=0)
+                roof_h = sum(c.get("height", c.get("radius", 0)) for c in comps if c.get("type") in ("pediment", "dome", "tiled_roof", "flat_roof", "vault"))
+                total_h = foundation_h + structural_h + roof_h
+
+                if total_h > max_building_h and total_h > 0:
+                    scale = max_building_h / total_h
+                    logger.info(f"[{name}] Rescaling {total_h:.2f} -> {max_building_h:.2f} (x{scale:.2f})")
+                    for c in comps:
+                        if "height" in c: c["height"] = round(c["height"] * scale, 3)
+                        if "storyHeight" in c: c["storyHeight"] = round(c["storyHeight"] * scale, 3)
+                        if "radius" in c and c.get("type") == "dome": c["radius"] = round(c["radius"] * scale, 3)
+                        if "thickness" in c: c["thickness"] = round(c["thickness"] * scale, 3)
+                        if "width" in c and c.get("type") == "cella": c["width"] = min(c["width"], footprint_w * 0.7)
+                        if "depth" in c and c.get("type") == "cella": c["depth"] = min(c["depth"], footprint_d * 0.7)
+
+                # Ensure colonnade radius is proportional
+                for c in comps:
+                    if c.get("type") == "colonnade":
+                        cols = c.get("columns", 6)
+                        max_r = footprint_w / (cols * 4)
+                        if c.get("radius", 0) > max_r:
+                            c["radius"] = round(max_r, 4)
+                        elif not c.get("radius"):
+                            c["radius"] = round(footprint_w / (cols * 5), 4)
 
             # Place tiles — ensure multi-tile buildings have anchors
             final_tiles = arch_result.get("tiles", [])
