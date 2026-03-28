@@ -25,13 +25,13 @@ class WorldRenderer {
         // Renderer — catch WebGL failures
         let gl;
         try {
-            this.renderer3d = new THREE.WebGLRenderer({ antialias: false, powerPreference: "default" });
+            this.renderer3d = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
         } catch (e) {
             container.innerHTML = '<p style="color:#ffd700;padding:40px;text-align:center;">WebGL unavailable. Try closing other browser tabs or restarting your browser.</p>';
             return;
         }
         this.renderer3d.setSize(container.clientWidth, container.clientHeight);
-        this.renderer3d.setPixelRatio(1);
+        this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
@@ -51,7 +51,7 @@ class WorldRenderer {
         const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
         sun.position.set(300, 400, 200);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.mapSize.set(4096, 4096);
         const sc = sun.shadow.camera;
         sc.near = 1; sc.far = 1200; sc.left = -500; sc.right = 500; sc.top = 500; sc.bottom = -500;
         this.scene.add(sun);
