@@ -12,7 +12,7 @@ from agents.prompts import (
     URBANISTA, HISTORICUS,
 )
 from config import STEP_DELAY, SCENARIO, CLAUDE_MODEL, CLAUDE_MODEL_FAST, GRID_WIDTH, GRID_HEIGHT
-from persistence import save_state, save_districts_cache, load_districts_cache
+from persistence import save_state, save_districts_cache, load_districts_cache, save_surveys_cache, load_surveys_cache
 
 logger = logging.getLogger("roma.engine")
 
@@ -120,31 +120,40 @@ class BuildEngine:
         region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
         region_str = f"x={region['x1']}-{region['x2']}, y={region['y1']}-{region['y2']}"
         existing = self.world.get_region_summary(region["x1"], region["y1"], region["x2"], region["y2"])
+        district_key = district.get("name", "unknown")
 
-        # ─── Cartographus surveys the specific district ───
-        await self.broadcast({
-            "type": "loading",
-            "agent": "cartographus",
-            "message": f"Surveying {district['name']}...",
-        })
-        await self._set_status("cartographus", "thinking")
-        survey = await self.surveyor.generate(
-            f"Survey: {district['name']}\n"
-            f"Description: {district.get('description', '')}\n"
-            f"Grid region: {region_str} (each tile ≈ 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT})\n"
-            f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
-            f"Known buildings: {', '.join(district.get('buildings', []))}\n"
-            f"Already built in nearby areas:\n{existing}\n\n"
-            f"Map exact positions for EVERY structure, road, and open space.\n"
-            f"- Place roads (1-2 tiles wide) connecting buildings and district edges so they link to adjacent districts.\n"
-            f"- Leave open plazas/forum areas (3x3+ tiles) — they are NOT filled with buildings.\n"
-            f"- Space buildings realistically with gaps for streets between them."
-        )
-        await self._set_status("cartographus", "speaking")
-        await self._chat("cartographus", "survey", survey.get("commentary", "Survey complete."))
-        await self._set_status("cartographus", "idle")
+        # ─── Check survey cache (persists to disk) ───
+        if not hasattr(self, '_survey_cache'):
+            self._survey_cache = load_surveys_cache()
 
-        master_plan = survey.get("master_plan", [])
+        if district_key in self._survey_cache:
+            master_plan = self._survey_cache[district_key]
+            logger.info(f"Using cached survey for {district_key}: {len(master_plan)} structures")
+            await self._chat("cartographus", "survey", f"Using cached survey of {district_key}.")
+        else:
+            # ─── Cartographus surveys the specific district ───
+            await self._set_status("cartographus", "thinking")
+            survey = await self.surveyor.generate(
+                f"Survey: {district['name']}\n"
+                f"Description: {district.get('description', '')}\n"
+                f"Grid region: {region_str} (each tile ≈ 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT})\n"
+                f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
+                f"Known buildings: {', '.join(district.get('buildings', []))}\n"
+                f"Already built in nearby areas:\n{existing}\n\n"
+                f"Map exact positions for EVERY structure, road, and open space.\n"
+                f"- Place roads (1-2 tiles wide) connecting buildings and district edges so they link to adjacent districts.\n"
+                f"- Leave open plazas/forum areas (3x3+ tiles) — they are NOT filled with buildings.\n"
+                f"- Space buildings realistically with gaps for streets between them."
+            )
+            await self._set_status("cartographus", "speaking")
+            await self._chat("cartographus", "survey", survey.get("commentary", "Survey complete."))
+            await self._set_status("cartographus", "idle")
+
+            master_plan = survey.get("master_plan", [])
+            if master_plan:
+                self._survey_cache[district_key] = master_plan
+                save_surveys_cache(self._survey_cache)
+
         if not master_plan:
             return
 
@@ -163,6 +172,13 @@ class BuildEngine:
             hist_note = structure.get("historical_note", "")
 
             if not tiles:
+                continue
+
+            # Skip buildings already placed on the grid
+            first_tile = tiles[0]
+            existing_tile = self.world.get_tile(first_tile["x"], first_tile["y"])
+            if existing_tile and existing_tile.terrain != "empty":
+                logger.info(f"Skipping {name} — already built")
                 continue
 
             # ─── STEP 1: Historicus describes the building ───

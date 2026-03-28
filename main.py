@@ -8,7 +8,7 @@ from pathlib import Path
 import server.app as server_module
 from server.app import app, world, bus, broadcast, chat_history
 from orchestration.engine import BuildEngine
-from persistence import load_state, SAVE_FILE, DISTRICTS_CACHE
+from persistence import load_state, SAVE_FILE, DISTRICTS_CACHE, SURVEYS_CACHE
 from config import GRID_WIDTH, GRID_HEIGHT
 
 logging.basicConfig(
@@ -72,6 +72,8 @@ async def handle_reset():
         SAVE_FILE.unlink()
     if DISTRICTS_CACHE.exists():
         DISTRICTS_CACHE.unlink()
+    if SURVEYS_CACHE.exists():
+        SURVEYS_CACHE.unlink()
 
     # Send fresh world state to all clients
     await broadcast(world.to_dict())

@@ -10,6 +10,7 @@ logger = logging.getLogger("roma.persistence")
 
 SAVE_FILE = Path(__file__).parent / "roma_save.json"
 DISTRICTS_CACHE = Path(__file__).parent / "roma_districts_cache.json"
+SURVEYS_CACHE = Path(__file__).parent / "roma_surveys_cache.json"
 
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
@@ -51,6 +52,19 @@ def load_districts_cache() -> tuple[list[dict], str] | None:
     except Exception as e:
         logger.error(f"Failed to load districts cache: {e}")
     return None
+
+
+def save_surveys_cache(surveys: dict):
+    SURVEYS_CACHE.write_text(json.dumps(surveys, indent=2))
+
+
+def load_surveys_cache() -> dict:
+    if SURVEYS_CACHE.exists():
+        try:
+            return json.loads(SURVEYS_CACHE.read_text())
+        except Exception:
+            pass
+    return {}
 
 
 def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
