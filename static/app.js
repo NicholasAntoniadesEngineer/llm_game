@@ -68,10 +68,12 @@ function handleMessage(msg) {
 
         case "agent_status":
             setAgentStatus(msg.agent, msg.status);
+            if (msg.status !== "thinking") hideLoading();
             break;
 
         case "loading":
             showLoading(msg.agent, msg.message);
+            setAgentStatus(msg.agent, "thinking");
             break;
 
         case "master_plan":
