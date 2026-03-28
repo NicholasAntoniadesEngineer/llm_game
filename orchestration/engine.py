@@ -27,10 +27,10 @@ class BuildEngine:
         self.district_index = 0
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
-        # Core agents only — Historicus and Urbanista use sonnet for quality
+        # Core agents — only Urbanista uses sonnet (spatial reasoning critical)
         self.planner = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_PLAN, CLAUDE_MODEL)
         self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, CLAUDE_MODEL)
-        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, "sonnet")
+        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, CLAUDE_MODEL)
         self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, "sonnet")
 
     async def run(self):
