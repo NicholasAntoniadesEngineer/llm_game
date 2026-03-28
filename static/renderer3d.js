@@ -22,14 +22,28 @@ class WorldRenderer {
         // Camera
         this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 2000);
 
-        // Renderer
-        this.renderer3d = new THREE.WebGLRenderer({ antialias: true });
+        // Renderer — catch WebGL failures
+        let gl;
+        try {
+            this.renderer3d = new THREE.WebGLRenderer({ antialias: false, powerPreference: "default" });
+        } catch (e) {
+            container.innerHTML = '<p style="color:#ffd700;padding:40px;text-align:center;">WebGL unavailable. Try closing other browser tabs or restarting your browser.</p>';
+            return;
+        }
         this.renderer3d.setSize(container.clientWidth, container.clientHeight);
-        this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+        this.renderer3d.setPixelRatio(1);
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer3d.toneMappingExposure = 1.2;
+        // Recover from context loss
+        this.renderer3d.domElement.addEventListener("webglcontextlost", (e) => {
+            e.preventDefault();
+            console.warn("WebGL context lost — will restore");
+        });
+        this.renderer3d.domElement.addEventListener("webglcontextrestored", () => {
+            console.log("WebGL context restored");
+        });
         container.appendChild(this.renderer3d.domElement);
 
         // Mediterranean lighting
