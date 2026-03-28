@@ -100,6 +100,40 @@
         <div class="log-content" id="log-content"></div>
     </div>
 
+    <!-- Navigation controls -->
+    <div class="nav-controls" id="nav-controls">
+        <div class="nav-section">
+            <div class="nav-label">Move</div>
+            <div class="nav-grid">
+                <button class="nav-btn" onclick="renderer.panCamera(0,-1)" title="Forward (W)">W</button>
+                <button class="nav-btn" onclick="renderer.panCamera(-1,0)" title="Left (A)">A</button>
+                <button class="nav-btn" onclick="renderer.panCamera(0,1)" title="Back (S)">S</button>
+                <button class="nav-btn" onclick="renderer.panCamera(1,0)" title="Right (D)">D</button>
+            </div>
+        </div>
+        <div class="nav-section">
+            <div class="nav-label">Rotate</div>
+            <div class="nav-row">
+                <button class="nav-btn" onclick="renderer.orbitCamera(0.15, 0)" title="Rotate left (Q)">Q</button>
+                <button class="nav-btn" onclick="renderer.orbitCamera(-0.15, 0)" title="Rotate right (E)">E</button>
+            </div>
+        </div>
+        <div class="nav-section">
+            <div class="nav-label">Zoom</div>
+            <div class="nav-row">
+                <button class="nav-btn" onclick="renderer.zoomCamera(0.8)" title="Zoom in (R)">+</button>
+                <button class="nav-btn" onclick="renderer.zoomCamera(1.25)" title="Zoom out (F)">&minus;</button>
+            </div>
+        </div>
+        <div class="nav-section">
+            <div class="nav-label">Tilt</div>
+            <div class="nav-row">
+                <button class="nav-btn" onclick="renderer.orbitCamera(0, 0.1)" title="Tilt up">&#9650;</button>
+                <button class="nav-btn" onclick="renderer.orbitCamera(0, -0.1)" title="Tilt down">&#9660;</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Buttons -->
     <div class="bottom-buttons">
         <button class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>

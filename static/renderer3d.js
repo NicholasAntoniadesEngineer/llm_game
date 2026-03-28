@@ -70,17 +70,18 @@ class WorldRenderer {
             if (this.isDragging) {
                 const dx = e.clientX - this.prevMouse.x;
                 const dy = e.clientY - this.prevMouse.y;
-                if (this.dragButton === 2 || (this.dragButton === 0 && e.shiftKey)) {
-                    // Right-click drag or shift+left-click: pan
-                    const panSpeed = this.cameraDistance * 0.003;
+                if (this.dragButton === 2 || this.dragButton === 1 || (this.dragButton === 0 && e.shiftKey)) {
+                    // Right-click, middle-click, or shift+left: pan
+                    const panSpeed = this.cameraDistance * 0.002;
                     const cosA = Math.cos(this.cameraAngle);
                     const sinA = Math.sin(this.cameraAngle);
-                    this.cameraTarget.x += (-dx * sinA + dy * cosA) * panSpeed;
-                    this.cameraTarget.z += (dx * cosA + dy * sinA) * panSpeed;
+                    // Pan direction matches mouse direction
+                    this.cameraTarget.x -= (dx * sinA + dy * cosA) * panSpeed;
+                    this.cameraTarget.z += (dx * cosA - dy * sinA) * panSpeed;
                 } else {
                     // Left-click drag: orbit
-                    this.cameraAngle -= dx * 0.005;
-                    this.cameraPitch = Math.max(0.1, Math.min(1.3, this.cameraPitch + dy * 0.005));
+                    this.cameraAngle -= dx * 0.004;
+                    this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + dy * 0.004));
                 }
                 this.prevMouse = { x: e.clientX, y: e.clientY };
                 this._updateCamera();
@@ -89,21 +90,46 @@ class WorldRenderer {
         });
         el.addEventListener("mouseup", () => { this.isDragging = false; this.dragButton = -1; });
         el.addEventListener("wheel", e => {
-            this.cameraDistance = Math.max(10, Math.min(400, this.cameraDistance + e.deltaY * 0.2));
+            // Logarithmic zoom — feels even at any distance
+            const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
+            this.cameraDistance = Math.max(5, Math.min(500, this.cameraDistance * zoomFactor));
             this._updateCamera();
             e.preventDefault();
         }, { passive: false });
         el.addEventListener("click", e => this._onClick(e));
         el.addEventListener("contextmenu", e => e.preventDefault());
 
-        // WASD / arrow keys for panning
+        // WASD / arrow keys + QE for orbit
         this._keysDown = new Set();
         window.addEventListener("keydown", e => {
+            // Don't capture if user is typing in an input
+            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
             this._keysDown.add(e.key.toLowerCase());
         });
         window.addEventListener("keyup", e => {
             this._keysDown.delete(e.key.toLowerCase());
         });
+    }
+
+    // Public methods for UI buttons
+    panCamera(dirX, dirZ) {
+        const speed = this.cameraDistance * 0.05;
+        const cosA = Math.cos(this.cameraAngle);
+        const sinA = Math.sin(this.cameraAngle);
+        this.cameraTarget.x += (dirX * sinA + dirZ * cosA) * speed;
+        this.cameraTarget.z += (-dirX * cosA + dirZ * sinA) * speed;
+        this._updateCamera();
+    }
+
+    orbitCamera(dAngle, dPitch) {
+        this.cameraAngle += dAngle;
+        this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + dPitch));
+        this._updateCamera();
+    }
+
+    zoomCamera(factor) {
+        this.cameraDistance = Math.max(5, Math.min(500, this.cameraDistance * factor));
+        this._updateCamera();
     }
 
     _updateCamera() {
@@ -1048,9 +1074,9 @@ class WorldRenderer {
         requestAnimationFrame(() => this._animate());
         const now = Date.now();
 
-        // WASD / arrow key panning
+        // Keyboard controls: WASD/arrows pan, QE orbit, RF zoom
         if (this._keysDown && this._keysDown.size > 0) {
-            const speed = this.cameraDistance * 0.015;
+            const panSpeed = this.cameraDistance * 0.008;
             const cosA = Math.cos(this.cameraAngle);
             const sinA = Math.sin(this.cameraAngle);
             let fx = 0, fz = 0;
@@ -1058,11 +1084,14 @@ class WorldRenderer {
             if (this._keysDown.has("s") || this._keysDown.has("arrowdown"))  { fx -= cosA; fz -= sinA; }
             if (this._keysDown.has("a") || this._keysDown.has("arrowleft"))  { fx += sinA; fz -= cosA; }
             if (this._keysDown.has("d") || this._keysDown.has("arrowright")) { fx -= sinA; fz += cosA; }
-            if (fx || fz) {
-                this.cameraTarget.x += fx * speed;
-                this.cameraTarget.z += fz * speed;
-                this._updateCamera();
-            }
+            if (fx || fz) { this.cameraTarget.x += fx * panSpeed; this.cameraTarget.z += fz * panSpeed; }
+            // Q/E rotate orbit
+            if (this._keysDown.has("q")) this.cameraAngle += 0.02;
+            if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
+            // R/F zoom
+            if (this._keysDown.has("r")) this.cameraDistance = Math.max(5, this.cameraDistance * 0.97);
+            if (this._keysDown.has("f")) this.cameraDistance = Math.min(500, this.cameraDistance * 1.03);
+            this._updateCamera();
         }
         this.buildingGroups.forEach(group => {
             if (group.userData.animStart) {
