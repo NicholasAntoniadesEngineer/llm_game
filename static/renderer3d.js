@@ -17,10 +17,10 @@ class WorldRenderer {
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x7EC8E3);
-        this.scene.fog = new THREE.Fog(0x7EC8E3, 800, 2500);
+        this.scene.fog = new THREE.Fog(0x7EC8E3, 1500, 4000);
 
         // Camera
-        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 2000);
+        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 5000);
 
         // Renderer — catch WebGL failures
         try {
@@ -109,7 +109,7 @@ class WorldRenderer {
         el.addEventListener("wheel", e => {
             // Logarithmic zoom — feels even at any distance
             const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
-            this.cameraDistance = Math.max(5, Math.min(500, this.cameraDistance * zoomFactor));
+            this.cameraDistance = Math.max(5, Math.min(1500, this.cameraDistance * zoomFactor));
             this._updateCamera();
             e.preventDefault();
         }, { passive: false });
@@ -150,7 +150,7 @@ class WorldRenderer {
 
     zoomCamera(factor) {
         if (this._failed) return;
-        this.cameraDistance = Math.max(5, Math.min(500, this.cameraDistance * factor));
+        this.cameraDistance = Math.max(5, Math.min(1500, this.cameraDistance * factor));
         this._updateCamera();
     }
 
