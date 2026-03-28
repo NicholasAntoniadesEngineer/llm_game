@@ -193,20 +193,39 @@ class BuildEngine:
             await self._set_status("historicus", "idle")
 
             # ─── WAVE 2: Urbanista sculpts using historian's description ───
+            # Calculate actual footprint for multi-tile buildings
+            xs = [t["x"] for t in tiles]
+            ys = [t["y"] for t in tiles]
+            tile_w = max(xs) - min(xs) + 1
+            tile_d = max(ys) - min(ys) + 1
+            footprint_w = round(tile_w * 0.9, 2)  # world units
+            footprint_d = round(tile_d * 0.9, 2)
+            anchor_x, anchor_y = min(xs), min(ys)
+
+            # Merge historian's description for maximum context
+            physical_desc = hist_desc
+            hist_detail = hist_result.get("historical_note", "")
+            if hist_detail:
+                physical_desc += f"\n\nArchaeological detail: {hist_detail}"
+
             await self._set_status("urbanista", "thinking")
             arch_result = await self.urbanista.generate(
-                f"Sculpt: {name}\nType: {btype}\n"
-                f"Tile positions: {json.dumps(tiles)}\n"
-                f"HISTORIAN'S PHYSICAL DESCRIPTION:\n{hist_desc}\n"
-                f"Detail: {hist_result.get('historical_note', '')}\n"
-                f"Surveyor: {desc}\n"
-                f"Use 15-40 shapes. Build bottom-up from y=0. NO floating shapes."
+                f"Design: {name}\nType: {btype}\n"
+                f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
+                f"Anchor tile: ({anchor_x}, {anchor_y})\n"
+                f"All tiles: {json.dumps(tiles)}\n\n"
+                f"HISTORIAN'S PHYSICAL DESCRIPTION (match this closely):\n{physical_desc}\n\n"
+                f"Surveyor context: {desc}\n\n"
+                f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
+                f"- Column radius should be ~{round(footprint_w / 60, 3)} for proportional columns\n"
+                f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"
+                f"- Set spec.anchor on EVERY tile to {{\"x\":{anchor_x},\"y\":{anchor_y}}}"
             )
             await self._set_status("urbanista", "speaking")
             await self._chat("urbanista", "design", arch_result.get("commentary", "Design ready."))
             await self._set_status("urbanista", "idle")
 
-            # Place tiles
+            # Place tiles — ensure multi-tile buildings have anchors
             final_tiles = arch_result.get("tiles", [])
             if not final_tiles:
                 terrain = btype if btype in ("road", "water", "garden", "forum", "grass", "wall") else "building"
@@ -215,6 +234,14 @@ class BuildEngine:
                      "building_name": name, "building_type": btype, "description": desc}
                     for t in tiles
                 ]
+
+            # Inject anchors for multi-tile buildings if AI didn't set them
+            if len(tiles) > 1:
+                for td in final_tiles:
+                    if not td.get("spec"):
+                        td["spec"] = {}
+                    if not td["spec"].get("anchor"):
+                        td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
 
             placed = []
             for td in final_tiles:

@@ -442,13 +442,13 @@ class WorldRenderer {
         const colH = comp.height || 0.7;
         const style = comp.style || "ionic";
         const color = comp.color || "#e8e0d0";
-        const r = comp.radius || 0.03;
+        const r = comp.radius || Math.max(0.015, w / (numCols * 5));  // scale radius to footprint
         const peripteral = comp.peripteral !== false;
 
-        const baseH = style === "doric" ? 0 : 0.03;
-        const capH = style === "corinthian" ? 0.06 : 0.04;
+        const baseH = style === "doric" ? 0 : r * 1.0;  // base proportional to column
+        const capH = style === "corinthian" ? r * 2.0 : r * 1.3;
         const capW = r * (style === "corinthian" ? 3.0 : 2.5);
-        const inset = r + 0.03;
+        const inset = r + w * 0.03;  // scale inset to footprint
 
         // Calculate column positions
         const positions = [];
@@ -470,9 +470,9 @@ class WorldRenderer {
         }
 
         for (const pos of positions) {
-            // Shaft — slight taper (entasis)
+            // Shaft — slight taper (entasis): top = 5/6 of bottom per Vitruvius
             const shaft = new THREE.Mesh(
-                new THREE.CylinderGeometry(r, r + 0.005, colH, 8),
+                new THREE.CylinderGeometry(r * 0.83, r, colH, Math.max(8, Math.round(r * 200))),
                 this._mat(color, 0.3)
             );
             shaft.position.set(pos.x, baseY + baseH + colH / 2, pos.z);
@@ -518,7 +518,8 @@ class WorldRenderer {
 
     // Triangular gabled roof
     _buildPediment(group, comp, baseY, w, d) {
-        const peakH = comp.height || w * 0.25;
+        // Vitruvian pediment: rise = 1/5 of width (~11 degrees)
+        const peakH = comp.height || Math.min(w * 0.2, 0.2);
         const color = comp.color || "#d4a373";
         const hw = w / 2, hd = d / 2;
 
@@ -590,9 +591,10 @@ class WorldRenderer {
             wall.position.y = baseY + s * storyH + storyH / 2;
             group.add(wall);
 
-            // Windows on front and back
-            const numWin = comp.windows || Math.max(1, Math.floor(sw / 0.18));
-            const winW = 0.05, winH = storyH * 0.35;
+            // Windows on front and back — scale to footprint
+            const winW = Math.max(0.03, sw * 0.04);
+            const winH = storyH * 0.35;
+            const numWin = comp.windows || Math.max(1, Math.floor(sw / (winW * 3.5)));
             const winSpacing = sw / (numWin + 1);
 
             for (let wi = 0; wi < numWin; wi++) {
@@ -628,8 +630,8 @@ class WorldRenderer {
         const numArches = comp.arches || 3;
         const totalH = comp.height || 0.6;
         const color = comp.color || "#c8b88a";
-        const pillarW = 0.06;
         const archSpacing = w / numArches;
+        const pillarW = Math.max(0.04, archSpacing * 0.2);  // pier = 1/5 of arch span (Vitruvius: 1/4)
         const archR = Math.min((archSpacing - pillarW) / 2 * 0.85, totalH * 0.45);
         const pillarH = Math.max(0.1, totalH - archR);
 
@@ -1003,7 +1005,9 @@ class WorldRenderer {
         if (hits.length > 0) {
             const tile = hits[0].object.userData.tile;
             if (tile && tile.terrain !== "empty") {
-                const key = `${tile.x},${tile.y}`;
+                // Check for multi-tile anchor first
+                const anchor = tile.spec && tile.spec.anchor;
+                const key = anchor ? `${anchor.x},${anchor.y}` : `${tile.x},${tile.y}`;
                 const group = this.buildingGroups.get(key);
                 if (group) {
                     this.hoveredGroup = group;
