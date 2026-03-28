@@ -4,16 +4,15 @@ import asyncio
 import json
 import logging
 
-from config import CLAUDE_MODEL
-
 logger = logging.getLogger("roma.agents")
 
 
 class BaseAgent:
-    def __init__(self, role: str, display_name: str, system_prompt: str):
+    def __init__(self, role: str, display_name: str, system_prompt: str, model: str = "sonnet"):
         self.role = role
         self.display_name = display_name
         self.system_prompt = system_prompt
+        self.model = model
 
     async def generate(self, instruction: str) -> dict:
         """Call claude CLI and return parsed JSON response."""
@@ -25,7 +24,7 @@ class BaseAgent:
                 "--print",
                 "--system-prompt", self.system_prompt,
                 "--output-format", "text",
-                "--model", CLAUDE_MODEL,
+                "--model", self.model,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -51,18 +50,15 @@ class BaseAgent:
 
     def _parse_json(self, raw: str) -> dict:
         """Extract JSON from response, handling markdown fences."""
-        # Strip markdown code fences if present
         text = raw.strip()
         if text.startswith("```"):
             lines = text.split("\n")
-            # Remove first and last fence lines
             lines = [l for l in lines if not l.strip().startswith("```")]
             text = "\n".join(lines).strip()
 
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            # Try to find JSON object in the text
             start = text.find("{")
             end = text.rfind("}") + 1
             if start >= 0 and end > start:

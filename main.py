@@ -3,11 +3,14 @@
 import asyncio
 import logging
 import uvicorn
+from pathlib import Path
 
-from server.app import app, world, bus, broadcast
+import server.app as server_module
+from server.app import app, world, bus, broadcast, chat_history
 from orchestration.engine import BuildEngine
+from persistence import load_state, SAVE_FILE
+from config import GRID_WIDTH, GRID_HEIGHT
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(message)s",
@@ -19,14 +22,64 @@ BANNER = """
 ║                                                  ║
 ║              R O M A   A E T E R N A             ║
 ║                                                  ║
-║     Five AI Agents Build Ancient Rome — Live      ║
+║     Six AI Agents Build Ancient Rome — Live       ║
 ║                                                  ║
 ║          Open: http://localhost:8000              ║
 ║                                                  ║
 ╚══════════════════════════════════════════════════╝
 """
 
-engine = BuildEngine(world, bus, broadcast)
+engine = BuildEngine(world, bus, broadcast, chat_history)
+
+# Load saved state if available
+saved = load_state(world)
+if saved:
+    loaded_chat, district_index, districts = saved
+    chat_history.extend(loaded_chat)
+    engine.district_index = district_index
+    engine.districts = districts
+    logging.info(f"Resumed: district #{district_index}, {len(districts)} districts, {len(loaded_chat)} messages")
+else:
+    logging.info("Starting fresh")
+
+
+async def handle_reset():
+    """Reset world, clear save, restart engine."""
+    # Stop current engine
+    engine.running = False
+    await asyncio.sleep(0.5)
+
+    # Kill any running claude subprocesses
+    import subprocess
+    subprocess.run(["pkill", "-f", "claude.*--print"], capture_output=True)
+
+    # Clear world state
+    from world.state import WorldState
+    new_world = WorldState(GRID_WIDTH, GRID_HEIGHT)
+    world.grid = new_world.grid
+    world.turn = 0
+    world.current_period = ""
+    world.current_year = -44
+    world.build_log = []
+
+    # Clear chat and engine state
+    chat_history.clear()
+    engine.districts = []
+    engine.district_index = 0
+
+    # Delete save file
+    if SAVE_FILE.exists():
+        SAVE_FILE.unlink()
+
+    # Send fresh world state to all clients
+    await broadcast(world.to_dict())
+
+    # Restart engine
+    logging.info("World reset — restarting engine")
+    asyncio.create_task(engine.run())
+
+
+server_module.reset_callback = handle_reset
 
 
 @app.on_event("startup")

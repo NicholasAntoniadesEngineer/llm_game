@@ -53,7 +53,8 @@ const TERRAIN_ICONS = {
 };
 
 const AGENT_COLORS = {
-    praefectus: "#ffd700",
+    imperator: "#ffd700",
+    cartographus: "#e67e22",
     urbanista: "#4a9eff",
     historicus: "#2ecc71",
     faber: "#ff8c00",
@@ -61,9 +62,10 @@ const AGENT_COLORS = {
 };
 
 const AGENT_NAMES = {
-    praefectus: "Praefectus",
-    urbanista: "Urbanista",
-    historicus: "Historicus",
-    faber: "Faber",
-    civis: "Civis",
+    imperator: "Imperator (Director)",
+    cartographus: "Cartographus (Surveyor)",
+    urbanista: "Urbanista (Architect)",
+    historicus: "Historicus (Fact Check)",
+    faber: "Faber (Builder)",
+    civis: "Civis (Culture)",
 };

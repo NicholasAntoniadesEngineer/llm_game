@@ -19,6 +19,10 @@ logger = logging.getLogger("roma.server")
 world = WorldState(GRID_WIDTH, GRID_HEIGHT)
 bus = MessageBus()
 ws_connections: list[WebSocket] = []
+chat_history: list[dict] = []
+
+# Reset callback — set by main.py after engine is created
+reset_callback = None
 
 app = FastAPI(title="Roma Aeterna")
 
@@ -37,26 +41,29 @@ async def websocket_endpoint(websocket: WebSocket):
     ws_connections.append(websocket)
     logger.info(f"Client connected ({len(ws_connections)} total)")
 
-    # Send full world state on connect
     try:
         await websocket.send_json(world.to_dict())
+        for msg in chat_history:
+            await websocket.send_json(msg)
     except Exception:
-        ws_connections.remove(websocket)
+        if websocket in ws_connections:
+            ws_connections.remove(websocket)
         return
 
-    # Listen for client messages (tile info requests)
     try:
         while True:
             data = await websocket.receive_json()
             if data.get("type") == "tile_info":
                 tile = world.get_tile(data.get("x", 0), data.get("y", 0))
                 if tile:
-                    await websocket.send_json({
-                        "type": "tile_detail",
-                        "tile": tile.to_dict(),
-                    })
+                    await websocket.send_json({"type": "tile_detail", "tile": tile.to_dict()})
+            elif data.get("type") == "reset":
+                logger.info("Reset requested by client")
+                if reset_callback:
+                    await reset_callback()
     except WebSocketDisconnect:
-        ws_connections.remove(websocket)
+        if websocket in ws_connections:
+            ws_connections.remove(websocket)
         logger.info(f"Client disconnected ({len(ws_connections)} total)")
     except Exception:
         if websocket in ws_connections:
@@ -64,7 +71,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def broadcast(message: dict):
-    """Send a message to all connected WebSocket clients."""
+    if message.get("type") in ("chat", "phase", "timeline", "master_plan", "map_description", "map_image"):
+        chat_history.append(message)
+
     dead = []
     for ws in ws_connections:
         try:

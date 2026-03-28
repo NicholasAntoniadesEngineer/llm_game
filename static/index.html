@@ -5,17 +5,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Roma Aeterna</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
-    <!-- Header -->
     <div class="header">
         <div>
             <h1>Roma Aeterna</h1>
-            <div class="subtitle">Five AI agents build Ancient Rome — in real time</div>
+            <div class="subtitle">Six AI agents build Ancient Rome — in real time</div>
+        </div>
+        <div class="agent-status-bar" id="agent-status-bar">
+            <div class="agent-status" id="status-imperator" data-agent="imperator">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Imperator</span>
+                <span class="agent-purpose">(Director)</span>
+                <span class="agent-state">idle</span>
+            </div>
+            <div class="agent-status" id="status-cartographus" data-agent="cartographus">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Cartographus</span>
+                <span class="agent-purpose">(Surveyor)</span>
+                <span class="agent-state">idle</span>
+            </div>
+            <div class="agent-status" id="status-urbanista" data-agent="urbanista">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Urbanista</span>
+                <span class="agent-purpose">(Architect)</span>
+                <span class="agent-state">idle</span>
+            </div>
+            <div class="agent-status" id="status-historicus" data-agent="historicus">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Historicus</span>
+                <span class="agent-purpose">(Fact Check)</span>
+                <span class="agent-state">idle</span>
+            </div>
+            <div class="agent-status" id="status-faber" data-agent="faber">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Faber</span>
+                <span class="agent-purpose">(Builder)</span>
+                <span class="agent-state">idle</span>
+            </div>
+            <div class="agent-status" id="status-civis" data-agent="civis">
+                <span class="agent-dot"></span>
+                <span class="agent-label">Civis</span>
+                <span class="agent-purpose">(Culture)</span>
+                <span class="agent-state">idle</span>
+            </div>
         </div>
     </div>
 
-    <!-- Timeline bar -->
     <div class="timeline">
         <span>Period: <span class="period" id="timeline-period">—</span></span>
         <span>Year: <span class="year" id="timeline-year">—</span></span>
@@ -23,35 +60,55 @@
         <span class="status" id="timeline-status"></span>
     </div>
 
-    <!-- Main layout -->
     <div class="main">
-        <!-- Map panel -->
-        <div class="map-panel">
-            <canvas id="world-canvas"></canvas>
-        </div>
-
-        <!-- Chat panel -->
+        <div class="map-panel" id="world-container"></div>
         <div class="chat-panel">
             <div class="chat-header">Agent Discussion</div>
-            <div class="chat-messages" id="chat-messages">
-                <!-- Messages appear here -->
-            </div>
+            <div class="chat-messages" id="chat-messages"></div>
             <div class="typing-indicator" id="typing-indicator"></div>
         </div>
     </div>
 
-    <!-- Tile detail popup -->
     <div class="tile-detail" id="tile-detail"></div>
 
-    <!-- Tooltip -->
-    <div id="tooltip"></div>
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-agent" id="loading-agent"></div>
+        <div class="loading-message" id="loading-message">Initializing...</div>
+    </div>
 
-    <!-- Connection status -->
+    <!-- Historical map overlay -->
+    <div class="map-overlay" id="map-overlay">
+        <div class="map-overlay-header">
+            <h3>Historical Reference Map</h3>
+            <button class="close-btn" onclick="closeMapOverlay()">&times;</button>
+        </div>
+        <div class="map-overlay-content" id="map-overlay-content">
+            <p>The Cartographus is surveying...</p>
+        </div>
+    </div>
+
+    <!-- Log viewer overlay -->
+    <div class="log-overlay" id="log-overlay">
+        <div class="map-overlay-header">
+            <h3>Agent Logs</h3>
+            <button class="close-btn" onclick="closeLogOverlay()">&times;</button>
+        </div>
+        <div class="log-content" id="log-content"></div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="bottom-buttons">
+        <button class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
+        <button class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
+        <button class="map-btn reset-btn" id="reset-btn" onclick="resetWorld()" title="Reset and rebuild from scratch">RESET</button>
+    </div>
+    <div id="tooltip"></div>
     <div class="connection-status" id="connection-status">Connecting...</div>
 
-    <!-- Scripts -->
     <script src="/static/tiles.js"></script>
-    <script src="/static/renderer.js"></script>
+    <script src="/static/renderer3d.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

@@ -14,14 +14,19 @@ class Tile:
     period: Optional[str] = None
     description: Optional[str] = None
     historical_note: Optional[str] = None
-    color: str = "#c2b280"  # default sandy/dirt
+    color: str = "#c2b280"
     icon: str = ""
     placed_by: Optional[str] = None
     turn: int = 0
-    scene: Optional[str] = None  # citizen flavor text
+    scene: Optional[str] = None
+    spec: Optional[dict] = None  # AI-generated building spec (dimensions, features, colors)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = {}
+        for k, v in self.__dict__.items():
+            if v is not None or k in ("x", "y", "terrain", "color", "icon", "turn"):
+                d[k] = v
+        return d
 
 
 # Default colors for terrain types

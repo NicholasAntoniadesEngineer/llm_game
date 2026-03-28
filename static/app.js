@@ -41,6 +41,7 @@ function handleMessage(msg) {
         case "tile_update":
             renderer.updateTiles(msg.tiles);
             if (msg.period) updateTimeline(msg.period, msg.year);
+            hideLoading();
             break;
 
         case "chat":
@@ -54,6 +55,7 @@ function handleMessage(msg) {
         case "phase":
             appendPhaseAnnouncement(msg);
             updateDistrict(msg.district);
+            hideLoading();
             break;
 
         case "timeline":
@@ -64,9 +66,53 @@ function handleMessage(msg) {
             showTileDetail(msg.tile);
             break;
 
+        case "agent_status":
+            setAgentStatus(msg.agent, msg.status);
+            break;
+
+        case "loading":
+            showLoading(msg.agent, msg.message);
+            break;
+
+        case "master_plan":
+            updateMasterPlan(msg.plan);
+            break;
+
+        case "map_description":
+            setMapDescription(msg.description);
+            break;
+
+        case "map_image":
+            setMapImage(msg.url, msg.source);
+            break;
+
         case "complete":
             appendSystemMessage("Roma Aeterna is complete. Glory to the Empire!");
+            resetAllAgentStatus();
             break;
+    }
+}
+
+// --- Agent Status ---
+
+function setAgentStatus(agent, status) {
+    const el = document.getElementById(`status-${agent}`);
+    if (!el) return;
+
+    // Remove all state classes
+    el.classList.remove("thinking", "speaking", "idle");
+    el.classList.add(status);
+
+    const stateEl = el.querySelector(".agent-state");
+    if (stateEl) {
+        stateEl.textContent = status === "thinking" ? "thinking..." :
+                              status === "speaking" ? "speaking" : "idle";
+    }
+}
+
+function resetAllAgentStatus() {
+    for (const agent of ["imperator", "cartographus", "urbanista", "historicus", "faber", "civis"]) {
+        setAgentStatus(agent, "idle");
     }
 }
 
@@ -93,6 +139,9 @@ function appendChat(msg) {
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
     hideTyping();
+
+    // Log it
+    addLog(msg.sender, msg.msg_type || "chat", msg.content);
 }
 
 function appendPhaseAnnouncement(msg) {
@@ -196,6 +245,194 @@ function setConnectionStatus(connected) {
     }
 }
 
+// --- Reset ---
+
+function resetWorld() {
+    if (!confirm("Reset the world and rebuild from scratch?")) return;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "reset" }));
+    }
+    // Clear local state
+    document.getElementById("chat-messages").innerHTML = "";
+    currentMasterPlan = null;
+    mapDescription = null;
+    mapImageUrl = null;
+    agentLogs.length = 0;
+    showLoading("imperator", "Resetting world...");
+}
+
+// --- Loading overlay ---
+
+function showLoading(agent, message) {
+    const overlay = document.getElementById("loading-overlay");
+    overlay.classList.add("visible");
+    document.getElementById("loading-agent").textContent = (AGENT_NAMES[agent] || agent).toUpperCase();
+    document.getElementById("loading-message").textContent = message || "Working...";
+}
+
+function hideLoading() {
+    document.getElementById("loading-overlay").classList.remove("visible");
+}
+
+// --- Map overlay ---
+
+let currentMasterPlan = null;
+
+function toggleMapOverlay() {
+    const el = document.getElementById("map-overlay");
+    el.classList.toggle("visible");
+}
+
+function closeMapOverlay() {
+    document.getElementById("map-overlay").classList.remove("visible");
+}
+
+let mapDescription = null;
+let mapImageUrl = null;
+let mapImageSource = null;
+
+function setMapDescription(desc) {
+    mapDescription = desc;
+    updateMapContent();
+}
+
+function setMapImage(url, source) {
+    mapImageUrl = url;
+    mapImageSource = source || "";
+    updateMapContent();
+}
+
+function updateMasterPlan(plan) {
+    currentMasterPlan = plan;
+    updateMapContent();
+}
+
+function updateMapContent() {
+    const content = document.getElementById("map-overlay-content");
+    let html = "";
+
+    // Real historical map image from web search
+    if (mapImageUrl) {
+        html += `<div style="text-align:center;margin-bottom:16px;">
+            <img src="${escapeHtml(mapImageUrl)}"
+                 style="width:100%;max-height:300px;object-fit:contain;border-radius:6px;border:1px solid #444;"
+                 alt="Historical map" onerror="this.parentElement.style.display='none'">
+            <p style="color:#666;font-size:0.7rem;margin-top:4px;">Source: ${escapeHtml(mapImageSource)}</p>
+        </div>`;
+    }
+
+    // Cartographus's map description
+    if (mapDescription) {
+        html += `<div style="background:#1a2030;padding:12px;border-radius:6px;margin-bottom:16px;border:1px solid #e67e22;">
+            <h4 style="color:#e67e22;margin-bottom:8px;font-size:0.85rem;">Cartographus's Survey Map</h4>
+            <p style="color:#ddd;font-size:0.82rem;line-height:1.6;">${escapeHtml(mapDescription)}</p>
+        </div>`;
+    }
+
+    // Mini grid map — render district positions as colored blocks
+    if (currentMasterPlan && currentMasterPlan.length > 0) {
+        html += `<canvas id="mini-map" width="200" height="200" style="border:1px solid #333;border-radius:4px;margin-bottom:12px;"></canvas>`;
+        html += `<p style="color:#e67e22;margin-bottom:8px;">${currentMasterPlan.length} structures planned:</p>`;
+        for (const item of currentMasterPlan) {
+            html += `<div class="plan-item">
+                <span class="plan-name">${escapeHtml(item.name || "?")}</span>
+                <span class="plan-type">${escapeHtml(item.building_type || "")}</span>
+                <span style="color:#666;font-size:0.7rem;"> (${(item.tiles || []).length} tiles)</span>
+                <div class="plan-desc">${escapeHtml(item.description || "")}</div>
+                ${item.historical_note ? `<div class="plan-note">${escapeHtml(item.historical_note)}</div>` : ""}
+            </div>`;
+        }
+    } else {
+        html += "<p>The Cartographus is surveying...</p>";
+    }
+
+    content.innerHTML = html;
+
+    // Draw mini map
+    if (currentMasterPlan) {
+        setTimeout(() => drawMiniMap(), 50);
+    }
+}
+
+function drawMiniMap() {
+    const canvas = document.getElementById("mini-map");
+    if (!canvas || !currentMasterPlan) return;
+    const ctx = canvas.getContext("2d");
+    const scale = 5;
+
+    // Background
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(0, 0, 200, 200);
+
+    // Grid
+    ctx.strokeStyle = "#2a2a4a";
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 40; i++) {
+        ctx.beginPath(); ctx.moveTo(i * scale, 0); ctx.lineTo(i * scale, 200); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, i * scale); ctx.lineTo(200, i * scale); ctx.stroke();
+    }
+
+    // Plot each structure
+    const typeColors = {
+        temple: "#ffd700", basilica: "#deb887", road: "#808080", forum: "#d4c67a",
+        insula: "#cd853f", domus: "#d2691e", market: "#deb887", water: "#3498db",
+        garden: "#27ae60", wall: "#5d4037", gate: "#8b7355", monument: "#e8e8e8",
+        aqueduct: "#87ceeb", thermae: "#b0e0e6", circus: "#f4a460", amphitheater: "#daa520",
+        bridge: "#a0a0a0", taberna: "#b8860b", warehouse: "#8b8378", grass: "#5a9a4a"
+    };
+
+    for (const item of currentMasterPlan) {
+        const color = typeColors[item.building_type] || "#d4a373";
+        ctx.fillStyle = color;
+        for (const t of (item.tiles || [])) {
+            ctx.fillRect(t.x * scale, t.y * scale, scale, scale);
+        }
+        // Label
+        if (item.tiles && item.tiles.length > 0) {
+            const t = item.tiles[0];
+            ctx.fillStyle = "#fff";
+            ctx.font = "4px sans-serif";
+            ctx.fillText(item.name.substring(0, 10), t.x * scale + 1, t.y * scale + 4);
+        }
+    }
+}
+
+// --- Log viewer ---
+
+const agentLogs = [];
+
+function addLog(sender, type, content) {
+    const time = new Date().toLocaleTimeString();
+    agentLogs.push({ time, sender, type, content });
+    // Keep last 200
+    if (agentLogs.length > 200) agentLogs.shift();
+    updateLogView();
+}
+
+function updateLogView() {
+    const el = document.getElementById("log-content");
+    if (!el || !document.getElementById("log-overlay").classList.contains("visible")) return;
+    el.innerHTML = agentLogs.map(l =>
+        `<div class="log-entry">
+            <span style="color:#666">${l.time}</span>
+            <span style="color:${AGENT_COLORS[l.sender] || '#888'}">[${l.sender}]</span>
+            <span style="color:#555">(${l.type})</span>
+            <span style="color:#aaa">${escapeHtml(l.content.substring(0, 200))}</span>
+        </div>`
+    ).join("");
+    el.scrollTop = el.scrollHeight;
+}
+
+function toggleLogOverlay() {
+    const el = document.getElementById("log-overlay");
+    el.classList.toggle("visible");
+    if (el.classList.contains("visible")) updateLogView();
+}
+
+function closeLogOverlay() {
+    document.getElementById("log-overlay").classList.remove("visible");
+}
+
 // --- Utility ---
 
 function escapeHtml(text) {
@@ -207,11 +444,11 @@ function escapeHtml(text) {
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
-    const canvas = document.getElementById("world-canvas");
-    renderer = new WorldRenderer(canvas);
+    const container = document.getElementById("world-container");
+    renderer = new WorldRenderer(container);
 
     // Tile click -> request detail from server
-    canvas.addEventListener("tileclick", (e) => {
+    renderer.renderer3d.domElement.addEventListener("tileclick", (e) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
                 type: "tile_info",
