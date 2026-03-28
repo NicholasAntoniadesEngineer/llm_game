@@ -151,6 +151,7 @@ class BuildEngine:
 
             master_plan = survey.get("master_plan", [])
             if master_plan:
+                master_plan = self._enforce_spacing(master_plan)
                 self._survey_cache[district_key] = master_plan
                 save_surveys_cache(self._survey_cache)
 
@@ -309,6 +310,65 @@ class BuildEngine:
             save_state(self.world, self.chat_history, self.district_index, self.districts)
 
             await asyncio.sleep(STEP_DELAY)
+
+    def _enforce_spacing(self, master_plan, min_gap=1):
+        """Shift buildings that touch or overlap to create gaps between them."""
+        if not master_plan:
+            return master_plan
+
+        # Collect all occupied tiles per building (as sets for fast lookup)
+        bldg_tiles = []
+        for struct in master_plan:
+            tiles = struct.get("tiles", [])
+            tile_set = set()
+            for t in tiles:
+                tile_set.add((t["x"], t["y"]))
+            bldg_tiles.append(tile_set)
+
+        # Build a buffer zone around each building (tiles within min_gap)
+        def get_buffer(tile_set):
+            buf = set()
+            for (x, y) in tile_set:
+                for dx in range(-min_gap, min_gap + 1):
+                    for dy in range(-min_gap, min_gap + 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        buf.add((x + dx, y + dy))
+            return buf - tile_set  # exclude the building's own tiles
+
+        # Check each building against all previous ones and shift if needed
+        for i in range(1, len(master_plan)):
+            occupied = set()
+            for j in range(i):
+                occupied |= bldg_tiles[j]
+                occupied |= get_buffer(bldg_tiles[j])
+
+            # Check if current building overlaps with occupied + buffer zone
+            overlap = bldg_tiles[i] & occupied
+            if not overlap:
+                continue
+
+            # Find shift direction — try right, down, right+down
+            tiles = master_plan[i].get("tiles", [])
+            best_shift = None
+            for sx, sy in [(min_gap + 1, 0), (0, min_gap + 1), (min_gap + 1, min_gap + 1),
+                           (-(min_gap + 1), 0), (0, -(min_gap + 1))]:
+                shifted = set()
+                for t in tiles:
+                    shifted.add((t["x"] + sx, t["y"] + sy))
+                if not (shifted & occupied):
+                    best_shift = (sx, sy)
+                    break
+
+            if best_shift:
+                sx, sy = best_shift
+                logger.info(f"Spacing fix: shifting '{master_plan[i].get('name')}' by ({sx},{sy})")
+                for t in tiles:
+                    t["x"] += sx
+                    t["y"] += sy
+                bldg_tiles[i] = set((t["x"], t["y"]) for t in tiles)
+
+        return master_plan
 
     async def _find_map_image(self):
         """Provide a known reliable map of ancient Rome."""
