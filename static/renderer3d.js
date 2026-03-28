@@ -1,6 +1,7 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
-// Falls back to raw AI-sculpted shapes or type-specific defaults
+
+const TILE_SIZE = 4; // world units per tile — controls overall scale of everything
 
 class WorldRenderer {
     constructor(container) {
@@ -16,10 +17,10 @@ class WorldRenderer {
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x7EC8E3);
-        this.scene.fog = new THREE.Fog(0x7EC8E3, 70, 140);
+        this.scene.fog = new THREE.Fog(0x7EC8E3, 150, 500);
 
         // Camera
-        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 200);
+        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 800);
 
         // Renderer
         this.renderer3d = new THREE.WebGLRenderer({ antialias: true });
@@ -34,19 +35,19 @@ class WorldRenderer {
         // Mediterranean lighting
         this.scene.add(new THREE.AmbientLight(0xffeedd, 0.45));
         const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
-        sun.position.set(30, 40, 20);
+        sun.position.set(120, 160, 80);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.mapSize.set(4096, 4096);
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 120; sc.left = -50; sc.right = 50; sc.top = 50; sc.bottom = -50;
+        sc.near = 1; sc.far = 500; sc.left = -200; sc.right = 200; sc.top = 200; sc.bottom = -200;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x87ceeb, 0x556b2f, 0.25));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
-        this.cameraDistance = 55;
-        this.cameraTarget = new THREE.Vector3(20, 0, 20);
+        this.cameraDistance = 200;
+        this.cameraTarget = new THREE.Vector3(80, 0, 80);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
 
@@ -88,7 +89,7 @@ class WorldRenderer {
         });
         el.addEventListener("mouseup", () => { this.isDragging = false; this.dragButton = -1; });
         el.addEventListener("wheel", e => {
-            this.cameraDistance = Math.max(8, Math.min(100, this.cameraDistance + e.deltaY * 0.05));
+            this.cameraDistance = Math.max(10, Math.min(400, this.cameraDistance + e.deltaY * 0.2));
             this._updateCamera();
             e.preventDefault();
         }, { passive: false });
@@ -139,22 +140,25 @@ class WorldRenderer {
         this.width = worldState.width;
         this.height = worldState.height;
         this.grid = worldState.grid;
-        this.cameraTarget.set(this.width / 2, 0, this.height / 2);
+        const S = TILE_SIZE;
+        this.cameraTarget.set(this.width * S / 2, 0, this.height * S / 2);
         this._updateCamera();
 
         // Ground
+        const gw = this.width * S + 10, gh = this.height * S + 10;
         const ground = new THREE.Mesh(
-            new THREE.PlaneGeometry(this.width + 10, this.height + 10),
+            new THREE.PlaneGeometry(gw, gh),
             new THREE.MeshStandardMaterial({ color: 0xC4B17C, roughness: 1.0 })
         );
         ground.rotation.x = -Math.PI / 2;
-        ground.position.set(this.width / 2, -0.02, this.height / 2);
+        ground.position.set(this.width * S / 2, -0.02, this.height * S / 2);
         ground.receiveShadow = true;
         this.scene.add(ground);
 
         // Grid
-        const grid = new THREE.GridHelper(Math.max(this.width, this.height), Math.max(this.width, this.height), 0x9a8e6b, 0x9a8e6b);
-        grid.position.set(this.width / 2, 0.005, this.height / 2);
+        const gridSize = Math.max(this.width, this.height) * S;
+        const grid = new THREE.GridHelper(gridSize, Math.max(this.width, this.height), 0x9a8e6b, 0x9a8e6b);
+        grid.position.set(this.width * S / 2, 0.005, this.height * S / 2);
         grid.material.opacity = 0.06;
         grid.material.transparent = true;
         this.scene.add(grid);
@@ -234,18 +238,20 @@ class WorldRenderer {
         }
 
         // Calculate footprint (single tile or multi-tile)
+        const S = TILE_SIZE;
         let tileW = 0.9, tileD = 0.9;
-        let centerX = tile.x + 0.5, centerZ = tile.y + 0.5;
+        let centerX = (tile.x + 0.5) * S, centerZ = (tile.y + 0.5) * S;
         if (spec.anchor && this.grid) {
             const fp = this._getAnchorFootprint(spec.anchor);
             tileW = (fp.maxX - fp.minX + 1) - 0.1;
             tileD = (fp.maxY - fp.minY + 1) - 0.1;
-            centerX = (fp.minX + fp.maxX + 1) / 2;
-            centerZ = (fp.minY + fp.maxY + 1) / 2;
+            centerX = (fp.minX + fp.maxX + 1) / 2 * S;
+            centerZ = (fp.minY + fp.maxY + 1) / 2 * S;
         }
 
         const group = new THREE.Group();
         group.position.set(centerX, 0, centerZ);
+        group.scale.set(S, S, S);
         group.userData = { tile };
 
         const components = spec.components || [];
@@ -265,10 +271,10 @@ class WorldRenderer {
         });
 
         if (animate) {
-            group.userData.animStartY = 5;
+            group.userData.animStartY = 5 * S;
             group.userData.animTargetY = 0;
             group.userData.animStart = Date.now();
-            group.position.y = 5;
+            group.position.y = 5 * S;
         }
 
         this.scene.add(group);
