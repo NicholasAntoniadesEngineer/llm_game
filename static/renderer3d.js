@@ -34,8 +34,8 @@ class WorldRenderer {
         this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer3d.toneMappingExposure = 1.2;
+        this.renderer3d.toneMapping = THREE.LinearToneMapping;
+        this.renderer3d.toneMappingExposure = 1.0;
         // Recover from context loss
         this.renderer3d.domElement.addEventListener("webglcontextlost", (e) => {
             e.preventDefault();
@@ -46,16 +46,16 @@ class WorldRenderer {
         });
         container.appendChild(this.renderer3d.domElement);
 
-        // Mediterranean lighting
-        this.scene.add(new THREE.AmbientLight(0xffeedd, 0.45));
-        const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
+        // Mediterranean lighting — warm, natural, balanced
+        this.scene.add(new THREE.AmbientLight(0xfff5e6, 0.5));
+        const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
         sun.position.set(300, 400, 200);
         sun.castShadow = true;
         sun.shadow.mapSize.set(4096, 4096);
         const sc = sun.shadow.camera;
         sc.near = 1; sc.far = 1200; sc.left = -500; sc.right = 500; sc.top = 500; sc.bottom = -500;
         this.scene.add(sun);
-        this.scene.add(new THREE.HemisphereLight(0x87ceeb, 0x556b2f, 0.25));
+        this.scene.add(new THREE.HemisphereLight(0x8ec4e8, 0x8a7e5a, 0.35));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
@@ -172,12 +172,14 @@ class WorldRenderer {
     }
 
     // ─── Materials (cached for performance) ───
-    _mat(color, roughness = 0.75) {
+    _mat(color, roughness = 0.7) {
         const key = `${color}:${roughness}`;
         if (!this._matCache) this._matCache = new Map();
         if (!this._matCache.has(key)) {
             this._matCache.set(key, new THREE.MeshStandardMaterial({
-                color: new THREE.Color(color), roughness, metalness: 0.02
+                color: new THREE.Color(color),
+                roughness: Math.max(0.3, Math.min(0.9, roughness)),
+                metalness: 0.01,
             }));
         }
         return this._matCache.get(key);
