@@ -328,61 +328,94 @@ class WorldRenderer {
     }
 
     // ═══════════════════════════════════════════════
-    // COMPONENT BUILDERS
-    // Each returns the new top-Y for the next component.
+    // COMPONENT BUILDERS — with architectural intelligence.
     //
-    // Placement modes:
-    //   (default)       — stacks on previous component's top
-    //   "overlay": true — placed at the SAME baseY as the previous component (infill)
-    //   "y": N          — placed at explicit absolute Y position
+    // The renderer knows how building parts relate spatially:
+    //   FOUNDATION  (podium)          — ground level, raises the base
+    //   STRUCTURAL  (colonnade, block, walls, arcade) — main body, sits on foundation
+    //   INFILL      (cella, atrium, tier) — sits INSIDE structural at same base, never on top
+    //   ROOF        (pediment, dome, tiled_roof, flat_roof, vault) — always on top of structural
+    //   DECORATIVE  (door, pilasters, awning, battlements) — at base level, no height effect
+    //   FREESTANDING (statue, fountain) — stacks normally on whatever is below
     //
-    // Advance modes:
-    //   (default)       — advances the Y cursor to its top
-    //   "advance": false — does not move the cursor (decorative)
+    // The AI just lists components; the renderer places them correctly.
     // ═══════════════════════════════════════════════
 
     _buildComponents(group, components, w, d) {
-        let cursor = 0;     // current stacking Y
-        let prevBase = 0;   // baseY where the previous component started
+        // Architectural role of each component type
+        const FOUNDATION  = new Set(["podium"]);
+        const STRUCTURAL  = new Set(["colonnade", "block", "walls", "arcade"]);
+        const INFILL      = new Set(["cella", "atrium", "tier"]);
+        const ROOF        = new Set(["pediment", "dome", "tiled_roof", "flat_roof", "vault"]);
+        const DECORATIVE  = new Set(["door", "pilasters", "awning", "battlements"]);
+        // Everything else (statue, fountain) = FREESTANDING, stacks normally
 
+        const builders = {
+            podium: "_buildPodium", colonnade: "_buildColonnade",
+            pediment: "_buildPediment", dome: "_buildDome",
+            block: "_buildBlock", arcade: "_buildArcade",
+            tiled_roof: "_buildTiledRoof", atrium: "_buildAtrium",
+            statue: "_buildStatue", fountain: "_buildFountain",
+            awning: "_buildAwning", battlements: "_buildBattlements",
+            tier: "_buildTier", door: "_buildDoor",
+            pilasters: "_buildPilasters", vault: "_buildVault",
+            flat_roof: "_buildFlatRoof", cella: "_buildCella",
+            walls: "_buildWalls",
+        };
+
+        // Two-pass: first collect all components, then render in correct order
+        let baseLevel = 0;       // top of foundation (podium)
+        let structuralTop = 0;   // top of tallest structural element
+
+        // Pass 1: foundations set the base level
         for (const comp of components) {
-            // Determine where this component's base sits
-            let baseY;
-            if (comp.y !== undefined)       baseY = comp.y;
-            else if (comp.overlay)          baseY = prevBase;
-            else                            baseY = cursor;
-
-            prevBase = baseY;
-
-            const builders = {
-                podium: "_buildPodium", colonnade: "_buildColonnade",
-                pediment: "_buildPediment", dome: "_buildDome",
-                block: "_buildBlock", arcade: "_buildArcade",
-                tiled_roof: "_buildTiledRoof", atrium: "_buildAtrium",
-                statue: "_buildStatue", fountain: "_buildFountain",
-                awning: "_buildAwning", battlements: "_buildBattlements",
-                tier: "_buildTier", door: "_buildDoor",
-                pilasters: "_buildPilasters", vault: "_buildVault",
-                flat_roof: "_buildFlatRoof", cella: "_buildCella",
-                walls: "_buildWalls",
-            };
-
-            const method = builders[comp.type];
-            if (!method) continue;
-
-            // Call builder — some take (group,comp,baseY) others (group,comp,baseY,w,d)
-            let topY;
-            if (comp.type === "statue" || comp.type === "fountain" || comp.type === "door") {
-                topY = this[method](group, comp, baseY);
-            } else {
-                topY = this[method](group, comp, baseY, w, d);
-            }
-
-            // Advance cursor unless suppressed
-            if (comp.advance !== false && !comp.overlay) {
-                cursor = Math.max(cursor, topY);
-            }
+            if (!FOUNDATION.has(comp.type) || !builders[comp.type]) continue;
+            const topY = this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+            baseLevel = Math.max(baseLevel, topY);
         }
+        structuralTop = baseLevel;
+
+        // Pass 2: structural elements sit on the foundation
+        for (const comp of components) {
+            if (!STRUCTURAL.has(comp.type) || !builders[comp.type]) continue;
+            const topY = this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+            structuralTop = Math.max(structuralTop, topY);
+        }
+
+        // Pass 3: infill sits INSIDE structural, at the foundation level
+        for (const comp of components) {
+            if (!INFILL.has(comp.type) || !builders[comp.type]) continue;
+            this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        }
+
+        // Pass 4: roofs go on top of the tallest structural element
+        for (const comp of components) {
+            if (!ROOF.has(comp.type) || !builders[comp.type]) continue;
+            const topY = this._callBuilder(builders[comp.type], group, comp, structuralTop, w, d);
+            structuralTop = Math.max(structuralTop, topY);
+        }
+
+        // Pass 5: decorative at base level
+        for (const comp of components) {
+            if (!DECORATIVE.has(comp.type) || !builders[comp.type]) continue;
+            this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        }
+
+        // Pass 6: freestanding elements stack on top of everything
+        for (const comp of components) {
+            if (FOUNDATION.has(comp.type) || STRUCTURAL.has(comp.type) ||
+                INFILL.has(comp.type) || ROOF.has(comp.type) ||
+                DECORATIVE.has(comp.type) || !builders[comp.type]) continue;
+            const topY = this._callBuilder(builders[comp.type], group, comp, structuralTop, w, d);
+            structuralTop = Math.max(structuralTop, topY);
+        }
+    }
+
+    _callBuilder(method, group, comp, baseY, w, d) {
+        if (comp.type === "statue" || comp.type === "fountain" || comp.type === "door") {
+            return this[method](group, comp, baseY);
+        }
+        return this[method](group, comp, baseY, w, d);
     }
 
     // Stepped platform
