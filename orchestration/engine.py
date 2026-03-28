@@ -261,9 +261,10 @@ class BuildEngine:
                     "year": district.get("year", ""),
                 })
 
-            # Building placed — no Faber/Civis calls needed
-
+            # Save after every building so progress survives crashes
             self.world.turn += 1
+            save_state(self.world, self.chat_history, self.district_index, self.districts)
+
             await asyncio.sleep(STEP_DELAY)
 
     async def _find_map_image(self):
