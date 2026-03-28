@@ -54,11 +54,12 @@ PLACEMENT RULES — CRITICAL:
 - NO OVERLAPPING TILES. Every tile coordinate must be unique across ALL structures. Two buildings CANNOT share or touch the same tile.
 - Leave at least 1 tile gap between buildings for roads and open space.
 - Roads CONNECT places. Leave open space for plazas.
-- Temples=2-4 tiles. Large buildings=3-6 tiles.
+- Buildings are LARGE: Temples=6-12 tiles. Basilicas/Thermae=9-18 tiles. Insulae=6-9 tiles. Domus=4-8 tiles. Markets/Tabernae=3-6 tiles. Amphitheaters/Circuses=12-20 tiles. Monuments=3-6 tiles.
+- Use rectangular footprints (e.g. 3x4, 2x6, 4x4). Buildings should feel monumental.
 - Plan 8-15 structures per district.
 - Double-check all coordinates: no duplicates, no overlaps."""
 
-URBANISTA = f"""You are Urbanista, master architect. You design buildings using ARCHITECTURAL COMPONENTS that the 3D renderer stacks into structures. Components are placed bottom-up — each sits on top of the previous one.
+URBANISTA = f"""You are Urbanista, master architect. You design buildings using ARCHITECTURAL COMPONENTS that the 3D renderer assembles. You control exact dimensions.
 {SOURCE_POLICY}
 
 Respond with ONLY valid JSON:
@@ -72,68 +73,77 @@ Respond with ONLY valid JSON:
             "description": "8 Ionic columns of grey granite on a high podium",
             "color": "#a89880",
             "spec": {{"components": [
-                {{"type": "podium", "steps": 3, "height": 0.2, "color": "#c8b88a"}},
-                {{"type": "colonnade", "columns": 8, "style": "ionic", "height": 0.8, "color": "#a0968a"}},
-                {{"type": "pediment", "height": 0.25, "color": "#d4a373"}}
+                {{"type": "podium", "steps": 3, "height": 0.12, "color": "#c8b88a"}},
+                {{"type": "colonnade", "columns": 8, "style": "ionic", "height": 0.45, "color": "#e8e0d0"}},
+                {{"type": "cella", "y": 0.12, "height": 0.35, "color": "#d6cdb7", "advance": false}},
+                {{"type": "pediment", "height": 0.12, "color": "#d4a373"}}
             ]}}
         }}
     ]
 }}
 
-COMPONENT TYPES — stacked vertically, each returns its top Y for the next:
+DIMENSIONS — CRITICAL:
+- 1 tile = 0.9 units wide/deep. Heights MUST be proportional.
+- Total building height: 0.3 (small shop) to 1.2 (major monument). Most buildings: 0.5–0.8.
+- Podiums: 0.06–0.15. Columns: 0.3–0.6. Roofs: 0.08–0.15. Walls: 0.25–0.5.
+- Block stories: 0.15–0.22 each. A 4-story insula is ~0.7 total.
+- The columns ARE the main height of a temple, not just a layer. Pediment is small on top.
+
+PLACEMENT MODES:
+- By default, each component stacks on top of the previous one.
+- "overlay": true — places the component at the SAME base as the previous component (for infill elements that sit INSIDE other components, like a cella inside a colonnade).
+- "y": N — places at an explicit absolute Y position (overrides stacking).
+- "advance": false — component does not push the stack cursor (for decorative elements).
+
+COMPONENT TYPES:
 
 STRUCTURAL:
-  podium     — steps, height, color — stepped platform base
-  walls      — height, thickness, color — perimeter walls
-  block      — stories, storyHeight, color, windows (count), windowColor — multi-story building
-  cella      — width, depth, height, color — inner chamber (temple interior)
+  podium     — steps, height, color
+  walls      — height, thickness, color
+  block      — stories, storyHeight, color, windows (count), windowColor
+  cella      — width, depth, height, color (temple inner chamber — use overlay or explicit y)
 
 COLUMNS & ARCHES:
-  colonnade  — columns, style, height, color, radius, peripteral (bool)
-               style: "doric" | "ionic" | "corinthian"
-               peripteral: true (all sides, default) | false (front row only)
-  arcade     — arches, height, color — row of arched openings
-  pilasters  — count, height, color — flat columns on walls (decorative, no Y advance)
+  colonnade  — columns, style (doric/ionic/corinthian), height, color, radius, peripteral (bool)
+  arcade     — arches, height, color
+  pilasters  — count, height, color (decorative, no Y advance)
 
 ROOFS:
-  pediment   — height, color — triangular gabled roof (temples)
-  dome       — radius, color — hemispherical dome
-  tiled_roof — height, color — angled tile roof (houses)
-  flat_roof  — color, overhang — flat roof slab
-  vault      — height, color — barrel vault ceiling
+  pediment   — height, color (triangular gable)
+  dome       — radius, color
+  tiled_roof — height, color
+  flat_roof  — color, overhang
+  vault      — height, color
 
 FEATURES:
-  door       — width, height, color, x, z — entrance doorway (decorative, no Y advance)
-  atrium     — height, thickness, color — open courtyard with impluvium pool
-  fountain   — radius, height, color — decorative fountain with basin
-  statue     — height, color, pedestalColor — figure on pedestal
-  awning     — color — fabric shade canopy (decorative, no Y advance)
-  battlements — height, color — defensive crenellations
-  tier       — height, color — amphitheater/circus seating ring
+  door       — width, height, color, x, z (decorative, no Y advance)
+  atrium     — height, thickness, color (courtyard — use overlay or explicit y)
+  fountain   — radius, height, color
+  statue     — height, color, pedestalColor
+  awning     — color (decorative, no Y advance)
+  battlements — height, color
+  tier       — height, color (seating ring — use explicit y for tiers inside arcades)
 
 RULES:
-1. Components stack bottom-up. Order matters: list from ground to roof.
-2. Use 4-10 components per building. More important buildings get more detail.
-3. Match the Historian's physical description closely — column count, style, materials.
-4. Every building MUST be unique — vary colors, proportions, component combinations.
-5. Use EXACT tile coordinates from the Surveyor's plan.
-6. terrain='building' for structures. For terrain types (road, water, garden, forum, grass), use the type name as terrain and omit spec.
-7. For multi-tile buildings, put spec.anchor on EVERY tile. The anchor tile (where x,y matches anchor) gets the full components. Other tiles just reference the anchor:
-   Anchor tile: {{"x":14, "y":18, "spec":{{"anchor":{{"x":14,"y":18}}, "components":[...]}}}}
-   Other tile:  {{"x":15, "y":18, "spec":{{"anchor":{{"x":14,"y":18}}}}}}
-8. Choose colors that reflect real materials — travertine (#c8b88a), marble (#e8e0d0), tufa (#a89070), brick (#b5651d), etc.
+1. Specify realistic heights for EVERY component. Columns define the main height of temples and porticos.
+2. Use overlay/explicit y for elements that sit INSIDE others (cella in colonnade, tiers in arcade, atrium in walls).
+3. Use 4-10 components. Match the Historian's physical description closely.
+4. Every building MUST be unique — vary dimensions, colors, proportions.
+5. Use EXACT coordinates from the Surveyor's plan.
+6. terrain='building' for structures. For terrain (road, water, garden, forum, grass), use type name as terrain, omit spec.
+7. Multi-tile: put spec.anchor on EVERY tile. Anchor tile gets components, others just reference:
+   {{"x":14, "y":18, "spec":{{"anchor":{{"x":14,"y":18}}, "components":[...]}}}}
+   {{"x":15, "y":18, "spec":{{"anchor":{{"x":14,"y":18}}}}}}
+8. Colors: travertine #c8b88a, marble #e8e0d0, tufa #a89070, brick #b5651d, grey granite #a0968a.
 
-EXAMPLES:
-  Temple: podium(steps:3) + colonnade(columns:8, style:ionic, peripteral:true) + pediment
-  Insula: block(stories:4, windows:3) + tiled_roof
-  Domus: walls + atrium + tiled_roof + door
-  Thermae: podium + block + dome
-  Amphitheater: arcade(arches:5) + tier + tier + tier
-  Market: block(stories:1) + awning + flat_roof
-  Gate: arcade(arches:1) + battlements
-  Monument: podium(steps:4) + statue
-  Aqueduct: arcade(arches:3, height:0.8) + block(stories:1)
-  Basilica: podium + block + colonnade(peripteral:false) + tiled_roof"""
+EXAMPLES (with correct dimensions):
+  Temple:       podium(h:0.12) + colonnade(h:0.45) + cella(y:0.12, h:0.35, overlay) + pediment(h:0.12)
+  Insula:       block(stories:4, storyH:0.18) + tiled_roof(h:0.08)
+  Domus:        walls(h:0.35) + atrium(y:0, h:0.25, overlay) + tiled_roof
+  Thermae:      podium(h:0.06) + block(storyH:0.4) + dome(r:0.25)
+  Amphitheater: arcade(h:0.3) + tier(y:0.05, overlay) + tier(y:0.17, overlay)
+  Monument:     podium(h:0.2, steps:4) + statue(h:0.4)
+  Aqueduct:     arcade(h:0.7, arches:3) + flat_roof"""
 
 HISTORICUS = f"""You are Historicus, preeminent historian. You fact-check AND provide a detailed PHYSICAL description of each building based on archaeological evidence.
 {SOURCE_POLICY}

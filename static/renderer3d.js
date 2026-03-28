@@ -256,7 +256,8 @@ class WorldRenderer {
         } else if (["road", "forum", "garden", "water", "grass"].includes(terrain)) {
             this._buildTerrain(group, tile, spec);
         } else {
-            this._buildComponents(group, this._defaultComponents(tile.building_type, tile.color), tileW, tileD);
+            // No AI spec yet — show translucent placeholder
+            this._placeholderBlock(group, tile, tileW, tileD);
         }
 
         group.traverse(c => {
@@ -323,31 +324,57 @@ class WorldRenderer {
     // ═══════════════════════════════════════════════
     // COMPONENT BUILDERS
     // Each returns the new top-Y for the next component.
+    //
+    // Placement modes:
+    //   (default)       — stacks on previous component's top
+    //   "overlay": true — placed at the SAME baseY as the previous component (infill)
+    //   "y": N          — placed at explicit absolute Y position
+    //
+    // Advance modes:
+    //   (default)       — advances the Y cursor to its top
+    //   "advance": false — does not move the cursor (decorative)
     // ═══════════════════════════════════════════════
 
     _buildComponents(group, components, w, d) {
-        let y = 0;
+        let cursor = 0;     // current stacking Y
+        let prevBase = 0;   // baseY where the previous component started
+
         for (const comp of components) {
-            switch (comp.type) {
-                case "podium":      y = this._buildPodium(group, comp, y, w, d); break;
-                case "colonnade":   y = this._buildColonnade(group, comp, y, w, d); break;
-                case "pediment":    y = this._buildPediment(group, comp, y, w, d); break;
-                case "dome":        y = this._buildDome(group, comp, y, w, d); break;
-                case "block":       y = this._buildBlock(group, comp, y, w, d); break;
-                case "arcade":      y = this._buildArcade(group, comp, y, w, d); break;
-                case "tiled_roof":  y = this._buildTiledRoof(group, comp, y, w, d); break;
-                case "atrium":      y = this._buildAtrium(group, comp, y, w, d); break;
-                case "statue":      y = this._buildStatue(group, comp, y); break;
-                case "fountain":    y = this._buildFountain(group, comp, y); break;
-                case "awning":      y = this._buildAwning(group, comp, y, w, d); break;
-                case "battlements": y = this._buildBattlements(group, comp, y, w, d); break;
-                case "tier":        y = this._buildTier(group, comp, y, w, d); break;
-                case "door":        y = this._buildDoor(group, comp, y); break;
-                case "pilasters":   y = this._buildPilasters(group, comp, y, w, d); break;
-                case "vault":       y = this._buildVault(group, comp, y, w, d); break;
-                case "flat_roof":   y = this._buildFlatRoof(group, comp, y, w, d); break;
-                case "cella":       y = this._buildCella(group, comp, y, w, d); break;
-                case "walls":       y = this._buildWalls(group, comp, y, w, d); break;
+            // Determine where this component's base sits
+            let baseY;
+            if (comp.y !== undefined)       baseY = comp.y;
+            else if (comp.overlay)          baseY = prevBase;
+            else                            baseY = cursor;
+
+            prevBase = baseY;
+
+            const builders = {
+                podium: "_buildPodium", colonnade: "_buildColonnade",
+                pediment: "_buildPediment", dome: "_buildDome",
+                block: "_buildBlock", arcade: "_buildArcade",
+                tiled_roof: "_buildTiledRoof", atrium: "_buildAtrium",
+                statue: "_buildStatue", fountain: "_buildFountain",
+                awning: "_buildAwning", battlements: "_buildBattlements",
+                tier: "_buildTier", door: "_buildDoor",
+                pilasters: "_buildPilasters", vault: "_buildVault",
+                flat_roof: "_buildFlatRoof", cella: "_buildCella",
+                walls: "_buildWalls",
+            };
+
+            const method = builders[comp.type];
+            if (!method) continue;
+
+            // Call builder — some take (group,comp,baseY) others (group,comp,baseY,w,d)
+            let topY;
+            if (comp.type === "statue" || comp.type === "fountain" || comp.type === "door") {
+                topY = this[method](group, comp, baseY);
+            } else {
+                topY = this[method](group, comp, baseY, w, d);
+            }
+
+            // Advance cursor unless suppressed
+            if (comp.advance !== false && !comp.overlay) {
+                cursor = Math.max(cursor, topY);
             }
         }
     }
@@ -904,110 +931,16 @@ class WorldRenderer {
         return baseY + h;
     }
 
-    // ═══════════════════════════════════════════════
-    // TYPE-SPECIFIC FALLBACKS
-    // When no spec is provided, generate a reasonable
-    // default component list per building_type.
-    // ═══════════════════════════════════════════════
-
-    _defaultComponents(buildingType, tileColor) {
-        const wall = tileColor || "#d4a373";
-        const stone = "#c8b88a";
-        const marble = "#e8e0d0";
-        const roof = "#b5651d";
-
-        switch (buildingType) {
-            case "temple":
-                return [
-                    { type: "podium", steps: 3, height: 0.18, color: stone },
-                    { type: "colonnade", columns: 6, style: "ionic", height: 0.7, color: marble },
-                    { type: "pediment", height: 0.2, color: roof },
-                ];
-            case "basilica":
-                return [
-                    { type: "podium", steps: 2, height: 0.1, color: stone },
-                    { type: "block", stories: 1, storyHeight: 0.7, color: wall, windows: 4 },
-                    { type: "colonnade", columns: 8, style: "corinthian", height: 0.6, color: marble, peripteral: false },
-                    { type: "tiled_roof", color: roof },
-                ];
-            case "insula":
-                return [
-                    { type: "block", stories: 4, storyHeight: 0.25, color: wall, windows: 3 },
-                    { type: "tiled_roof", color: roof },
-                ];
-            case "domus":
-                return [
-                    { type: "walls", height: 0.4, color: wall },
-                    { type: "atrium", height: 0.25, color: wall },
-                    { type: "tiled_roof", color: roof },
-                ];
-            case "aqueduct":
-                return [
-                    { type: "arcade", arches: 3, height: 0.8, color: stone },
-                    { type: "block", stories: 1, storyHeight: 0.12, color: stone, windows: 0 },
-                ];
-            case "thermae":
-                return [
-                    { type: "podium", steps: 2, height: 0.1, color: stone },
-                    { type: "block", stories: 1, storyHeight: 0.5, color: wall, windows: 3 },
-                    { type: "dome", radius: 0.3, color: "#8b7355" },
-                ];
-            case "amphitheater":
-                return [
-                    { type: "arcade", arches: 5, height: 0.35, color: stone },
-                    { type: "tier", height: 0.18, color: "#c4a860" },
-                    { type: "tier", height: 0.15, color: "#c4a860" },
-                    { type: "tier", height: 0.12, color: "#b8a050" },
-                ];
-            case "circus":
-                return [
-                    { type: "walls", height: 0.25, color: stone },
-                    { type: "tier", height: 0.18, color: "#c4a860" },
-                    { type: "tier", height: 0.12, color: "#c4a860" },
-                ];
-            case "market":
-                return [
-                    { type: "block", stories: 1, storyHeight: 0.4, color: wall, windows: 2 },
-                    { type: "awning", color: "#cc3333" },
-                    { type: "flat_roof", color: stone },
-                ];
-            case "taberna":
-                return [
-                    { type: "block", stories: 1, storyHeight: 0.35, color: wall, windows: 1 },
-                    { type: "awning", color: "#cc3333" },
-                    { type: "flat_roof", color: stone },
-                ];
-            case "warehouse":
-                return [
-                    { type: "block", stories: 1, storyHeight: 0.5, color: wall, windows: 0 },
-                    { type: "flat_roof", color: stone },
-                ];
-            case "gate":
-                return [
-                    { type: "arcade", arches: 1, height: 0.6, color: stone },
-                    { type: "battlements", color: stone, height: 0.1 },
-                ];
-            case "monument":
-                return [
-                    { type: "podium", steps: 4, height: 0.25, color: marble },
-                    { type: "statue", height: 0.5, color: "#c0b090" },
-                ];
-            case "wall":
-                return [
-                    { type: "walls", height: 0.5, color: stone, thickness: 0.12 },
-                    { type: "battlements", color: stone, height: 0.1 },
-                ];
-            case "bridge":
-                return [
-                    { type: "arcade", arches: 3, height: 0.5, color: stone },
-                    { type: "flat_roof", color: stone },
-                ];
-            default:
-                return [
-                    { type: "block", stories: 1, storyHeight: 0.5, color: tileColor || "#d4a373", windows: 2 },
-                    { type: "flat_roof", color: "#c8b88a" },
-                ];
-        }
+    // Minimal placeholder for tiles that arrive without an AI-generated spec.
+    // Every real building should have its spec generated by the URBANISTA agent.
+    _placeholderBlock(group, tile, w, d) {
+        const h = 0.3;
+        const color = tile.color || "#d4a373";
+        const body = new THREE.Mesh(new THREE.BoxGeometry(w * 0.8, h, d * 0.8), this._mat(color, 0.9));
+        body.position.y = h / 2;
+        body.material.transparent = true;
+        body.material.opacity = 0.5;
+        group.add(body);
     }
 
     // ─── Hover / Click ───
