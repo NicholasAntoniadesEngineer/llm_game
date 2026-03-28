@@ -93,13 +93,14 @@ function handleMessage(msg) {
     }
 }
 
-// --- Agent Status ---
+// --- Agent Status & Timers ---
+
+const agentTimers = {};
 
 function setAgentStatus(agent, status) {
     const el = document.getElementById(`status-${agent}`);
     if (!el) return;
 
-    // Remove all state classes
     el.classList.remove("thinking", "speaking", "idle");
     el.classList.add(status);
 
@@ -107,6 +108,24 @@ function setAgentStatus(agent, status) {
     if (stateEl) {
         stateEl.textContent = status === "thinking" ? "thinking..." :
                               status === "speaking" ? "speaking" : "idle";
+    }
+
+    const timerEl = el.querySelector(".agent-timer");
+    if (status === "thinking") {
+        // Start timer
+        agentTimers[agent] = { start: Date.now(), interval: null };
+        if (timerEl) timerEl.textContent = "0s";
+        agentTimers[agent].interval = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - agentTimers[agent].start) / 1000);
+            if (timerEl) timerEl.textContent = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
+        }, 1000);
+    } else {
+        // Stop timer
+        if (agentTimers[agent]) {
+            clearInterval(agentTimers[agent].interval);
+            delete agentTimers[agent];
+        }
+        if (timerEl) timerEl.textContent = "";
     }
 }
 

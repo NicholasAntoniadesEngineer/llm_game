@@ -103,6 +103,15 @@ body {
     font-size: 0.65rem;
 }
 
+.agent-status .agent-timer {
+    color: #e67e22;
+    font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
+    min-width: 2.5em;
+    text-align: right;
+    margin-left: auto;
+}
+
 /* Per-agent colors for dots */
 .agent-status[data-agent="imperator"] .agent-dot { background: #ffd700; }
 .agent-status[data-agent="cartographus"] .agent-dot { background: #e67e22; }
