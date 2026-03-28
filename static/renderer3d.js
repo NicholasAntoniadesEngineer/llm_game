@@ -261,15 +261,6 @@ class WorldRenderer {
             this._buildComponents(group, components, tileW, tileD);
         } else if (["road", "forum", "garden", "water", "grass"].includes(terrain)) {
             this._buildTerrain(group, tile, spec);
-        } else if (tile.building_type && typeof generateParametric === "function") {
-            // Generative building with Vitruvian proportions + per-tile variation
-            const params = spec.params || {};
-            const generated = generateParametric(tile.building_type, params, tileW, tileD, tile.x, tile.y);
-            if (generated && generated.length > 0) {
-                this._buildComponents(group, generated, tileW, tileD);
-            } else {
-                this._placeholderBlock(group, tile, tileW, tileD);
-            }
         } else {
             this._placeholderBlock(group, tile, tileW, tileD);
         }

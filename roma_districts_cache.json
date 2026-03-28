@@ -1,0 +1,231 @@
+{
+  "districts": [
+    {
+      "name": "Forum Romanum",
+      "description": "The civic, administrative, and religious center of Rome. This rectangular plaza surrounded by temples, basilicas, and government buildings served as the primary venue for political assemblies, legal proceedings, religious ceremonies, and public announcements. The Curia housed the Senate; temples to Saturn, Vesta, Castor and Pollux, and Concordia represented religious authority; the Basilicas (Julia and Aemilia) served commerce and justice. The House of the Vestal Virgins maintained sacred fire essential to Rome's wellbeing. Continuously developed and renovated during the Republic and Empire.",
+      "region": {
+        "x1": 16,
+        "y1": 12,
+        "x2": 26,
+        "y2": 21
+      },
+      "year": -44,
+      "period": "Republic to Julio-Claudian",
+      "buildings": [
+        "Temple of Saturn",
+        "Temple of Vesta",
+        "House of the Vestal Virgins",
+        "Regia",
+        "Basilica Julia",
+        "Basilica Aemilia",
+        "Curia (Senate House)",
+        "Rostra",
+        "Temple of Castor and Pollux",
+        "Temple of Concord",
+        "Arch of Augustus",
+        "Arch of Titus"
+      ]
+    },
+    {
+      "name": "Capitoline Hill",
+      "description": "The sacred hill of Rome, crowned with temples and administrative structures. Home to the great Temple of Jupiter Optimus Maximus, the Capitoline was the religious and symbolic heart of Rome where major state ceremonies occurred. The Tabularium (record office) housed important documents, and the ancient prison (Carcer Tullianum) held state prisoners and enemies. Temple of Juno Moneta also occupied the summit.",
+      "region": {
+        "x1": 14,
+        "y1": 4,
+        "x2": 21,
+        "y2": 11
+      },
+      "year": -50,
+      "period": "Republic to Empire",
+      "buildings": [
+        "Temple of Jupiter Optimus Maximus",
+        "Temple of Juno Moneta",
+        "Tabularium",
+        "Prison (Carcer Tullianum)",
+        "Temple of Veiovis",
+        "Fortifications",
+        "Shrine structures"
+      ]
+    },
+    {
+      "name": "Argilletum",
+      "description": "A district built on the slopes between the Esquiline and other hills, centered on the main street (Vicus Argilletum) connecting the northeast to the Forum. A mixed residential and commercial area with middle-class housing, shop-lined streets, and small temples. More respectable than the Subura below, but less elite than the Palatine. The Argilletum served as a major traffic artery and transition zone between districts.",
+      "region": {
+        "x1": 23,
+        "y1": 2,
+        "x2": 35,
+        "y2": 14
+      },
+      "year": -27,
+      "period": "Augustan to Julio-Claudian",
+      "buildings": [
+        "Argilletum Street (Vicus Argilletum)",
+        "Residential buildings",
+        "Shops and bakeries",
+        "Temples of household gods (Lares Compitales)",
+        "Market structures",
+        "Bathhouses",
+        "Workshops"
+      ]
+    },
+    {
+      "name": "Subura",
+      "description": "The lower-class residential district occupying the valleys and slopes of the Esquiline. Densely packed with insulae (apartment buildings often 5-6 stories high), taverns, cauponae (food shops), and small markets. Home to Rome's working poor\u2014laborers, slaves, and artisans. Notoriously crowded, chaotic, and sometimes dangerous, but economically vibrant with constant commercial and social activity. The district was known for narrow winding streets, narrow alleys, and constant noise.",
+      "region": {
+        "x1": 26,
+        "y1": 13,
+        "x2": 35,
+        "y2": 22
+      },
+      "year": -27,
+      "period": "Augustan to Julio-Claudian",
+      "buildings": [
+        "Insulae (apartment buildings)",
+        "Taverns and cauponae (food shops)",
+        "Bathhouses",
+        "Vici (neighborhood shrines)",
+        "Markets and shops",
+        "Laundries",
+        "Small workshops",
+        "Barber shops"
+      ]
+    },
+    {
+      "name": "Campus Martius",
+      "description": "The 'Field of Mars,' a large open plain to the north and west used for military training, public assemblies, voting, and entertainment. Home to temples (Mars, Minerva), the grand Theatre of Pompey with its associated portico, the Solarium Augusti (Augustus's monumental sundial and perpetual calendar), and open spaces for military drills. Could host gladiatorial games and public spectacles. Augustus significantly developed this area as an extension of civic space, transforming it from simple field to monumental district.",
+      "region": {
+        "x1": 0,
+        "y1": 0,
+        "x2": 16,
+        "y2": 12
+      },
+      "year": -27,
+      "period": "Augustan",
+      "buildings": [
+        "Temple of Mars",
+        "Temple of Mars Ultor",
+        "Temple of Minerva",
+        "Theatre of Pompey",
+        "Porticus of Pompey",
+        "Solarium Augusti",
+        "Altar of Mars",
+        "Structures of Agrippa",
+        "Open gathering spaces"
+      ]
+    },
+    {
+      "name": "Velabrum",
+      "description": "A low-lying commercial and market district between the Forum and the Tiber River, serving as Rome's principal marketplace and gateway to river commerce. Crowded with warehouses (especially the great Porticus Aemilia for grain storage), vendor stalls, temples to gods of commerce and the river (Hercules Victor, Portunus), and merchant shops. The district connected the civic Forum to the practical economy of the river trade and external commerce.",
+      "region": {
+        "x1": 6,
+        "y1": 21,
+        "x2": 16,
+        "y2": 29
+      },
+      "year": -50,
+      "period": "Republic to Empire",
+      "buildings": [
+        "Porticus Aemilia (grain warehouse)",
+        "Temple of Hercules Victor",
+        "Temple of Portunus",
+        "Market stalls and shops",
+        "Warehouses",
+        "Merchant establishments",
+        "Harbor facilities",
+        "Religious shrines"
+      ]
+    },
+    {
+      "name": "Palatine Hill",
+      "description": "The imperial residential zone where Rome's emperors lived and ruled. Beginning with Augustus, the Palatine was progressively developed with palace complexes, temples, and private gardens. The House of Livia and structures built by Augustus established the imperial residence tradition. Later emperors including Tiberius and subsequent Julio-Claudian rulers expanded and modified the imperial palaces. The Temple of Apollo Palatinus served religious functions. The Cryptoporticus (underground passages) connected imperial buildings and allowed private movement.",
+      "region": {
+        "x1": 25,
+        "y1": 23,
+        "x2": 33,
+        "y2": 32
+      },
+      "year": 0,
+      "period": "Augustan to Julio-Claudian",
+      "buildings": [
+        "House of Livia (Augustus's residence)",
+        "House of Augustus",
+        "Palatial structures of Tiberius",
+        "Temple of Apollo Palatinus",
+        "Cryptoporticus",
+        "Imperial gardens and peristyles",
+        "Private shrines",
+        "Administrative chambers"
+      ]
+    },
+    {
+      "name": "Caelian Hill",
+      "description": "A prosperous residential district on an elevated hill to the far east, home to upper-class and middle-class families seeking elevation and space away from the crowded lower city. Private estates with courtyards and gardens dominated the landscape, along with smaller temples and neighborhood shrines. The height of the Caelian provided relief from the noise and chaos of central Rome, making it highly desirable for the propertied classes. Few major state temples, but numerous fine residences.",
+      "region": {
+        "x1": 33,
+        "y1": 20,
+        "x2": 40,
+        "y2": 31
+      },
+      "year": -27,
+      "period": "Augustan to Julio-Claudian",
+      "buildings": [
+        "Patrician villas and estates",
+        "Upper-class residential buildings",
+        "Gardens and courtyards",
+        "Bathhouses",
+        "Neighborhood markets",
+        "Small temples",
+        "Shops and commercial spaces",
+        "Peristyles"
+      ]
+    },
+    {
+      "name": "Aventine Hill",
+      "description": "A residential hill in the southwestern part of Rome, home to mixed-class housing ranging from wealthy estates to middle-class residences. Contains several important temples dedicated to goddess deities (Temple of Diana, Temple of Minerva), reflecting its significance in religious and public life. The Aventine was historically associated with the plebeian class and developed significantly under Augustus as part of imperial urban improvement programs. A vital commercial and residential zone.",
+      "region": {
+        "x1": 2,
+        "y1": 31,
+        "x2": 12,
+        "y2": 40
+      },
+      "year": 0,
+      "period": "Augustan to Julio-Claudian",
+      "buildings": [
+        "Temple of Diana",
+        "Temple of Minerva",
+        "Temple of Vortumnus",
+        "Temple of the Arval Brothers",
+        "Residential estates",
+        "Apartment buildings",
+        "Gardens and courtyards",
+        "Bathhouses",
+        "Neighborhood shrines",
+        "Market shops"
+      ]
+    },
+    {
+      "name": "Circus Maximus",
+      "description": "Rome's largest and most beloved entertainment venue, an enormous oval arena in the valley between the Palatine and Aventine hills. Used exclusively for chariot racing, which was the most popular spectacle in Rome. The Circus could hold hundreds of thousands of spectators. The structure featured a central spina (dividing wall) with turning posts (metae), elaborate starting gates (carceres), and extensive seating tiers (cavea). Continuously modified and expanded under imperial rule, including the addition of an awning system. Major racing events drew crowds from across the city.",
+      "region": {
+        "x1": 12,
+        "y1": 30,
+        "x2": 32,
+        "y2": 40
+      },
+      "year": -50,
+      "period": "Republic to Empire",
+      "buildings": [
+        "The Circus arena",
+        "Starting gates (carceres)",
+        "Seating tiers (cavea)",
+        "Spina (dividing wall)",
+        "Turning posts (metae)",
+        "Imperial box (pulvinar)",
+        "Awning system (velarium)",
+        "Stables for racing horses",
+        "Support facilities"
+      ]
+    }
+  ],
+  "map_description": "Rome extends 400 meters east-west and 400 meters north-south across hilly terrain. The Tiber River flows north-to-south along the western edge (x=0-2), providing transportation and commerce connections. The city's landscape is defined by seven hills: the Capitoline rises in the north-center, the Esquiline/Quirinal complex forms a ridge to the northeast where the densely packed Subura fills valleys, the Argilletum district occupies the slopes above, the Palatine dominates the east-center as the imperial residential zone, the Caelian extends further east and south, and the Aventine rises in the southwest. The Forum Romanum occupies the central low-lying area between the Capitoline (north) and Palatine (south-east). The Velabrum, a low-lying commercial zone, sits west and southwest of the Forum toward the Tiber. The vast Campus Martius spreads across the northwestern plain, containing the Theatre of Pompey and various temples used for public gatherings. The Circus Maximus fills the southern valley between the Palatine and Aventine, Rome's largest entertainment venue. Major roads including the Via Sacra traverse the Forum; radial routes connect the districts and lead to the gates and external regions beyond."
+}
