@@ -9,6 +9,7 @@ from world.state import WorldState
 logger = logging.getLogger("roma.persistence")
 
 SAVE_FILE = Path(__file__).parent / "roma_save.json"
+DISTRICTS_CACHE = Path(__file__).parent / "roma_districts_cache.json"
 
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
@@ -29,6 +30,27 @@ def save_state(world: WorldState, chat_history: list[dict], district_index: int,
 
     SAVE_FILE.write_text(json.dumps(data, indent=2))
     logger.info(f"Saved: {len(data['tiles'])} tiles, district #{district_index}, {len(districts or [])} districts")
+
+
+def save_districts_cache(districts: list[dict], map_description: str = ""):
+    data = {"districts": districts, "map_description": map_description}
+    DISTRICTS_CACHE.write_text(json.dumps(data, indent=2))
+    logger.info(f"Cached {len(districts)} districts")
+
+
+def load_districts_cache() -> tuple[list[dict], str] | None:
+    if not DISTRICTS_CACHE.exists():
+        return None
+    try:
+        data = json.loads(DISTRICTS_CACHE.read_text())
+        districts = data.get("districts", [])
+        map_desc = data.get("map_description", "")
+        if districts:
+            logger.info(f"Loaded {len(districts)} cached districts")
+            return districts, map_desc
+    except Exception as e:
+        logger.error(f"Failed to load districts cache: {e}")
+    return None
 
 
 def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:

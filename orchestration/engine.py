@@ -12,7 +12,7 @@ from agents.prompts import (
     URBANISTA, HISTORICUS, FABER, CIVIS,
 )
 from config import STEP_DELAY, SCENARIO, CLAUDE_MODEL, CLAUDE_MODEL_FAST, GRID_WIDTH, GRID_HEIGHT
-from persistence import save_state
+from persistence import save_state, save_districts_cache, load_districts_cache
 
 logger = logging.getLogger("roma.engine")
 
@@ -67,7 +67,20 @@ class BuildEngine:
         self.running = False
 
     async def _discover_districts(self):
-        """Cartographus researches and decides what districts to build."""
+        """Cartographus researches and decides what districts to build. Uses cache if available."""
+        # Try loading from cache first
+        cached = load_districts_cache()
+        if cached:
+            self.districts, map_desc = cached
+            logger.info(f"Using cached districts: {len(self.districts)}")
+            await self._chat("cartographus", "research",
+                f"Using cached survey of {SCENARIO['location']} — {len(self.districts)} districts mapped.")
+            if map_desc:
+                await self.broadcast({"type": "map_description", "description": map_desc})
+            asyncio.create_task(self._find_map_image())
+            return
+
+        # No cache — run the full discovery
         await self.broadcast({
             "type": "loading",
             "agent": "cartographus",
@@ -93,12 +106,13 @@ class BuildEngine:
         self.districts = result.get("districts", [])
         logger.info(f"Discovered {len(self.districts)} districts")
 
-        # Broadcast map description to UI
+        # Cache for next restart
         map_desc = result.get("map_description", "")
+        save_districts_cache(self.districts, map_desc)
+
         if map_desc:
             await self.broadcast({"type": "map_description", "description": map_desc})
 
-        # Search for a real historical map image in parallel with first district
         asyncio.create_task(self._find_map_image())
 
         if not self.districts:
