@@ -1,5 +1,6 @@
 // Roma Aeterna — Component-based procedural 3D renderer
-// Every building is unique, assembled from AI-described specs
+// Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
+// Falls back to raw AI-sculpted shapes or type-specific defaults
 
 class WorldRenderer {
     constructor(container) {
@@ -131,11 +132,22 @@ class WorldRenderer {
         grid.material.transparent = true;
         this.scene.add(grid);
 
-        // Existing tiles from save
+        // Existing tiles — render each once, respecting multi-tile anchors
+        const renderedAnchors = new Set();
         for (let y = 0; y < this.height; y++)
             for (let x = 0; x < this.width; x++) {
                 const tile = this.grid[y][x];
-                if (tile.terrain !== "empty") this._buildFromSpec(tile, false);
+                if (tile.terrain === "empty") continue;
+                const anchor = tile.spec && tile.spec.anchor;
+                if (anchor) {
+                    const ak = `${anchor.x},${anchor.y}`;
+                    if (renderedAnchors.has(ak)) continue;
+                    renderedAnchors.add(ak);
+                    if (anchor.y < this.height && anchor.x < this.width)
+                        this._buildFromSpec(this.grid[anchor.y][anchor.x], false);
+                } else {
+                    this._buildFromSpec(tile, false);
+                }
             }
     }
 
@@ -145,46 +157,79 @@ class WorldRenderer {
             if (tile.x >= 0 && tile.y >= 0 && tile.x < this.width && tile.y < this.height) {
                 this.grid[tile.y][tile.x] = tile;
                 if (tile.terrain && tile.terrain !== "empty") {
-                    this._buildFromSpec(tile, true);
+                    const anchor = tile.spec && tile.spec.anchor;
+                    if (anchor && (tile.x !== anchor.x || tile.y !== anchor.y)) {
+                        // Secondary tile updated — re-render via anchor
+                        if (anchor.y < this.height && anchor.x < this.width)
+                            this._buildFromSpec(this.grid[anchor.y][anchor.x], true);
+                    } else {
+                        this._buildFromSpec(tile, true);
+                    }
                 }
             }
         }
     }
 
     // ═══════════════════════════════════════════════
-    // SHAPE-LIST RENDERER
-    // AI describes each building as a list of 3D primitives.
-    // We draw exactly what the AI sculpts — no templates.
+    // MULTI-TILE SUPPORT
+    // ═══════════════════════════════════════════════
+
+    _getAnchorFootprint(anchor) {
+        let minX = anchor.x, maxX = anchor.x, minY = anchor.y, maxY = anchor.y;
+        for (let y = 0; y < this.height; y++)
+            for (let x = 0; x < this.width; x++) {
+                const a = this.grid[y][x].spec && this.grid[y][x].spec.anchor;
+                if (a && a.x === anchor.x && a.y === anchor.y) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        return { minX, maxX, minY, maxY };
+    }
+
+    // ═══════════════════════════════════════════════
+    // COMPONENT-BASED RENDERER
+    // Interprets spec.components (stacked architectural parts)
+    // or generates type-specific defaults.
     // ═══════════════════════════════════════════════
 
     _buildFromSpec(tile, animate) {
-        const key = `${tile.x},${tile.y}`;
+        const spec = tile.spec || {};
+        const key = spec.anchor ? `${spec.anchor.x},${spec.anchor.y}` : `${tile.x},${tile.y}`;
+
+        // Clean up previous group
         if (this.buildingGroups.has(key)) {
             const old = this.buildingGroups.get(key);
             this.scene.remove(old);
             old.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) c.material.dispose(); });
         }
 
+        // Calculate footprint (single tile or multi-tile)
+        let tileW = 0.9, tileD = 0.9;
+        let centerX = tile.x + 0.5, centerZ = tile.y + 0.5;
+        if (spec.anchor && this.grid) {
+            const fp = this._getAnchorFootprint(spec.anchor);
+            tileW = (fp.maxX - fp.minX + 1) - 0.1;
+            tileD = (fp.maxY - fp.minY + 1) - 0.1;
+            centerX = (fp.minX + fp.maxX + 1) / 2;
+            centerZ = (fp.minY + fp.maxY + 1) / 2;
+        }
+
         const group = new THREE.Group();
-        group.position.set(tile.x + 0.5, 0, tile.y + 0.5);
+        group.position.set(centerX, 0, centerZ);
         group.userData = { tile };
 
-        const spec = tile.spec || {};
-        const shapes = spec.shapes || [];
+        const components = spec.components || [];
         const terrain = tile.terrain;
 
-        if (shapes.length > 0) {
-            // AI-sculpted building — render each shape
-            this._renderShapes(group, shapes);
-        } else if (terrain === "road" || terrain === "forum" || terrain === "garden" ||
-                   terrain === "water" || terrain === "grass") {
+        if (components.length > 0) {
+            this._buildComponents(group, components, tileW, tileD);
+        } else if (["road", "forum", "garden", "water", "grass"].includes(terrain)) {
             this._buildTerrain(group, tile, spec);
         } else {
-            // Fallback: simple box from tile color
-            const h = spec.height || 1.0;
-            const body = new THREE.Mesh(new THREE.BoxGeometry(0.8, h, 0.8), this._mat(tile.color || "#d4a373"));
-            body.position.y = h / 2;
-            group.add(body);
+            this._buildComponents(group, this._defaultComponents(tile.building_type, tile.color), tileW, tileD);
         }
 
         group.traverse(c => {
@@ -202,13 +247,14 @@ class WorldRenderer {
         this.buildingGroups.set(key, group);
     }
 
+    // ─── Terrain ───
+
     _buildTerrain(g, tile, spec) {
         const terrain = tile.terrain || tile.building_type;
         if (terrain === "road") {
             const road = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.05, 0.98), this._mat(spec.color || "#606060", 0.9));
             road.position.y = 0.025;
             g.add(road);
-            // Varied cobblestone marks
             const seed = (tile.x * 7 + tile.y * 13) % 5;
             for (let i = 0; i < 2 + seed % 3; i++) {
                 const stone = new THREE.Mesh(
@@ -230,7 +276,6 @@ class WorldRenderer {
             g.add(water);
         } else if (terrain === "garden" || terrain === "grass") {
             g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.96), this._mat(spec.color || "#4a8c3f")));
-            // Unique vegetation based on position
             const seed = tile.x * 31 + tile.y * 17;
             const numPlants = 1 + seed % 3;
             for (let i = 0; i < numPlants; i++) {
@@ -249,345 +294,692 @@ class WorldRenderer {
     }
 
     // ═══════════════════════════════════════════════
-    // SHAPE-LIST RENDERER — AI sculpts each building
-    // from 3D primitives (box, cylinder, cone, sphere, torus)
+    // COMPONENT BUILDERS
+    // Each returns the new top-Y for the next component.
     // ═══════════════════════════════════════════════
 
-    _renderShapes(group, shapes) {
-        // First pass: find the lowest point to clamp to ground
-        let minY = Infinity;
-        for (const shape of shapes) {
-            const pos = shape.pos || [0, 0, 0];
-            const h = shape.height || (shape.size ? shape.size[1] : shape.radius * 2 || 0.5);
-            const bottom = pos[1] - h / 2;
-            if (bottom < minY) minY = bottom;
-        }
-        // Offset to ensure nothing is below ground
-        const yOffset = minY < 0 ? -minY : 0;
-
-        for (const shape of shapes) {
-            let geo, mesh;
-            const color = shape.color || "#d4a373";
-            const mat = this._mat(color, shape.roughness || 0.75);
-            const pos = shape.pos || [0, 0, 0];
-
-            switch (shape.type) {
-                case "box":
-                    const sz = shape.size || [0.5, 0.5, 0.5];
-                    geo = new THREE.BoxGeometry(sz[0], sz[1], sz[2]);
-                    break;
-                case "cylinder":
-                    geo = new THREE.CylinderGeometry(
-                        shape.radiusTop !== undefined ? shape.radiusTop : (shape.radius || 0.1),
-                        shape.radiusBottom !== undefined ? shape.radiusBottom : (shape.radius || 0.1),
-                        shape.height || 1.0,
-                        shape.segments || 12
-                    );
-                    break;
-                case "cone":
-                    geo = new THREE.ConeGeometry(
-                        shape.radius || 0.3,
-                        shape.height || 0.5,
-                        shape.segments || 8
-                    );
-                    break;
-                case "sphere":
-                    geo = new THREE.SphereGeometry(
-                        shape.radius || 0.2,
-                        shape.segments || 12,
-                        shape.segments || 10
-                    );
-                    break;
-                case "torus":
-                    geo = new THREE.TorusGeometry(
-                        shape.radius || 0.2,
-                        shape.tube || 0.03,
-                        8,
-                        shape.segments || 16,
-                        shape.arc || Math.PI * 2
-                    );
-                    break;
-                default:
-                    continue;
+    _buildComponents(group, components, w, d) {
+        let y = 0;
+        for (const comp of components) {
+            switch (comp.type) {
+                case "podium":      y = this._buildPodium(group, comp, y, w, d); break;
+                case "colonnade":   y = this._buildColonnade(group, comp, y, w, d); break;
+                case "pediment":    y = this._buildPediment(group, comp, y, w, d); break;
+                case "dome":        y = this._buildDome(group, comp, y, w, d); break;
+                case "block":       y = this._buildBlock(group, comp, y, w, d); break;
+                case "arcade":      y = this._buildArcade(group, comp, y, w, d); break;
+                case "tiled_roof":  y = this._buildTiledRoof(group, comp, y, w, d); break;
+                case "atrium":      y = this._buildAtrium(group, comp, y, w, d); break;
+                case "statue":      y = this._buildStatue(group, comp, y); break;
+                case "fountain":    y = this._buildFountain(group, comp, y); break;
+                case "awning":      y = this._buildAwning(group, comp, y, w, d); break;
+                case "battlements": y = this._buildBattlements(group, comp, y, w, d); break;
+                case "tier":        y = this._buildTier(group, comp, y, w, d); break;
+                case "door":        y = this._buildDoor(group, comp, y); break;
+                case "pilasters":   y = this._buildPilasters(group, comp, y, w, d); break;
+                case "vault":       y = this._buildVault(group, comp, y, w, d); break;
+                case "flat_roof":   y = this._buildFlatRoof(group, comp, y, w, d); break;
+                case "cella":       y = this._buildCella(group, comp, y, w, d); break;
+                case "walls":       y = this._buildWalls(group, comp, y, w, d); break;
             }
-
-            mesh = new THREE.Mesh(geo, mat);
-            mesh.position.set(pos[0], pos[1] + yOffset, pos[2]);
-
-            // Optional rotation
-            if (shape.rotation) {
-                mesh.rotation.set(
-                    shape.rotation[0] || 0,
-                    shape.rotation[1] || 0,
-                    shape.rotation[2] || 0
-                );
-            }
-
-            group.add(mesh);
         }
     }
 
-    _assembleBuilding_DEAD(g, w, d, h, wallColor, roofColor, features, spec) {
-        const featureSet = new Set(features.map(f => f.split(":")[0]));
-        const getParam = (name) => {
-            const f = features.find(f => f.startsWith(name + ":"));
-            return f ? parseInt(f.split(":")[1]) || 0 : 0;
-        };
+    // Stepped platform
+    _buildPodium(group, comp, baseY, w, d) {
+        const steps = comp.steps || 3;
+        const totalH = comp.height || steps * 0.06;
+        const stepH = totalH / steps;
+        const color = comp.color || "#c8b88a";
 
-        let currentY = 0;
+        for (let i = 0; i < steps; i++) {
+            const shrink = (i / steps) * 0.08;
+            const step = new THREE.Mesh(
+                new THREE.BoxGeometry(w - shrink, stepH, d - shrink),
+                this._mat(color)
+            );
+            step.position.y = baseY + i * stepH + stepH / 2;
+            group.add(step);
+        }
+        return baseY + totalH;
+    }
 
-        // 1. STEPPED BASE
-        const steps = getParam("stepped_base") || 0;
-        if (steps > 0) {
-            for (let i = 0; i < steps; i++) {
-                const sw = w + 0.1 - i * 0.04;
-                const sd = d + 0.1 - i * 0.04;
-                const step = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.08, sd), this._mat("#c8b88a"));
-                step.position.y = currentY + 0.04;
-                g.add(step);
-                currentY += 0.08;
+    // Columns with capitals/bases arranged by style
+    _buildColonnade(group, comp, baseY, w, d) {
+        const numCols = comp.columns || 6;
+        const colH = comp.height || 0.7;
+        const style = comp.style || "ionic";
+        const color = comp.color || "#e8e0d0";
+        const r = comp.radius || 0.03;
+        const peripteral = comp.peripteral !== false;
+
+        const baseH = style === "doric" ? 0 : 0.03;
+        const capH = style === "corinthian" ? 0.06 : 0.04;
+        const capW = r * (style === "corinthian" ? 3.0 : 2.5);
+        const inset = r + 0.03;
+
+        // Calculate column positions
+        const positions = [];
+        if (peripteral && numCols >= 4) {
+            const frontN = Math.max(2, Math.round(numCols * w / (2 * (w + d))));
+            const sideN = Math.max(2, Math.round(numCols * d / (2 * (w + d))));
+            const fx = (i, n) => -w / 2 + inset + (w - inset * 2) / Math.max(n - 1, 1) * i;
+            const fz = (i, n) => -d / 2 + inset + (d - inset * 2) / Math.max(n - 1, 1) * i;
+            for (let i = 0; i < frontN; i++) { positions.push({ x: fx(i, frontN), z: -d / 2 + inset }); }
+            for (let i = 0; i < frontN; i++) { positions.push({ x: fx(i, frontN), z: d / 2 - inset }); }
+            for (let i = 1; i < sideN - 1; i++) { positions.push({ x: -w / 2 + inset, z: fz(i, sideN) }); }
+            for (let i = 1; i < sideN - 1; i++) { positions.push({ x: w / 2 - inset, z: fz(i, sideN) }); }
+        } else {
+            // Prostyle: front row only
+            const spacing = (w - inset * 2) / Math.max(numCols - 1, 1);
+            for (let i = 0; i < numCols; i++) {
+                positions.push({ x: -w / 2 + inset + spacing * i, z: -d / 2 + inset });
             }
         }
 
-        // 2. MAIN WALLS
-        const wallH = h - currentY;
-        const stories = getParam("stories") || 1;
-        const storyH = wallH / stories;
+        for (const pos of positions) {
+            // Shaft — slight taper (entasis)
+            const shaft = new THREE.Mesh(
+                new THREE.CylinderGeometry(r, r + 0.005, colH, 8),
+                this._mat(color, 0.3)
+            );
+            shaft.position.set(pos.x, baseY + baseH + colH / 2, pos.z);
+            group.add(shaft);
+
+            // Base (not for doric)
+            if (baseH > 0) {
+                const base = new THREE.Mesh(
+                    new THREE.CylinderGeometry(r + 0.01, r + 0.015, baseH, 8),
+                    this._mat(color, 0.35)
+                );
+                base.position.set(pos.x, baseY + baseH / 2, pos.z);
+                group.add(base);
+            }
+
+            // Capital
+            if (style === "corinthian") {
+                // Ornate: stacked boxes
+                const c1 = new THREE.Mesh(new THREE.BoxGeometry(capW * 0.7, capH * 0.6, capW * 0.7), this._mat(color, 0.3));
+                c1.position.set(pos.x, baseY + baseH + colH + capH * 0.3, pos.z);
+                group.add(c1);
+                const c2 = new THREE.Mesh(new THREE.BoxGeometry(capW, capH * 0.4, capW), this._mat(color, 0.3));
+                c2.position.set(pos.x, baseY + baseH + colH + capH * 0.8, pos.z);
+                group.add(c2);
+            } else {
+                const cap = new THREE.Mesh(new THREE.BoxGeometry(capW, capH, capW), this._mat(color, 0.3));
+                cap.position.set(pos.x, baseY + baseH + colH + capH / 2, pos.z);
+                group.add(cap);
+            }
+        }
+
+        // Entablature
+        const entH = 0.05;
+        const ent = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.02, entH, d + 0.02),
+            this._mat(color, 0.35)
+        );
+        ent.position.y = baseY + baseH + colH + capH + entH / 2;
+        group.add(ent);
+
+        return baseY + baseH + colH + capH + entH;
+    }
+
+    // Triangular gabled roof
+    _buildPediment(group, comp, baseY, w, d) {
+        const peakH = comp.height || w * 0.25;
+        const color = comp.color || "#d4a373";
+        const hw = w / 2, hd = d / 2;
+
+        // Gabled roof: ridge runs along Z, slopes on left/right, gables on front/back
+        const verts = new Float32Array([
+            // Left slope (two triangles)
+            -hw, baseY, -hd,   -hw, baseY, hd,   0, baseY + peakH, hd,
+            -hw, baseY, -hd,   0, baseY + peakH, hd,   0, baseY + peakH, -hd,
+            // Right slope (two triangles)
+            hw, baseY, hd,   hw, baseY, -hd,   0, baseY + peakH, -hd,
+            hw, baseY, hd,   0, baseY + peakH, -hd,   0, baseY + peakH, hd,
+            // Front gable
+            -hw, baseY, -hd,   0, baseY + peakH, -hd,   hw, baseY, -hd,
+            // Back gable
+            hw, baseY, hd,   0, baseY + peakH, hd,   -hw, baseY, hd,
+        ]);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+        geo.computeVertexNormals();
+        group.add(new THREE.Mesh(geo, this._mat(color)));
+
+        // Ridge beam
+        const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, d + 0.02), this._mat(color));
+        ridge.position.set(0, baseY + peakH, 0);
+        group.add(ridge);
+
+        return baseY + peakH;
+    }
+
+    // Hemisphere dome
+    _buildDome(group, comp, baseY, w, d) {
+        const r = comp.radius || Math.min(w, d) * 0.4;
+        const color = comp.color || "#8b7355";
+
+        const dome = new THREE.Mesh(
+            new THREE.SphereGeometry(r, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+            this._mat(color, 0.4)
+        );
+        dome.position.y = baseY;
+        group.add(dome);
+
+        // Oculus ring at top
+        const oculus = new THREE.Mesh(
+            new THREE.TorusGeometry(r * 0.12, 0.01, 6, 12),
+            this._mat("#e8e0d0", 0.3)
+        );
+        oculus.rotation.x = -Math.PI / 2;
+        oculus.position.y = baseY + r - 0.01;
+        group.add(oculus);
+
+        return baseY + r;
+    }
+
+    // Multi-story block with windows
+    _buildBlock(group, comp, baseY, w, d) {
+        const stories = comp.stories || 2;
+        const storyH = comp.storyHeight || 0.3;
+        const color = comp.color || "#d4a373";
+        const windowColor = comp.windowColor || "#1a1008";
+        const totalH = stories * storyH;
 
         for (let s = 0; s < stories; s++) {
-            const storyW = w - s * 0.03; // slight taper
-            const storyD = d - s * 0.03;
+            const shrink = s * 0.015;
+            const sw = w - shrink, sd = d - shrink;
             const wall = new THREE.Mesh(
-                new THREE.BoxGeometry(storyW, storyH - 0.02, storyD),
-                this._mat(wallColor)
+                new THREE.BoxGeometry(sw, storyH - 0.01, sd),
+                this._mat(color)
             );
-            wall.position.y = currentY + s * storyH + storyH / 2;
-            g.add(wall);
+            wall.position.y = baseY + s * storyH + storyH / 2;
+            group.add(wall);
 
-            // WINDOWS
-            const numWindows = getParam("windows") || 0;
-            if (numWindows > 0) {
-                const winPerSide = Math.ceil(numWindows / 2);
-                for (let side = -1; side <= 1; side += 2) {
-                    for (let wi = 0; wi < winPerSide; wi++) {
-                        const winW = 0.05 + Math.random() * 0.03;
-                        const winH = 0.08 + Math.random() * 0.04;
-                        const spacing = storyD / (winPerSide + 1);
-                        const win = new THREE.Mesh(
-                            new THREE.BoxGeometry(0.02, winH, winW),
-                            this._mat("#1a1008")
-                        );
-                        win.position.set(
-                            side * (storyW / 2 + 0.005),
-                            currentY + s * storyH + storyH * 0.55,
-                            -storyD / 2 + spacing * (wi + 1)
-                        );
-                        g.add(win);
-                    }
-                }
+            // Windows on front and back
+            const numWin = comp.windows || Math.max(1, Math.floor(sw / 0.18));
+            const winW = 0.05, winH = storyH * 0.35;
+            const winSpacing = sw / (numWin + 1);
+
+            for (let wi = 0; wi < numWin; wi++) {
+                const wx = -sw / 2 + winSpacing * (wi + 1);
+                const wy = baseY + s * storyH + storyH * 0.55;
+
+                // Front windows
+                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor));
+                wf.position.set(wx, wy, -sd / 2 - 0.005);
+                group.add(wf);
+
+                // Back windows
+                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor));
+                wb.position.set(wx, wy, sd / 2 + 0.005);
+                group.add(wb);
             }
 
-            // BALCONIES
-            if (featureSet.has("balconies") && s > 0) {
-                const balcony = new THREE.Mesh(
-                    new THREE.BoxGeometry(storyW + 0.06, 0.025, storyD + 0.06),
-                    this._mat("#a08060")
+            // Floor line between stories
+            if (s > 0) {
+                const ledge = new THREE.Mesh(
+                    new THREE.BoxGeometry(sw + 0.02, 0.015, sd + 0.02),
+                    this._mat(color)
                 );
-                balcony.position.y = currentY + s * storyH + 0.01;
-                g.add(balcony);
+                ledge.position.y = baseY + s * storyH;
+                group.add(ledge);
             }
         }
+        return baseY + totalH;
+    }
 
-        const topY = currentY + wallH;
+    // Arched openings with pillars
+    _buildArcade(group, comp, baseY, w, d) {
+        const numArches = comp.arches || 3;
+        const totalH = comp.height || 0.6;
+        const color = comp.color || "#c8b88a";
+        const pillarW = 0.06;
+        const archSpacing = w / numArches;
+        const archR = Math.min((archSpacing - pillarW) / 2 * 0.85, totalH * 0.45);
+        const pillarH = Math.max(0.1, totalH - archR);
 
-        // 3. COLUMNS
-        const numColumns = getParam("columns") || 0;
-        if (numColumns > 0) {
-            const colH = wallH * 0.85;
-            const colSpacing = d / (Math.ceil(numColumns / 2) + 1);
-            let colIdx = 0;
-            for (let side = -1; side <= 1; side += 2) {
-                const cols = Math.ceil(numColumns / 2);
-                for (let ci = 0; ci < cols; ci++) {
-                    const radius = 0.025 + Math.random() * 0.01;
-                    const col = new THREE.Mesh(
-                        new THREE.CylinderGeometry(radius, radius + 0.005, colH, 8),
-                        this._mat("#f0ead8", 0.3)
-                    );
-                    col.position.set(
-                        side * (w / 2 - 0.02),
-                        currentY + colH / 2,
-                        -d / 2 + colSpacing * (ci + 1)
-                    );
-                    g.add(col);
-
-                    // Capital
-                    const capSize = radius * 2.5;
-                    const cap = new THREE.Mesh(
-                        new THREE.BoxGeometry(capSize, capSize * 0.4, capSize),
-                        this._mat("#f0ead8", 0.3)
-                    );
-                    cap.position.set(col.position.x, currentY + colH + capSize * 0.2, col.position.z);
-                    g.add(cap);
-
-                    // Base
-                    const base = new THREE.Mesh(
-                        new THREE.CylinderGeometry(radius + 0.01, radius + 0.015, 0.04, 8),
-                        this._mat("#e0d8c8")
-                    );
-                    base.position.set(col.position.x, currentY + 0.02, col.position.z);
-                    g.add(base);
-                    colIdx++;
-                }
-            }
-
-            // Entablature if columns present
-            const beam = new THREE.Mesh(
-                new THREE.BoxGeometry(w + 0.04, 0.06, d + 0.04),
-                this._mat("#e8e0d0", 0.35)
+        // Pillars between arches
+        for (let i = 0; i <= numArches; i++) {
+            const px = -w / 2 + i * archSpacing;
+            const pillar = new THREE.Mesh(
+                new THREE.BoxGeometry(pillarW, pillarH, d),
+                this._mat(color)
             );
-            beam.position.y = topY - 0.03;
-            g.add(beam);
+            pillar.position.set(px, baseY + pillarH / 2, 0);
+            group.add(pillar);
         }
 
-        // 4. ROOF
-        if (featureSet.has("pediment")) {
-            // Triangular pediment roof
-            const peakH = h * 0.25;
-            const verts = new Float32Array([
-                -w/2, topY, -d/2,   w/2, topY, -d/2,   0, topY + peakH, 0,
-                -w/2, topY,  d/2,   w/2, topY,  d/2,   0, topY + peakH, 0,
-                -w/2, topY, -d/2,  -w/2, topY,  d/2,   0, topY + peakH, 0,
-                 w/2, topY, -d/2,   w/2, topY,  d/2,   0, topY + peakH, 0,
-            ]);
-            const geo = new THREE.BufferGeometry();
-            geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
-            geo.computeVertexNormals();
-            g.add(new THREE.Mesh(geo, this._mat(roofColor)));
-        } else if (featureSet.has("dome")) {
-            const domeR = Math.min(w, d) * 0.45;
-            const dome = new THREE.Mesh(
-                new THREE.SphereGeometry(domeR, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2),
-                this._mat(roofColor, 0.4)
-            );
-            dome.position.y = topY;
-            g.add(dome);
-        } else if (featureSet.has("flat_roof")) {
-            const roof = new THREE.Mesh(
-                new THREE.BoxGeometry(w + 0.04, 0.04, d + 0.04),
-                this._mat(roofColor)
-            );
-            roof.position.y = topY + 0.02;
-            g.add(roof);
-        } else if (featureSet.has("tiled_roof")) {
-            // Angled tiled roof
-            for (const side of [-1, 1]) {
-                const slope = new THREE.Mesh(
-                    new THREE.BoxGeometry(w + 0.02, 0.04, d * 0.55),
-                    this._mat(roofColor)
-                );
-                slope.position.set(0, topY + 0.08, side * d * 0.2);
-                slope.rotation.x = side * 0.25;
-                g.add(slope);
-            }
-        }
-
-        // 5. ARCHES
-        const numArches = getParam("arches") || 0;
-        if (numArches > 0) {
-            const archSpacing = w / (numArches + 1);
-            for (let ai = 0; ai < numArches; ai++) {
-                const archR = 0.12 + Math.random() * 0.05;
+        // Arch semicircles on front and back faces
+        for (let i = 0; i < numArches; i++) {
+            const cx = -w / 2 + (i + 0.5) * archSpacing;
+            for (const z of [-d / 2, d / 2]) {
                 const arch = new THREE.Mesh(
-                    new THREE.TorusGeometry(archR, 0.025, 6, 10, Math.PI),
-                    this._mat(wallColor)
+                    new THREE.TorusGeometry(archR, 0.02, 6, 12, Math.PI),
+                    this._mat(color)
                 );
-                arch.position.set(-w/2 + archSpacing * (ai + 1), h * 0.6, -d/2 - 0.01);
-                arch.rotation.z = Math.PI;
-                arch.rotation.y = Math.PI / 2;
-                g.add(arch);
+                arch.rotation.x = -Math.PI / 2;
+                arch.position.set(cx, baseY + pillarH, z);
+                group.add(arch);
             }
         }
 
-        // 6. DOOR
-        if (featureSet.has("door") || featureSet.has("entrance")) {
-            const doorW = 0.08 + Math.random() * 0.05;
-            const doorH = 0.2 + Math.random() * 0.1;
-            const door = new THREE.Mesh(
-                new THREE.BoxGeometry(doorW, doorH, 0.02),
-                this._mat("#3a2510")
-            );
-            door.position.set(0, currentY + doorH / 2, -d / 2 - 0.01);
-            g.add(door);
-        }
+        // Top beam
+        const beamH = 0.04;
+        const beam = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.02, beamH, d + 0.02),
+            this._mat(color)
+        );
+        beam.position.y = baseY + pillarH + archR + beamH / 2;
+        group.add(beam);
 
-        // 7. BATTLEMENTS
-        if (featureSet.has("battlements")) {
-            const numMerlons = Math.floor(w / 0.12);
-            for (let i = 0; i < numMerlons; i++) {
-                if (i % 2 === 0) {
-                    const merlon = new THREE.Mesh(
-                        new THREE.BoxGeometry(0.06, 0.1, d * 0.3),
-                        this._mat(wallColor)
-                    );
-                    merlon.position.set(-w/2 + 0.06 + i * 0.12, topY + 0.05, 0);
-                    g.add(merlon);
+        return baseY + pillarH + archR + beamH;
+    }
+
+    // Angled tile roof
+    _buildTiledRoof(group, comp, baseY, w, d) {
+        const color = comp.color || "#b5651d";
+        const peakH = comp.height || w * 0.2;
+
+        for (const side of [-1, 1]) {
+            const slope = new THREE.Mesh(
+                new THREE.BoxGeometry(w + 0.02, 0.03, d * 0.55),
+                this._mat(color)
+            );
+            slope.position.set(0, baseY + peakH * 0.5, side * d * 0.2);
+            slope.rotation.x = side * 0.25;
+            group.add(slope);
+        }
+        return baseY + peakH;
+    }
+
+    // Courtyard with impluvium pool
+    _buildAtrium(group, comp, baseY, w, d) {
+        const wallH = comp.height || 0.3;
+        const t = comp.thickness || 0.06;
+        const color = comp.color || "#d4a373";
+
+        // Perimeter walls with gap in front
+        const gapW = w * 0.3;
+        const halfW = (w - gapW) / 2;
+
+        const lf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._mat(color));
+        lf.position.set(-w / 2 + halfW / 2, baseY + wallH / 2, -d / 2 + t / 2);
+        group.add(lf);
+
+        const rf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._mat(color));
+        rf.position.set(w / 2 - halfW / 2, baseY + wallH / 2, -d / 2 + t / 2);
+        group.add(rf);
+
+        const bw = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, t), this._mat(color));
+        bw.position.set(0, baseY + wallH / 2, d / 2 - t / 2);
+        group.add(bw);
+
+        const lw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._mat(color));
+        lw.position.set(-w / 2 + t / 2, baseY + wallH / 2, 0);
+        group.add(lw);
+
+        const rw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._mat(color));
+        rw.position.set(w / 2 - t / 2, baseY + wallH / 2, 0);
+        group.add(rw);
+
+        // Impluvium pool in center
+        const poolW = w * 0.3, poolD = d * 0.3;
+        const pool = new THREE.Mesh(
+            new THREE.BoxGeometry(poolW, 0.03, poolD),
+            new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity: 0.7, roughness: 0.05 })
+        );
+        pool.position.y = baseY + 0.015;
+        pool.userData.isWater = true;
+        group.add(pool);
+
+        return baseY + wallH;
+    }
+
+    // Figure on pedestal
+    _buildStatue(group, comp, baseY) {
+        const totalH = comp.height || 0.5;
+        const color = comp.color || "#c0b090";
+        const pedColor = comp.pedestalColor || "#8a7e6e";
+        const pedH = totalH * 0.3;
+        const figH = totalH * 0.5;
+        const headR = totalH * 0.08;
+
+        const ped = new THREE.Mesh(new THREE.BoxGeometry(0.12, pedH, 0.12), this._mat(pedColor));
+        ped.position.y = baseY + pedH / 2;
+        group.add(ped);
+
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, figH, 8), this._mat(color, 0.5));
+        body.position.y = baseY + pedH + figH / 2;
+        group.add(body);
+
+        const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), this._mat(color, 0.5));
+        head.position.y = baseY + pedH + figH + headR;
+        group.add(head);
+
+        return baseY + totalH;
+    }
+
+    // Circular basin with water
+    _buildFountain(group, comp, baseY) {
+        const r = comp.radius || 0.15;
+        const h = comp.height || 0.25;
+        const color = comp.color || "#a0968a";
+
+        // Basin
+        const basin = new THREE.Mesh(
+            new THREE.CylinderGeometry(r, r - 0.02, h * 0.35, 12),
+            this._mat(color)
+        );
+        basin.position.y = baseY + h * 0.175;
+        group.add(basin);
+
+        // Water surface
+        const water = new THREE.Mesh(
+            new THREE.CylinderGeometry(r - 0.02, r - 0.02, 0.02, 12),
+            new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity: 0.7, roughness: 0.05 })
+        );
+        water.position.y = baseY + h * 0.33;
+        water.userData.isWater = true;
+        group.add(water);
+
+        // Central spout column
+        const col = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.015, 0.02, h * 0.7, 8),
+            this._mat(color)
+        );
+        col.position.y = baseY + h * 0.35 + h * 0.35;
+        group.add(col);
+
+        return baseY + h;
+    }
+
+    // Shade canopy (decorative — does not advance Y)
+    _buildAwning(group, comp, baseY, w, d) {
+        const color = comp.color || "#cc3333";
+        const awning = new THREE.Mesh(
+            new THREE.BoxGeometry(w * 0.85, 0.02, d * 0.4),
+            this._mat(color)
+        );
+        awning.position.set(0, baseY - 0.05, -d / 2 - d * 0.15);
+        awning.rotation.x = 0.15;
+        group.add(awning);
+        return baseY;
+    }
+
+    // Crenellated wall top
+    _buildBattlements(group, comp, baseY, w, d) {
+        const color = comp.color || "#c8b88a";
+        const merlonH = comp.height || 0.1;
+        const merlonW = 0.06;
+        const numMerlons = Math.max(2, Math.floor(w / (merlonW * 2)));
+        const spacing = w / numMerlons;
+
+        for (let i = 0; i < numMerlons; i++) {
+            if (i % 2 === 0) {
+                for (const z of [-d / 2, d / 2]) {
+                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonW, merlonH, 0.04), this._mat(color));
+                    m.position.set(-w / 2 + spacing * (i + 0.5), baseY + merlonH / 2, z);
+                    group.add(m);
                 }
             }
         }
+        return baseY + merlonH;
+    }
 
-        // 8. AWNING / CANOPY
-        if (featureSet.has("awning")) {
-            const awning = new THREE.Mesh(
-                new THREE.BoxGeometry(w * 0.9, 0.02, d * 0.4),
-                this._mat(spec.awning_color || "#cc3333")
-            );
-            awning.position.set(0, topY * 0.85, -d / 2 - d * 0.15);
-            awning.rotation.x = 0.15;
-            g.add(awning);
-        }
+    // Amphitheater seating ring
+    _buildTier(group, comp, baseY, w, d) {
+        const h = comp.height || 0.15;
+        const color = comp.color || "#c4a860";
+        const r = Math.min(w, d) * 0.42;
 
-        // 9. COURTYARD / ATRIUM
-        if (featureSet.has("atrium")) {
-            const pool = new THREE.Mesh(
-                new THREE.BoxGeometry(w * 0.3, 0.03, d * 0.3),
-                new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity: 0.7, roughness: 0.05 })
-            );
-            pool.position.y = topY + 0.02;
-            g.add(pool);
-        }
+        const tier = new THREE.Mesh(
+            new THREE.TorusGeometry(r, h / 2, 6, 24),
+            this._mat(color)
+        );
+        tier.rotation.x = Math.PI / 2;
+        tier.position.y = baseY + h / 2;
+        group.add(tier);
 
-        // 10. PILASTERS
-        const numPilasters = getParam("pilasters") || 0;
-        if (numPilasters > 0) {
-            const pilSpacing = d / (numPilasters + 1);
-            for (let side = -1; side <= 1; side += 2) {
-                for (let pi = 0; pi < numPilasters; pi++) {
-                    const pil = new THREE.Mesh(
-                        new THREE.BoxGeometry(0.04, wallH * 0.9, 0.05),
-                        this._mat("#e0d8c8", 0.4)
-                    );
-                    pil.position.set(side * (w / 2 + 0.01), currentY + wallH * 0.45, -d/2 + pilSpacing * (pi + 1));
-                    g.add(pil);
-                }
+        return baseY + h;
+    }
+
+    // Entrance (decorative — does not advance Y)
+    _buildDoor(group, comp, baseY) {
+        const doorW = comp.width || 0.1;
+        const doorH = comp.height || 0.2;
+        const color = comp.color || "#3a2510";
+
+        const door = new THREE.Mesh(
+            new THREE.BoxGeometry(doorW, doorH, 0.02),
+            this._mat(color)
+        );
+        door.position.set(comp.x || 0, baseY + doorH / 2, comp.z || 0);
+        group.add(door);
+
+        // Arch above door
+        const archR = doorW * 0.6;
+        const arch = new THREE.Mesh(
+            new THREE.TorusGeometry(archR, 0.01, 6, 8, Math.PI),
+            this._mat(comp.frameColor || "#8a7e6e")
+        );
+        arch.rotation.x = -Math.PI / 2;
+        arch.position.set(comp.x || 0, baseY + doorH, comp.z || 0);
+        group.add(arch);
+
+        return baseY;
+    }
+
+    // Flat pilasters on walls (decorative — does not advance Y)
+    _buildPilasters(group, comp, baseY, w, d) {
+        const count = comp.count || 4;
+        const h = comp.height || 0.5;
+        const color = comp.color || "#e0d8c8";
+        const spacing = d / (count + 1);
+
+        for (const side of [-1, 1]) {
+            for (let i = 0; i < count; i++) {
+                const pil = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.04, h, 0.05),
+                    this._mat(color, 0.4)
+                );
+                pil.position.set(side * (w / 2 + 0.01), baseY + h / 2, -d / 2 + spacing * (i + 1));
+                group.add(pil);
             }
         }
+        return baseY;
+    }
 
-        // 11. TIERS (amphitheater seating)
-        const numTiers = getParam("tiers") || 0;
-        if (numTiers > 0) {
-            for (let ti = 0; ti < numTiers; ti++) {
-                const tierR = Math.min(w, d) * 0.4 - ti * 0.04;
-                if (tierR > 0) {
-                    const tier = new THREE.Mesh(
-                        new THREE.TorusGeometry(tierR, 0.02, 4, 20),
-                        this._mat("#c4a860")
-                    );
-                    tier.rotation.x = Math.PI / 2;
-                    tier.position.y = currentY + 0.1 + ti * storyH * 0.3;
-                    g.add(tier);
-                }
-            }
+    // Barrel vault ceiling
+    _buildVault(group, comp, baseY, w, d) {
+        const vaultH = comp.height || w * 0.35;
+        const color = comp.color || "#c8b88a";
+        const segs = 12;
+
+        // Half-cylinder built from triangle strips
+        const positions = [];
+        for (let i = 0; i < segs; i++) {
+            const a0 = (i / segs) * Math.PI;
+            const a1 = ((i + 1) / segs) * Math.PI;
+            const x0 = Math.cos(a0) * w / 2, y0 = Math.sin(a0) * vaultH;
+            const x1 = Math.cos(a1) * w / 2, y1 = Math.sin(a1) * vaultH;
+
+            positions.push(
+                x0, baseY + y0, -d / 2,   x1, baseY + y1, -d / 2,   x0, baseY + y0, d / 2,
+                x1, baseY + y1, -d / 2,   x1, baseY + y1, d / 2,    x0, baseY + y0, d / 2
+            );
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geo.computeVertexNormals();
+        group.add(new THREE.Mesh(geo, this._mat(color)));
+
+        return baseY + vaultH;
+    }
+
+    // Flat slab roof
+    _buildFlatRoof(group, comp, baseY, w, d) {
+        const color = comp.color || "#c8b88a";
+        const overhang = comp.overhang || 0.04;
+        const thickness = 0.04;
+
+        const roof = new THREE.Mesh(
+            new THREE.BoxGeometry(w + overhang, thickness, d + overhang),
+            this._mat(color)
+        );
+        roof.position.y = baseY + thickness / 2;
+        group.add(roof);
+
+        return baseY + thickness;
+    }
+
+    // Temple inner chamber
+    _buildCella(group, comp, baseY, w, d) {
+        const h = comp.height || 0.6;
+        const cellaW = comp.width || w * 0.6;
+        const cellaD = comp.depth || d * 0.7;
+        const color = comp.color || "#e8e0d0";
+
+        const cella = new THREE.Mesh(
+            new THREE.BoxGeometry(cellaW, h, cellaD),
+            this._mat(color)
+        );
+        cella.position.set(0, baseY + h / 2, 0);
+        group.add(cella);
+
+        return baseY + h;
+    }
+
+    // Perimeter walls
+    _buildWalls(group, comp, baseY, w, d) {
+        const h = comp.height || 0.5;
+        const t = comp.thickness || 0.06;
+        const color = comp.color || "#d4a373";
+
+        const front = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._mat(color));
+        front.position.set(0, baseY + h / 2, -d / 2 + t / 2);
+        group.add(front);
+
+        const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._mat(color));
+        back.position.set(0, baseY + h / 2, d / 2 - t / 2);
+        group.add(back);
+
+        const left = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._mat(color));
+        left.position.set(-w / 2 + t / 2, baseY + h / 2, 0);
+        group.add(left);
+
+        const right = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._mat(color));
+        right.position.set(w / 2 - t / 2, baseY + h / 2, 0);
+        group.add(right);
+
+        return baseY + h;
+    }
+
+    // ═══════════════════════════════════════════════
+    // TYPE-SPECIFIC FALLBACKS
+    // When no spec is provided, generate a reasonable
+    // default component list per building_type.
+    // ═══════════════════════════════════════════════
+
+    _defaultComponents(buildingType, tileColor) {
+        const wall = tileColor || "#d4a373";
+        const stone = "#c8b88a";
+        const marble = "#e8e0d0";
+        const roof = "#b5651d";
+
+        switch (buildingType) {
+            case "temple":
+                return [
+                    { type: "podium", steps: 3, height: 0.18, color: stone },
+                    { type: "colonnade", columns: 6, style: "ionic", height: 0.7, color: marble },
+                    { type: "pediment", height: 0.2, color: roof },
+                ];
+            case "basilica":
+                return [
+                    { type: "podium", steps: 2, height: 0.1, color: stone },
+                    { type: "block", stories: 1, storyHeight: 0.7, color: wall, windows: 4 },
+                    { type: "colonnade", columns: 8, style: "corinthian", height: 0.6, color: marble, peripteral: false },
+                    { type: "tiled_roof", color: roof },
+                ];
+            case "insula":
+                return [
+                    { type: "block", stories: 4, storyHeight: 0.25, color: wall, windows: 3 },
+                    { type: "tiled_roof", color: roof },
+                ];
+            case "domus":
+                return [
+                    { type: "walls", height: 0.4, color: wall },
+                    { type: "atrium", height: 0.25, color: wall },
+                    { type: "tiled_roof", color: roof },
+                ];
+            case "aqueduct":
+                return [
+                    { type: "arcade", arches: 3, height: 0.8, color: stone },
+                    { type: "block", stories: 1, storyHeight: 0.12, color: stone, windows: 0 },
+                ];
+            case "thermae":
+                return [
+                    { type: "podium", steps: 2, height: 0.1, color: stone },
+                    { type: "block", stories: 1, storyHeight: 0.5, color: wall, windows: 3 },
+                    { type: "dome", radius: 0.3, color: "#8b7355" },
+                ];
+            case "amphitheater":
+                return [
+                    { type: "arcade", arches: 5, height: 0.35, color: stone },
+                    { type: "tier", height: 0.18, color: "#c4a860" },
+                    { type: "tier", height: 0.15, color: "#c4a860" },
+                    { type: "tier", height: 0.12, color: "#b8a050" },
+                ];
+            case "circus":
+                return [
+                    { type: "walls", height: 0.25, color: stone },
+                    { type: "tier", height: 0.18, color: "#c4a860" },
+                    { type: "tier", height: 0.12, color: "#c4a860" },
+                ];
+            case "market":
+                return [
+                    { type: "block", stories: 1, storyHeight: 0.4, color: wall, windows: 2 },
+                    { type: "awning", color: "#cc3333" },
+                    { type: "flat_roof", color: stone },
+                ];
+            case "taberna":
+                return [
+                    { type: "block", stories: 1, storyHeight: 0.35, color: wall, windows: 1 },
+                    { type: "awning", color: "#cc3333" },
+                    { type: "flat_roof", color: stone },
+                ];
+            case "warehouse":
+                return [
+                    { type: "block", stories: 1, storyHeight: 0.5, color: wall, windows: 0 },
+                    { type: "flat_roof", color: stone },
+                ];
+            case "gate":
+                return [
+                    { type: "arcade", arches: 1, height: 0.6, color: stone },
+                    { type: "battlements", color: stone, height: 0.1 },
+                ];
+            case "monument":
+                return [
+                    { type: "podium", steps: 4, height: 0.25, color: marble },
+                    { type: "statue", height: 0.5, color: "#c0b090" },
+                ];
+            case "wall":
+                return [
+                    { type: "walls", height: 0.5, color: stone, thickness: 0.12 },
+                    { type: "battlements", color: stone, height: 0.1 },
+                ];
+            case "bridge":
+                return [
+                    { type: "arcade", arches: 3, height: 0.5, color: stone },
+                    { type: "flat_roof", color: stone },
+                ];
+            default:
+                return [
+                    { type: "block", stories: 1, storyHeight: 0.5, color: tileColor || "#d4a373", windows: 2 },
+                    { type: "flat_roof", color: "#c8b88a" },
+                ];
         }
     }
 
