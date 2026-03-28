@@ -579,29 +579,38 @@ document.addEventListener("DOMContentLoaded", () => {
         if (e.key === "Escape") closeTileDetail();
     });
 
-    // Make nav panel draggable
-    const nav = document.getElementById("nav-controls");
-    if (nav) {
+    // Make all panels draggable by their header/background
+    function makeDraggable(el, handleSelector) {
+        if (!el) return;
         let dragging = false, offX = 0, offY = 0;
-        nav.addEventListener("mousedown", e => {
-            if (e.target.classList.contains("nav-btn")) return; // don't drag when clicking buttons
+        const handle = handleSelector ? el.querySelector(handleSelector) : el;
+        if (!handle) return;
+        handle.style.cursor = "grab";
+        handle.addEventListener("mousedown", e => {
+            if (e.target.tagName === "BUTTON" || e.target.classList.contains("nav-btn") ||
+                e.target.classList.contains("close-btn")) return;
             dragging = true;
-            offX = e.clientX - nav.getBoundingClientRect().left;
-            offY = e.clientY - nav.getBoundingClientRect().top;
-            nav.style.cursor = "grabbing";
+            offX = e.clientX - el.getBoundingClientRect().left;
+            offY = e.clientY - el.getBoundingClientRect().top;
+            handle.style.cursor = "grabbing";
             e.preventDefault();
         });
         document.addEventListener("mousemove", e => {
             if (!dragging) return;
-            nav.style.left = (e.clientX - offX) + "px";
-            nav.style.top = (e.clientY - offY) + "px";
-            nav.style.bottom = "auto";
-            nav.style.right = "auto";
+            el.style.left = (e.clientX - offX) + "px";
+            el.style.top = (e.clientY - offY) + "px";
+            el.style.bottom = "auto";
+            el.style.right = "auto";
         });
         document.addEventListener("mouseup", () => {
-            if (dragging) { dragging = false; nav.style.cursor = "grab"; }
+            if (dragging) { dragging = false; handle.style.cursor = "grab"; }
         });
     }
+
+    makeDraggable(document.getElementById("nav-controls"));
+    makeDraggable(document.getElementById("map-overlay"), ".map-overlay-header");
+    makeDraggable(document.getElementById("log-overlay"), ".map-overlay-header");
+    makeDraggable(document.getElementById("tile-detail"));
 
     connect();
 });
