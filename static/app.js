@@ -612,5 +612,17 @@ document.addEventListener("DOMContentLoaded", () => {
     makeDraggable(document.getElementById("log-overlay"), ".map-overlay-header");
     makeDraggable(document.getElementById("tile-detail"));
 
+    // Wire up nav buttons via data attributes (avoids onclick/drag conflicts)
+    document.querySelectorAll(".nav-btn[data-action]").forEach(btn => {
+        btn.addEventListener("click", e => {
+            e.stopPropagation();
+            if (!renderer || renderer._failed) return;
+            const action = btn.dataset.action;
+            if (action === "pan") renderer.panCamera(+btn.dataset.x, +btn.dataset.z);
+            else if (action === "orbit") renderer.orbitCamera(+btn.dataset.a, +btn.dataset.p);
+            else if (action === "zoom") renderer.zoomCamera(+btn.dataset.f);
+        });
+    });
+
     connect();
 });

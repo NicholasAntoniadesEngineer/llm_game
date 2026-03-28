@@ -105,31 +105,31 @@
         <div class="nav-section">
             <div class="nav-label">Move</div>
             <div class="nav-grid">
-                <button class="nav-btn" onclick="renderer.panCamera(0,-1)" title="Forward (W)">W</button>
-                <button class="nav-btn" onclick="renderer.panCamera(-1,0)" title="Left (A)">A</button>
-                <button class="nav-btn" onclick="renderer.panCamera(0,1)" title="Back (S)">S</button>
-                <button class="nav-btn" onclick="renderer.panCamera(1,0)" title="Right (D)">D</button>
+                <button class="nav-btn" data-action="pan" data-x="0" data-z="-1" title="Forward (W)">W</button>
+                <button class="nav-btn" data-action="pan" data-x="-1" data-z="0" title="Left (A)">A</button>
+                <button class="nav-btn" data-action="pan" data-x="0" data-z="1" title="Back (S)">S</button>
+                <button class="nav-btn" data-action="pan" data-x="1" data-z="0" title="Right (D)">D</button>
             </div>
         </div>
         <div class="nav-section">
             <div class="nav-label">Rotate</div>
             <div class="nav-row">
-                <button class="nav-btn" onclick="renderer.orbitCamera(0.15, 0)" title="Rotate left (Q)">Q</button>
-                <button class="nav-btn" onclick="renderer.orbitCamera(-0.15, 0)" title="Rotate right (E)">E</button>
+                <button class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Rotate left (Q)">Q</button>
+                <button class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Rotate right (E)">E</button>
             </div>
         </div>
         <div class="nav-section">
             <div class="nav-label">Zoom</div>
             <div class="nav-row">
-                <button class="nav-btn" onclick="renderer.zoomCamera(0.7)" title="Zoom in (R)">+</button>
-                <button class="nav-btn" onclick="renderer.zoomCamera(1.4)" title="Zoom out (F)">&minus;</button>
+                <button class="nav-btn" data-action="zoom" data-f="0.7" title="Zoom in (R)">+</button>
+                <button class="nav-btn" data-action="zoom" data-f="1.4" title="Zoom out (F)">&minus;</button>
             </div>
         </div>
         <div class="nav-section">
             <div class="nav-label">Tilt</div>
             <div class="nav-row">
-                <button class="nav-btn" onclick="renderer.orbitCamera(0, 0.15)" title="Tilt up">&#9650;</button>
-                <button class="nav-btn" onclick="renderer.orbitCamera(0, -0.15)" title="Tilt down">&#9660;</button>
+                <button class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up">&#9650;</button>
+                <button class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down">&#9660;</button>
             </div>
         </div>
     </div>
