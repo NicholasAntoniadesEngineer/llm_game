@@ -262,9 +262,9 @@ class WorldRenderer {
         } else if (["road", "forum", "garden", "water", "grass"].includes(terrain)) {
             this._buildTerrain(group, tile, spec);
         } else if (tile.building_type && typeof generateParametric === "function") {
-            // Use parametric generation with Vitruvian proportions
+            // Generative building with Vitruvian proportions + per-tile variation
             const params = spec.params || {};
-            const generated = generateParametric(tile.building_type, params, tileW, tileD);
+            const generated = generateParametric(tile.building_type, params, tileW, tileD, tile.x, tile.y);
             if (generated && generated.length > 0) {
                 this._buildComponents(group, generated, tileW, tileD);
             } else {
