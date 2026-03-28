@@ -120,11 +120,14 @@ class BuildEngine:
         survey = await self.surveyor.generate(
             f"Survey: {district['name']}\n"
             f"Description: {district.get('description', '')}\n"
-            f"Grid region: {region_str} (each tile ≈ 10 meters)\n"
+            f"Grid region: {region_str} (each tile ≈ 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT})\n"
             f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
             f"Known buildings: {', '.join(district.get('buildings', []))}\n"
-            f"Already built:\n{existing}\n\n"
-            f"Map exact positions for every structure. Space realistically."
+            f"Already built in nearby areas:\n{existing}\n\n"
+            f"Map exact positions for EVERY structure, road, and open space.\n"
+            f"- Place roads (1-2 tiles wide) connecting buildings and district edges so they link to adjacent districts.\n"
+            f"- Leave open plazas/forum areas (3x3+ tiles) — they are NOT filled with buildings.\n"
+            f"- Space buildings realistically with gaps for streets between them."
         )
         await self._set_status("cartographus", "speaking")
         await self._chat("cartographus", "survey", survey.get("commentary", "Survey complete."))

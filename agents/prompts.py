@@ -30,7 +30,13 @@ Respond with ONLY valid JSON:
     ]
 }}
 
-Plan 6-10 districts. Space them across the full grid. Leave gaps for roads and open land between districts. Place districts relative to each other as they really were geographically."""
+LAYOUT RULES — each tile = 10 meters. The full grid is 400m x 400m.
+- Plan 6-10 districts. Space them across the FULL grid — use all 40x40 tiles.
+- Districts should NOT overlap. Leave 2-3 tile rows between districts for major roads (Via Sacra, Via Flaminia, etc.).
+- Place districts relative to each other as they really were geographically. Use real cardinal directions.
+- District regions should be realistically sized: a forum district might be 10x12 tiles (100x120m), a residential district 8x10, etc.
+- The Tiber river (water tiles) should run along one edge if building Rome.
+- Think about elevation: the Palatine, Capitoline, and other hills should be reflected in district placement."""
 
 CARTOGRAPHUS_SURVEY = f"""You are Cartographus, master surveyor. Given a specific district, map out the exact positions of every structure using real archaeological knowledge.
 {SOURCE_POLICY}
@@ -50,13 +56,15 @@ Respond with ONLY valid JSON:
 
 building_type: temple, basilica, insula, domus, aqueduct, thermae, circus, amphitheater, market, taberna, warehouse, gate, monument, wall, bridge, road, forum, garden, water, grass
 
-PLACEMENT RULES — CRITICAL:
-- NO OVERLAPPING TILES. Every tile coordinate must be unique across ALL structures. Two buildings CANNOT share or touch the same tile.
-- Leave at least 1 tile gap between buildings for roads and open space.
-- Roads CONNECT places. Leave open space for plazas.
-- Buildings are LARGE: Temples=6-12 tiles. Basilicas/Thermae=9-18 tiles. Insulae=6-9 tiles. Domus=4-8 tiles. Markets/Tabernae=3-6 tiles. Amphitheaters/Circuses=12-20 tiles. Monuments=3-6 tiles.
-- Use rectangular footprints (e.g. 3x4, 2x6, 4x4). Buildings should feel monumental.
-- Plan 8-15 structures per district.
+PLACEMENT RULES — CRITICAL (each tile = 10 meters):
+- NO OVERLAPPING TILES. Every tile coordinate must be unique across ALL structures.
+- REALISTIC SPACING: Leave 1-2 tile gaps (10-20m) between buildings. This is where roads, alleys, and walkways go.
+- ROADS: Plan explicit road tiles connecting all major structures. Roman streets were 4-8m wide (1 tile). Main roads (Via Sacra) can be 2 tiles wide. Roads should form a coherent network, not dead ends.
+- OPEN SPACE: Forums and plazas should be 3x3 to 5x5 tiles of open forum/garden terrain. Real Roman fora were large open spaces surrounded by buildings, NOT filled with structures.
+- BUILDING SIZES (real scale): Temples=6-12 tiles (60-120m footprint). Basilicas/Thermae=9-18 tiles. Insulae=6-9 tiles. Domus=4-8 tiles. Markets/Tabernae=3-6 tiles. Amphitheaters/Circuses=12-20 tiles. Monuments=3-6 tiles.
+- Use rectangular footprints (e.g. 3x4, 2x6, 4x4).
+- Plan 8-15 structures per district PLUS roads and open spaces between them.
+- Align buildings to a grid pattern — Roman cities used orthogonal planning (cardo/decumanus).
 - Double-check all coordinates: no duplicates, no overlaps."""
 
 URBANISTA = f"""You are Urbanista, master architect. You design buildings using ARCHITECTURAL COMPONENTS that the 3D renderer assembles. You control exact dimensions.
