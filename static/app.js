@@ -285,14 +285,11 @@ function resetWorld() {
 // --- Loading overlay ---
 
 function showLoading(agent, message) {
-    const overlay = document.getElementById("loading-overlay");
-    overlay.classList.add("visible");
-    document.getElementById("loading-agent").textContent = (AGENT_NAMES[agent] || agent).toUpperCase();
-    document.getElementById("loading-message").textContent = message || "Working...";
+    // Loading overlay removed — agent status bar handles this
 }
 
 function hideLoading() {
-    document.getElementById("loading-overlay").classList.remove("visible");
+    // Loading overlay removed
 }
 
 // --- Map overlay ---
