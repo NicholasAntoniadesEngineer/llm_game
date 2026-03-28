@@ -1,7 +1,7 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
 
-const TILE_SIZE = 12; // world units per tile — controls overall scale of everything
+const TILE_SIZE = 6; // world units per tile — controls overall scale of everything
 
 class WorldRenderer {
     constructor(container) {
@@ -20,12 +20,12 @@ class WorldRenderer {
         this.scene.fog = new THREE.Fog(0x7EC8E3, 800, 2500);
 
         // Camera
-        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 3000);
+        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 2000);
 
         // Renderer
         this.renderer3d = new THREE.WebGLRenderer({ antialias: true });
         this.renderer3d.setSize(container.clientWidth, container.clientHeight);
-        this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer3d.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
@@ -35,19 +35,19 @@ class WorldRenderer {
         // Mediterranean lighting
         this.scene.add(new THREE.AmbientLight(0xffeedd, 0.45));
         const sun = new THREE.DirectionalLight(0xfff8e8, 1.0);
-        sun.position.set(350, 450, 250);
+        sun.position.set(180, 240, 120);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(4096, 4096);
+        sun.shadow.mapSize.set(2048, 2048);
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
+        sc.near = 1; sc.far = 800; sc.left = -300; sc.right = 300; sc.top = 300; sc.bottom = -300;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x87ceeb, 0x556b2f, 0.25));
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
-        this.cameraDistance = 500;
-        this.cameraTarget = new THREE.Vector3(240, 0, 240);
+        this.cameraDistance = 300;
+        this.cameraTarget = new THREE.Vector3(120, 0, 120);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
 
