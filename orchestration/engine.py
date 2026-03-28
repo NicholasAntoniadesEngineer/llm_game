@@ -8,8 +8,8 @@ from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
 from agents.base import BaseAgent
 from agents.prompts import (
-    IMPERATOR, CARTOGRAPHUS_PLAN, CARTOGRAPHUS_SURVEY,
-    URBANISTA, HISTORICUS, FABER, CIVIS,
+    CARTOGRAPHUS_PLAN, CARTOGRAPHUS_SURVEY,
+    URBANISTA, HISTORICUS,
 )
 from config import STEP_DELAY, SCENARIO, CLAUDE_MODEL, CLAUDE_MODEL_FAST, GRID_WIDTH, GRID_HEIGHT
 from persistence import save_state, save_districts_cache, load_districts_cache
@@ -27,14 +27,11 @@ class BuildEngine:
         self.district_index = 0
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
-        # Agents — Historicus and Urbanista use sonnet for quality-critical 3D generation
-        self.imperator = BaseAgent("imperator", "Imperator", IMPERATOR, CLAUDE_MODEL_FAST)
+        # Core agents only — Historicus and Urbanista use sonnet for quality
         self.planner = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_PLAN, CLAUDE_MODEL)
         self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, CLAUDE_MODEL)
-        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, "sonnet")
         self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, "sonnet")
-        self.faber = BaseAgent("faber", "Faber", FABER, CLAUDE_MODEL_FAST)
-        self.civis = BaseAgent("civis", "Civis", CIVIS, CLAUDE_MODEL_FAST)
+        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, "sonnet")
 
     async def run(self):
         self.running = True
@@ -168,24 +165,13 @@ class BuildEngine:
             if not tiles:
                 continue
 
-            # ─── WAVE 1: Imperator + Historian in parallel ───
-            await self._set_status("imperator", "thinking")
+            # ─── STEP 1: Historicus describes the building ───
             await self._set_status("historicus", "thinking")
-
-            imp_task = asyncio.create_task(self.imperator.generate(
-                f"Announce: {name} ({btype}) in {district['name']}"
-            ))
-            hist_task = asyncio.create_task(self.historicus.generate(
+            hist_result = await self.historicus.generate(
                 f"Describe and fact-check: {name} ({btype})\n"
                 f"In {district['name']}, year {district.get('year', '')} ({district.get('period', '')})\n"
                 f"Context: {desc}\nInclude detailed physical appearance for the Architect."
-            ))
-
-            imp_result, hist_result = await asyncio.gather(imp_task, hist_task)
-
-            await self._set_status("imperator", "speaking")
-            await self._chat("imperator", "directive", imp_result.get("commentary", f"Build {name}!"))
-            await self._set_status("imperator", "idle")
+            )
 
             hist_desc = hist_result.get("commentary", "")
             await self._set_status("historicus", "speaking")
@@ -275,29 +261,7 @@ class BuildEngine:
                     "year": district.get("year", ""),
                 })
 
-            # ─── WAVE 3: Builder + Citizen in parallel ───
-            await self._set_status("faber", "thinking")
-            await self._set_status("civis", "thinking")
-
-            fab_task = asyncio.create_task(self.faber.generate(
-                f"Built {name} ({len(placed)} tiles) in {district['name']}."
-            ))
-            civ_task = asyncio.create_task(self.civis.generate(
-                f"Life at {name} in {district['name']}, year {district.get('year', '')}. Building: {desc}"
-            ))
-
-            fab_result, civ_result = await asyncio.gather(fab_task, civ_task)
-
-            await self._set_status("faber", "speaking")
-            await self._chat("faber", "built", fab_result.get("commentary", f"{name} stands."))
-            await self._set_status("faber", "idle")
-
-            await self._set_status("civis", "speaking")
-            await self._chat("civis", "life", civ_result.get("commentary", "People gather."))
-            await self._set_status("civis", "idle")
-
-            if placed and civ_result.get("commentary"):
-                self.world.place_tile(placed[0]["x"], placed[0]["y"], {"scene": civ_result["commentary"]})
+            # Building placed — no Faber/Civis calls needed
 
             self.world.turn += 1
             await asyncio.sleep(STEP_DELAY)
