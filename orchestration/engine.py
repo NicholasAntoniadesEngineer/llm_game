@@ -91,9 +91,12 @@ class BuildEngine:
         result = await self.planner.generate(
             f"Research and map the city of {SCENARIO['location']} during {SCENARIO['period']}.\n"
             f"Time span: {SCENARIO['year_start']} to {SCENARIO['year_end']}.\n"
-            f"Ruler context: {SCENARIO['ruler']}.\n"
-            f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters, so the grid covers {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m).\n\n"
-            f"You are a world expert on the archaeology and topography of ancient {SCENARIO['location']}.\n"
+            f"Ruler context: {SCENARIO['ruler']}.\n\n"
+            f"ABOUT THIS CITY:\n{SCENARIO.get('description', '')}\n"
+            f"Key features: {SCENARIO.get('features', '')}\n"
+            f"Layout notes: {SCENARIO.get('grid_note', '')}\n\n"
+            f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters = {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m).\n\n"
+            f"You are a world expert on the archaeology and topography of {SCENARIO['location']}.\n"
             f"RESEARCH DEEPLY: What districts existed at this exact time? Which buildings had been built? "
             f"Which hadn't been constructed yet? What was the terrain like?\n\n"
             f"For each district, describe:\n"
@@ -101,8 +104,8 @@ class BuildEngine:
             f"- Its approximate real-world footprint in meters (then convert to tile coordinates)\n"
             f"- The specific buildings that existed there at this time (name each one)\n"
             f"- Major roads that bordered or crossed it\n"
-            f"- Natural features (hills, river, valleys)\n\n"
-            f"Be historically precise: if the Colosseum wasn't built until 80 CE, don't include it in 200 BCE."
+            f"- Natural features (hills, river, valleys, water bodies)\n\n"
+            f"Be historically precise: only include structures that existed at this time."
         )
         await self._set_status("cartographus", "speaking")
         await self._chat("cartographus", "research", result.get("commentary", "Research complete."))
@@ -462,23 +465,20 @@ class BuildEngine:
         return master_plan
 
     async def _find_map_image(self):
-        """Provide a known reliable map of ancient Rome."""
+        """Provide a known map for the selected city."""
+        known_maps = {
+            "Rome": ("https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Plan_de_Rome.jpg/1280px-Plan_de_Rome.jpg", "Paul Bigot's plan of ancient Rome"),
+            "Athens": ("https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/Map_ancient_athens.png/800px-Map_ancient_athens.png", "Map of ancient Athens"),
+            "Constantinople": ("https://upload.wikimedia.org/wikipedia/commons/thumb/2/2b/Byzantine_Constantinople-en.png/800px-Byzantine_Constantinople-en.png", "Map of Byzantine Constantinople"),
+            "Jerusalem": ("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Jerusalem_in_the_first_century.jpg/800px-Jerusalem_in_the_first_century.jpg", "Jerusalem in the 1st century"),
+            "Pompeii": ("https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/Pompeii_map-en.svg/800px-Pompeii_map-en.svg.png", "Archaeological map of Pompeii"),
+        }
         try:
-            # Stanford ORBIS / Digital Augustan Rome — reliable academic sources
-            known_maps = {
-                "Rome": {
-                    "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Plan_de_Rome.jpg/1280px-Plan_de_Rome.jpg",
-                    "source": "Paul Bigot's scale model plan of ancient Rome (Universit\u00e9 de Caen)"
-                },
-            }
             location = SCENARIO.get("location", "Rome")
-            entry = known_maps.get(location, known_maps["Rome"])
-            await self.broadcast({
-                "type": "map_image",
-                "url": entry["url"],
-                "source": entry["source"],
-            })
-            logger.info(f"Map image: {entry['source']}")
+            if location in known_maps:
+                url, source = known_maps[location]
+                await self.broadcast({"type": "map_image", "url": url, "source": source})
+                logger.info(f"Map image: {source}")
         except Exception as e:
             logger.warning(f"Map image failed: {e}")
 

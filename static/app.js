@@ -40,6 +40,12 @@ function handleMessage(msg) {
             updateTimeline(msg.period, msg.year);
             break;
 
+        case "scenario":
+            document.title = `${msg.city} — Eternal Cities`;
+            const sub = document.getElementById("subtitle");
+            if (sub) sub.textContent = `${msg.city}, ${msg.period} — AI agents reconstruct this city in real time`;
+            break;
+
         case "tile_update":
             renderer.updateTiles(msg.tiles);
             if (msg.period) updateTimeline(msg.period, msg.year);

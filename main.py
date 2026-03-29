@@ -17,12 +17,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-BANNER = """
+from config import SCENARIO as _sc
+BANNER = f"""
 ╔══════════════════════════════════════════════════╗
 ║                                                  ║
-║              R O M A   A E T E R N A             ║
+║          E T E R N A L   C I T I E S             ║
 ║                                                  ║
-║     Six AI Agents Build Ancient Rome — Live       ║
+║   {_sc['location']:^12s}, {_sc['period']:^24s}   ║
 ║                                                  ║
 ║          Open: http://localhost:8000              ║
 ║                                                  ║

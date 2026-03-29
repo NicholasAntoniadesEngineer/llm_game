@@ -48,6 +48,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         await websocket.send_json(world.to_dict())
+        # Send city/period info for UI
+        from config import SCENARIO
+        await websocket.send_json({
+            "type": "scenario",
+            "city": SCENARIO["location"],
+            "period": SCENARIO["period"],
+            "description": SCENARIO.get("description", ""),
+        })
         for msg in chat_history:
             await websocket.send_json(msg)
     except Exception:
