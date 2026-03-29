@@ -44,7 +44,8 @@ Respond with ONLY valid JSON:
             "year": -44,
             "period": "Name of the specific historical period",
             "buildings": ["Specific Building Name 1", "Specific Building Name 2"],
-            "terrain_notes": "Hills, slopes, water edges, vegetation in this district"
+            "terrain_notes": "Hills, slopes, water edges, vegetation in this district",
+            "environment_character": "One rich sentence: how wind, sun, water, and vegetation feel in this district — what distinguishes it from neighboring quarters"
         }}
     ]
 }}
@@ -83,7 +84,8 @@ Respond with ONLY valid JSON:
             "year": -44,
             "period": "Period label",
             "buildings": ["Building A", "Building B"],
-            "terrain_notes": "Topography, water, vegetation"
+            "terrain_notes": "Topography, water, vegetation",
+            "environment_character": "Sensory thumbnail for this quarter (breeze, dust, shade, harbor smell, etc.)"
         }}
     ],
     "seed_master_plan": null
@@ -135,13 +137,22 @@ FOR EACH STRUCTURE YOU MUST RESEARCH:
 Respond with ONLY valid JSON:
 {{
     "commentary": "4-7 sentences: what you found in sources about this district's layout; name specific excavations, publications, or inscriptions. Note uncertainties (restored vs attested) where relevant.",
+    "district_scenery_summary": "OPTIONAL but recommended for full-district surveys: 3-6 sentences tying together streets, water, and open ground — how movement and gathering work here.",
     "master_plan": [
         {{
             "name": "Real historical name of the structure",
             "building_type": "temple",
             "tiles": [{{"x": 14, "y": 18, "elevation": 0.3}}, {{"x": 15, "y": 18, "elevation": 0.3}}],
-            "description": "LONG (8-15 sentences): function and ritual/civic role; footprint shape and orientation (which façade faces what); elevation relative to neighbors; primary materials and finishes you expect above the podium; circulation (where doors/processions likely were); condition at this date (new, extended, damaged, rebuilt); how it reads from adjoining streets or plazas. This is the Historian layer — Urbanista will depend on it.",
+            "description": "LONG (8-15 sentences): function and ritual/civic role; footprint shape and orientation (which façade faces what); elevation relative to neighbors; primary materials and finishes you expect above the podium; circulation (where doors/processions likely were); condition at this date (new, extended, damaged, rebuilt); how it reads from adjoining streets or plazas; what faces the building across streets/plazas. This is the Historian layer — Urbanista will depend on it.",
             "historical_note": "LONG (5-10 sentences): attested dimensions or ranges; construction phases and dates; named archaeologists or campaigns; stone sources; decorative programs; anything that constrains 3D massing. Separate uncertain tradition from attested finds."
+        }},
+        {{
+            "name": "Street or plaza segment (example — include similar open-space rows in real output)",
+            "building_type": "road",
+            "tiles": [{{"x": 13, "y": 18, "elevation": 0.28}}],
+            "description": "MINIMUM 4 sentences: surface, edges, traffic, sound/smell, relation to façades.",
+            "historical_note": "Paving evidence, width, drains if attested.",
+            "environment_note": "MINIMUM 3 sentences: verges, trees or lack of them, maintenance, connection to neighboring plots."
         }}
     ]
 }}
@@ -187,7 +198,15 @@ FUNCTIONAL PLACEMENT (Oikumene-style — the engine logs warnings if violated):
 - **Commerce:** taberna, market, warehouse — place so at least ONE building tile is cardinally adjacent (N/S/E/W) to a **road** tile (street frontage). Do not leave shops isolated with only forum/grass between them and access unless historically documented.
 - **Bridges:** building_type bridge — should be cardinally adjacent to **water** tiles (spanning or touching water).
 - **Temples / forums:** leave plausible open approach space (forum, grass, garden) toward processional or main street where sources describe it — not buried inside a solid block with no approach.
-- **Major civic / sacred (temple, monument, basilica):** give **either** cardinal adjacency to a **road** OR to **forum / grass / garden**, OR within a few tiles of a road network — the client warns if such a structure is stranded far from both streets and plazas."""
+- **Major civic / sacred (temple, monument, basilica):** give **either** cardinal adjacency to a **road** OR to **forum / grass / garden**, OR within a few tiles of a road network — the client warns if such a structure is stranded far from both streets and plazas.
+
+ENVIRONMENT & SCENERY (required for a believable district — buildings sit IN a world, not on a blank grid):
+- **Coverage:** Aim for a historically plausible mix: roughly **30–50%** of assigned tiles should be **non-building** open space where sources allow — roads, plazas (forum), water, gardens, grass, verges. Dense urban cores may be lower; ceremonial or riverine districts higher. Do not return buildings-only unless the survey scope is literally a single structure.
+- **Per open-space entry** (`building_type` one of road, forum, garden, water, grass): you MUST include:
+  - **`description`** — at least **4 sentences**: what stands here (surfaces, edges, adjacent façades), movement (who passes, carts, animals), sound and smell, time of day or ritual use if known.
+  - **`environment_note`** — at least **3 sentences**: planting or lack of it (trees, hedges, sacred groves, weeds), maintenance state, seasonal or hydraulic behavior (flood, dust, harbor tide), and how this patch connects the **adjacent buildings** (frontages, steps, porticoes, quays).
+- **Per building entry** that fronts a street or plaza: in `description`, name **what lies across the street or piazza** (another façade, portico, water, trees) — not only the building in isolation.
+- **Optional** top-level **`district_scenery_summary`** (3–6 sentences): one coherent read of **circulation + hydrology + green/blue network** in this district — main arteries, secondary lanes, where water enters/leaves, where people gather vs pass through."""
 
 # ═══════════════════════════════════════════════════════════════
 # URBANISTA — Translates description into 3D component spec
@@ -221,11 +240,11 @@ Respond with ONLY valid JSON:
                     "cella": {{"inset_per_side": 0.14, "max_width_fraction": 0.96, "max_depth_fraction": 0.96, "max_height": 0.5}}
                 }},
                 "components": [
-                {{"type": "podium", "steps": 5, "height": 0.14, "color": "#F5E6C8"}},
-                {{"type": "colonnade", "columns": 8, "style": "ionic", "height": 0.48, "color": "#808080", "radius": 0.028}},
-                {{"type": "cella", "height": 0.38, "width": 0.45, "depth": 0.55, "color": "#C8B070"}},
-                {{"type": "pediment", "height": 0.1, "color": "#C45A3C"}},
-                {{"type": "door", "width": 0.1, "height": 0.22, "color": "#6B4226"}}
+                {{"type": "podium", "steps": 5, "height": 0.14, "color": "#F5E6C8", "roughness": 0.88, "metalness": 0.04, "surface_detail": 0.62, "detail_repeat": 12}},
+                {{"type": "colonnade", "columns": 8, "style": "ionic", "height": 0.48, "color": "#A89888", "radius": 0.028, "roughness": 0.42, "metalness": 0.03, "surface_detail": 0.35}},
+                {{"type": "cella", "height": 0.38, "width": 0.45, "depth": 0.55, "color": "#C8B070", "roughness": 0.78, "surface_detail": 0.45}},
+                {{"type": "pediment", "height": 0.1, "color": "#C45A3C", "roughness": 0.72}},
+                {{"type": "door", "width": 0.1, "height": 0.22, "color": "#6B4226", "roughness": 0.55, "metalness": 0.08}}
             ]
             }}
         }}
@@ -272,8 +291,11 @@ spec.phase4 (optional object, anchor spec only for multi-tile — same object on
 STACKING (override defaults when needed):
 - Each built-in component type has a default stack_role (foundation / structural / infill / roof / decorative / freestanding). Override with \"stack_role\" on any component when the Historian's massing is non-standard.
 - \"stack_priority\" (number) breaks ties within the same role (lower builds first).
+- **PBR on named components (optional):** On any built-in type below (podium, colonnade, block, …), you may add \"roughness\" and \"metalness\", each a number from 0 to 1. **roughness** — higher (~0.75–0.95) for weathered stone, stucco, timber; lower (~0.25–0.55) for polished marble, burnished metal, glazed tile. **metalness** — keep low (~0.02–0.12) for stone, plaster, wood, terracotta; raise (~0.35–0.85) for bronze, copper, gilded elements. Omit both to use the renderer's per-type defaults. Differentiate adjacent parts (e.g. rough ashlar podium vs smoother column shafts) with different values — not only different hex colors.
+- **Surface relief (optional):** \"surface_detail\" (0..1, use >0 to enable) adds a procedural tangent normal map so façades catch light like rough stone or stucco — not flat paint. \"detail_repeat\" (optional, 0.5..40, default 8) controls how often the pattern tiles across each face; higher = finer grain. Use on podiums, walls, and large planes where the Historian stresses ashlar, rustication, or plaster.
+- **Albedo image (optional):** \"map_url\" — absolute http(s) URL to a diffuse/albedo image (tiling texture). Host must allow CORS or the browser may block loading. When set, the client paints that image over the base color; use **either** rich \"surface_detail\" (procedural normal relief) **or** \"map_url\" per component if you want one clear source of surface variation. Omit both for flat-shaded defaults.
 - type \"procedural\" — REQUIRED: stack_role + non-empty parts[]. Use for forms no named component covers (talud-tablero panels, stepped merlons, timber lattice, stupa harmika, etc.). Optional \"recipe\" (string) documents intent; optional \"component_id\" (string) identifies this node for relates_to on other components.
-- procedural.parts[]: each part has \"shape\": box | cylinder | sphere | cone | torus | plane; \"color\": #RRGGBB; \"position\": [x,y,z] (tile-local, center; Y relative to current stack anchor); optional \"rotation\": [rx,ry,rz] radians; optional \"roughness\".
+- procedural.parts[]: each part has \"shape\": box | cylinder | sphere | cone | torus | plane; \"color\": #RRGGBB; \"position\": [x,y,z] (tile-local, center; Y relative to current stack anchor); optional \"rotation\": [rx,ry,rz] radians; optional \"roughness\"; optional \"metalness\"; optional \"surface_detail\", \"detail_repeat\", \"map_url\" (same as named components).
   box: \"width\",\"height\",\"depth\" OR \"size\":[sx,sy,sz]
   cylinder: \"radius\" OR radiusTop/radiusBottom; \"height\"; optional radialSegments
   sphere: \"radius\"; optional widthSegments, heightSegments
@@ -287,48 +309,48 @@ NAMED component types must be exactly those listed below OR type procedural. Unk
 COMPONENTS BY CATEGORY (default stack_role — renderer stacks roles in order foundation → structural → infill → roof → decorative → freestanding):
 
 FOUNDATION — placed at ground level, raises the base:
-  podium     — steps (int), height (float), color (hex)
+  podium     — steps (int), height (float), color (hex); optional roughness, metalness (0..1)
                Use for: temple platforms, pyramid tiers, raised foundations, stepped bases
 
 STRUCTURAL — sits on top of foundation:
-  colonnade  — REQUIRED: columns (int), height (float), radius (float), style (exactly doric OR ionic OR corinthian), color (hex); optional peripteral (bool)
+  colonnade  — REQUIRED: columns (int), height (float), radius (float), style (exactly doric OR ionic OR corinthian), color (hex); optional peripteral (bool); optional roughness, metalness
                Use for: any columned structure, timber posts (thin radius + wood color), pillar halls
-  arcade     — arches (int), height (float), color (hex)
+  arcade     — arches (int), height (float), color (hex); optional roughness, metalness
                Use for: Roman arches, Islamic pointed arches, bridge supports, aqueduct spans
-  block      — stories (int), storyHeight (float), color (hex), windows (int), windowColor (hex)
+  block      — stories (int), storyHeight (float), color (hex), windows (int), windowColor (hex); optional roughness, metalness (walls; glazing uses a fixed glossy preset)
                Use for: solid walls with windows, tower sections, residential floors, fort walls
-  walls      — height (float), thickness (float), color (hex)
+  walls      — height (float), thickness (float), color (hex); optional roughness, metalness
                Use for: enclosure walls, courtyards, city walls, compound boundaries
 
 INFILL — sits INSIDE structural at same base level, NOT on top:
-  cella      — width (float), depth (float), height (float), color (hex)
+  cella      — width (float), depth (float), height (float), color (hex); optional roughness, metalness
                Use for: inner chambers, shrine rooms, any enclosed interior space
-  atrium     — height (float), thickness (float), color (hex)
+  atrium     — height (float), thickness (float), color (hex); optional roughness, metalness
                Use for: open-roof courtyards, impluvium, light wells
-  tier       — height (float), color (hex)
+  tier       — height (float), color (hex); optional roughness, metalness
                Use for: stadium seating, amphitheater rows, stepped viewing areas
 
 ROOF — sits on top of tallest structural:
-  pediment   — height (float), color (hex)
+  pediment   — height (float), color (hex); optional roughness, metalness
                Use for: triangular gable ends, any peaked front
-  dome       — radius (float), color (hex)
+  dome       — radius (float), color (hex); optional roughness, metalness
                Use for: domes, cupolas, onion domes (tall radius), hemispheres
-  tiled_roof — height (float), color (hex)
+  tiled_roof — height (float), color (hex); optional roughness, metalness
                Use for: any sloped roof — tile, thatch, shingle, slate, glazed ceramic
-  flat_roof  — color (hex), overhang (float)
+  flat_roof  — color (hex), overhang (float); optional roughness, metalness
                Use for: flat roofs, terraces, platforms, roof gardens
-  vault      — height (float), color (hex)
+  vault      — height (float), color (hex); optional roughness, metalness
                Use for: barrel vaults, groin vaults, any arched ceiling
 
 DECORATIVE — at base level, no height effect:
-  door       — width (float), height (float), color (hex)
-  pilasters  — count (int), height (float), color (hex)
-  awning     — color (hex)
-  battlements — height (float), color (hex)
+  door       — width (float), height (float), color (hex); optional roughness, metalness (frame uses frameColor; shares PBR when set)
+  pilasters  — count (int), height (float), color (hex); optional roughness, metalness
+  awning     — color (hex); optional roughness, metalness
+  battlements — height (float), color (hex); optional roughness, metalness
 
 FREESTANDING — on top of everything:
-  statue     — height (float), color (hex), pedestalColor (hex)
-  fountain   — radius (float), height (float), color (hex)
+  statue     — height (float), color (hex), pedestalColor (hex); optional roughness, metalness
+  fountain   — radius (float), height (float), color (hex); optional roughness, metalness
 
 MATERIAL → COLOR (hex values for world materials):
   marble/white stone:     #F0F0F0    sandstone/buff stone:   #C8B070
@@ -347,11 +369,11 @@ MATERIAL → COLOR (hex values for world materials):
 RULES:
 1. READ the Historian's description (survey `description` + `historical_note`). Translate EVERY physical detail into components for THIS culture and site — Egyptian, Andean, Amazonian, Sahelian, Han Chinese, etc. Use type procedural for forms no named part covers; use spec.template.id \"open\" with params.components when you want the template wrapper; use shortcut template ids only when the massing genuinely matches that pattern. All dimensions are derived from the Historian (normalized to tile footprint), not from a Roman default. If the Historian gave long prose, mine it exhaustively — do not summarize away rare details.
 2. Add proportion_rules when the tradition needs shared limits across parts (timber post slenderness, Islamic arcade height, Mesoamerican talud-tablero ratios, etc.), with numbers grounded in the commentary.
-3. Every building is UNIQUE. Materials, colors, and proportions come from the Historian for this site and date.
+3. Every building is UNIQUE. Materials, colors, and proportions come from the Historian for this site and date. Where the Historian names finishes (polished vs rusticated stone, bronze fittings, lime wash, gilding), express them with **distinct hex colors** and, when helpful, **roughness/metalness** and **surface_detail** on large masses so the 3D pass is not flat gray.
 4. **Prose quality:** `commentary` (whole structure), each tile `description`, and `reference` must be substantive — short placeholder strings fail the project. Default assumption: the UI and historians will read this text.
 5. Use as many components as needed for fidelity (often 6-14).
 6. Use EXACT coordinates and elevation from the Surveyor's plan.
-7. terrain='building' for structures. For terrain (road, water, garden, forum, grass), use type as terrain, omit spec.
+7. **Buildings:** `terrain` = \"building\" and `spec.components` OR `spec.template` as documented. **Open space** (when the survey lists `building_type` road, forum, garden, water, or grass): set each tile's `terrain` to that same type (e.g. `\"road\"`). Do **not** emit `spec.components` or `spec.template`. Instead use `spec`: {{ \"color\": optional #RRGGBB, \"scenery\": {{ \"vegetation_density\": 0..1 (garden/grass), \"pavement_detail\": 0..1 (road/forum), \"water_murk\": 0..1 (water) }} }}. These numbers tune procedural dressing in the 3D client. Include substantive `description` on each tile. For `reference`, cite paving/garden hydrology sources if any.
 8. Multi-tile buildings: set spec.anchor on EVERY tile. Anchor tile gets components OR template (+ optional proportion_rules / phase4); others reference anchor only:
    {{"x":14, "y":18, "elevation":0.3, "spec":{{"anchor":{{"x":14,"y":18}}, "proportion_rules":{{...}}, "components":[...]}}}}
    {{"x":14, "y":18, "elevation":0.3, "spec":{{"anchor":{{"x":14,"y":18}}, "template":{{"id":"temple","params":{{"columns":8,"style":"ionic"}}}}}}}}

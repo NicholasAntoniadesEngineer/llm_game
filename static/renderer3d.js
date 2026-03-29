@@ -451,15 +451,109 @@ class WorldRenderer {
         return { roughnessMap: roughTex, normalMap: normTex };
     }
 
+    /**
+     * Finer tileable normal map for building meshes (stone/stucco micro-relief), separate from terrain.
+     * @returns {THREE.DataTexture}
+     */
+    _createBuildingSurfaceNormalMap() {
+        const size = 64;
+        const hArr = new Float32Array(size * size);
+        const sampleH = (x, y) => {
+            const nx = (x / size) * 96;
+            const ny = (y / size) * 96;
+            return (
+                Math.sin(nx * 0.42) * Math.cos(ny * 0.38) * 0.42 +
+                Math.sin(nx * 0.17 + ny * 0.19) * 0.28 +
+                Math.sin(nx * 0.09 + ny * 0.11) * 0.18 +
+                Math.sin(nx * 0.31 + ny * 0.07) * 0.12
+            );
+        };
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                hArr[y * size + x] = sampleH(x, y);
+            }
+        }
+        const at = (x, y) => {
+            const ix = Math.max(0, Math.min(size - 1, x));
+            const iy = Math.max(0, Math.min(size - 1, y));
+            return hArr[iy * size + ix];
+        };
+        const normData = new Uint8Array(size * size * 4);
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const hi = (y * size + x) * 4;
+                const du = at(x + 1, y) - at(x - 1, y);
+                const dv = at(x, y + 1) - at(x, y - 1);
+                const n = new THREE.Vector3(-du * 2.2, 2, -dv * 2.2).normalize();
+                normData[hi] = Math.floor(n.x * 0.5 * 255 + 127.5);
+                normData[hi + 1] = Math.floor(n.y * 0.5 * 255 + 127.5);
+                normData[hi + 2] = Math.floor(n.z * 0.5 * 255 + 127.5);
+                normData[hi + 3] = 255;
+            }
+        }
+        const aniso = this.renderer3d && this.renderer3d.capabilities && this.renderer3d.capabilities.getMaxAnisotropy
+            ? Math.min(8, this.renderer3d.capabilities.getMaxAnisotropy())
+            : 4;
+        const normTex = new THREE.DataTexture(normData, size, size);
+        normTex.format = THREE.RGBAFormat;
+        normTex.wrapS = normTex.wrapT = THREE.RepeatWrapping;
+        normTex.repeat.set(8, 8);
+        normTex.needsUpdate = true;
+        normTex.anisotropy = aniso;
+        if (THREE.LinearEncoding !== undefined) {
+            normTex.encoding = THREE.LinearEncoding;
+        }
+        return normTex;
+    }
+
+    _getBuildingSurfaceNormalMap() {
+        if (!this._buildingBaseNormalTex) {
+            this._buildingBaseNormalTex = this._createBuildingSurfaceNormalMap();
+        }
+        return this._buildingBaseNormalTex;
+    }
+
+    /** Cloned textures with UV repeat — small bucket set to limit GPU memory. */
+    _normalMapTextureForRepeat(repeat) {
+        const r = Math.round(Math.max(0.5, Math.min(40, repeat)) * 4) / 4;
+        if (!this._buildingNormalByRepeat) this._buildingNormalByRepeat = new Map();
+        if (!this._buildingNormalByRepeat.has(r)) {
+            const base = this._getBuildingSurfaceNormalMap();
+            const t = base.clone();
+            t.repeat.set(r, r);
+            t.needsUpdate = true;
+            this._buildingNormalByRepeat.set(r, t);
+        }
+        return this._buildingNormalByRepeat.get(r);
+    }
+
+    _disposeBuildingSurfaceResources() {
+        if (this._matSurfaceDetailCache) {
+            this._matSurfaceDetailCache.forEach((mat) => mat.dispose());
+            this._matSurfaceDetailCache.clear();
+        }
+        if (this._buildingNormalByRepeat) {
+            this._buildingNormalByRepeat.forEach((tex) => tex.dispose());
+            this._buildingNormalByRepeat.clear();
+        }
+        if (this._buildingBaseNormalTex) {
+            this._buildingBaseNormalTex.dispose();
+            this._buildingBaseNormalTex = null;
+        }
+    }
+
     // ─── Materials (cached for performance) ───
-    _mat(color, roughness = 0.7) {
-        const key = `${color}:${roughness}`;
+    /** roughness/metalness 0..1; cache key stable to avoid float churn */
+    _mat(color, roughness = 0.7, metalness = 0.02) {
+        const r = Math.max(0.05, Math.min(1, Number(roughness)));
+        const m = Math.max(0, Math.min(1, Number(metalness)));
+        const key = `${color}:${r.toFixed(3)}:${m.toFixed(3)}`;
         if (!this._matCache) this._matCache = new Map();
         if (!this._matCache.has(key)) {
             const mat = new THREE.MeshStandardMaterial({
                 color: new THREE.Color(color),
-                roughness: Math.max(0.3, Math.min(0.9, roughness)),
-                metalness: 0.02,
+                roughness: r,
+                metalness: m,
                 envMapIntensity: 0.78,
             });
             mat._cached = true;
@@ -468,8 +562,94 @@ class WorldRenderer {
         return this._matCache.get(key);
     }
 
+    /**
+     * Per-component PBR from Urbanista: optional roughness / metalness (0..1);
+     * optional surface_detail (0..1) + detail_repeat for procedural normal relief;
+     * optional map_url for albedo (http/https, loads async).
+     */
+    _matPBR(comp, color, defaultRoughness = 0.7, defaultMetalness = 0.02) {
+        const hasR = comp != null && Number.isFinite(comp.roughness);
+        const hasM = comp != null && Number.isFinite(comp.metalness);
+        const r = Math.max(0.05, Math.min(1, hasR ? Number(comp.roughness) : defaultRoughness));
+        const m = Math.max(0, Math.min(1, hasM ? Number(comp.metalness) : defaultMetalness));
+
+        if (comp != null && typeof comp.map_url === "string") {
+            const u = comp.map_url.trim();
+            if (u.length > 4 && /^https?:\/\//i.test(u)) {
+                return this._createMaterialWithAlbedoUrl(comp, color, r, m);
+            }
+        }
+
+        const sdRaw = comp != null && Number.isFinite(comp.surface_detail) ? Number(comp.surface_detail) : 0;
+        if (comp != null && sdRaw > 0) {
+            return this._getCachedSurfaceDetailMaterial(comp, color, r, m, sdRaw);
+        }
+
+        return this._mat(color, r, m);
+    }
+
+    _getCachedSurfaceDetailMaterial(comp, color, r, m, surfaceDetail) {
+        const detail = Math.max(0.05, Math.min(1, surfaceDetail));
+        const repeat = Number.isFinite(comp.detail_repeat) ? Math.max(0.5, Math.min(40, Number(comp.detail_repeat))) : 8;
+        const key = `sd:${color}:${r.toFixed(3)}:${m.toFixed(3)}:${detail.toFixed(2)}:${repeat.toFixed(2)}`;
+        if (!this._matSurfaceDetailCache) this._matSurfaceDetailCache = new Map();
+        if (!this._matSurfaceDetailCache.has(key)) {
+            const nmap = this._normalMapTextureForRepeat(repeat);
+            const mat = new THREE.MeshStandardMaterial({
+                color: new THREE.Color(color),
+                roughness: r,
+                metalness: m,
+                normalMap: nmap,
+                normalScale: new THREE.Vector2(detail * 0.52, detail * 0.52),
+                envMapIntensity: 0.78,
+            });
+            mat._cached = true;
+            this._matSurfaceDetailCache.set(key, mat);
+        }
+        return this._matSurfaceDetailCache.get(key);
+    }
+
+    /** Plain PBR body for async map_url loads — avoids cloning cached surface-detail materials (shared normal maps + dispose). */
+    _materialBodyForAlbedoUrl(comp, color, r, m) {
+        return new THREE.MeshStandardMaterial({
+            color: new THREE.Color(color),
+            roughness: r,
+            metalness: m,
+            envMapIntensity: 0.78,
+        });
+    }
+
+    _createMaterialWithAlbedoUrl(comp, color, r, m) {
+        const mat = this._materialBodyForAlbedoUrl(comp, color, r, m);
+        mat._cached = false;
+        const url = comp.map_url.trim();
+        const maxA = this.renderer3d && this.renderer3d.capabilities && this.renderer3d.capabilities.getMaxAnisotropy
+            ? Math.min(8, this.renderer3d.capabilities.getMaxAnisotropy())
+            : 4;
+        const loader = new THREE.TextureLoader();
+        loader.load(
+            url,
+            (tex) => {
+                if (THREE.sRGBEncoding !== undefined) {
+                    tex.encoding = THREE.sRGBEncoding;
+                }
+                tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                const rep = Number.isFinite(comp.detail_repeat) ? Math.max(0.5, Math.min(40, Number(comp.detail_repeat))) : 8;
+                tex.repeat.set(rep, rep);
+                tex.anisotropy = maxA;
+                tex.needsUpdate = true;
+                mat.map = tex;
+                mat.needsUpdate = true;
+            },
+            undefined,
+            () => {}
+        );
+        return mat;
+    }
+
     // ─── Clear scene for reset ───
     _clearScene() {
+        this._disposeBuildingSurfaceResources();
         // Remove all dynamic objects (buildings, ground, grid) but keep lights and camera
         const keep = new Set();
         this.scene.children.forEach(child => {
@@ -1319,27 +1499,64 @@ class WorldRenderer {
 
     // ─── Terrain ───
 
+    /** Deterministic 0..1 from tile + index (replaces Math.random on roads). */
+    _terrainRand01(tileSeed, i, salt) {
+        const v = ((tileSeed * 9301 + i * 49297 + salt * 233280) % 999983) / 999983;
+        return Math.max(0, Math.min(1, v));
+    }
+
+    /** Optional spec.scenery from Urbanista — tunes dressing density (0..1 each). */
+    _sceneryFromSpec(spec) {
+        const s = spec && typeof spec.scenery === "object" ? spec.scenery : {};
+        const c = (v) => (v != null && Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : null);
+        return {
+            vegetation_density: c(s.vegetation_density),
+            pavement_detail: c(s.pavement_detail),
+            water_murk: c(s.water_murk),
+        };
+    }
+
     _buildTerrain(g, tile, spec) {
         const terrain = tile.terrain;
+        const sc = this._sceneryFromSpec(spec);
+        const tseed = tile.x * 131 + tile.y * 97;
         if (terrain === "road") {
             const road = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.05, 0.98), this._mat(spec.color || "#606060", 0.9));
             road.position.y = 0.025;
             g.add(road);
-            const seed = (tile.x * 7 + tile.y * 13) % 5;
-            for (let i = 0; i < 2 + seed % 3; i++) {
-                const stone = new THREE.Mesh(
-                    new THREE.BoxGeometry(0.06 + Math.random() * 0.08, 0.01, 0.06 + Math.random() * 0.08),
-                    this._mat("#7a7a7a")
+            const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.45;
+            const nStone = Math.min(14, Math.floor(1 + pave * 10) + (tseed % 3));
+            for (let i = 0; i < nStone; i++) {
+                const w = 0.06 + this._terrainRand01(tseed, i, 1) * 0.08;
+                const d = 0.06 + this._terrainRand01(tseed, i, 2) * 0.08;
+                const stone = new THREE.Mesh(new THREE.BoxGeometry(w, 0.01, d), this._mat("#7a7a7a"));
+                stone.position.set(
+                    -0.3 + this._terrainRand01(tseed, i, 3) * 0.6,
+                    0.055,
+                    -0.3 + this._terrainRand01(tseed, i, 4) * 0.6
                 );
-                stone.position.set(-0.3 + Math.random() * 0.6, 0.055, -0.3 + Math.random() * 0.6);
                 g.add(stone);
             }
         } else if (terrain === "forum") {
             g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.03, 0.96), this._mat(spec.color || "#d4c67a")));
+            const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.25;
+            const nSlab = Math.min(8, Math.floor(pave * 7));
+            for (let i = 0; i < nSlab; i++) {
+                const sw = 0.08 + this._terrainRand01(tseed, i, 11) * 0.12;
+                const slab = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.008, sw * 0.9), this._mat("#c8b898", 0.75));
+                slab.position.set(
+                    -0.32 + this._terrainRand01(tseed, i, 12) * 0.64,
+                    0.022,
+                    -0.32 + this._terrainRand01(tseed, i, 13) * 0.64
+                );
+                g.add(slab);
+            }
         } else if (terrain === "water") {
+            const murk = sc.water_murk != null ? sc.water_murk : 0.35;
+            const opacity = 0.55 + murk * 0.38;
             const water = new THREE.Mesh(
                 new THREE.BoxGeometry(0.98, 0.06, 0.98),
-                new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity: 0.8, roughness: 0.05 })
+                new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity, roughness: 0.05 })
             );
             water.position.y = -0.03;
             water.userData.isWater = true;
@@ -1347,8 +1564,11 @@ class WorldRenderer {
         } else if (terrain === "garden" || terrain === "grass") {
             g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.96), this._mat(spec.color || "#4a8c3f")));
             const seed = tile.x * 31 + tile.y * 17;
-            const numPlants = 1 + seed % 3;
-            for (let i = 0; i < numPlants; i++) {
+            const veg = sc.vegetation_density != null ? sc.vegetation_density : null;
+            const basePlants = 1 + seed % 3;
+            const numPlants = veg != null ? Math.round(veg * 6) : basePlants;
+            const n = Math.max(0, Math.min(6, numPlants));
+            for (let i = 0; i < n; i++) {
                 const px = -0.25 + ((seed * (i + 1) * 7) % 50) / 100;
                 const pz = -0.25 + ((seed * (i + 1) * 13) % 50) / 100;
                 const treeH = 0.2 + ((seed * (i + 3)) % 30) / 100;
@@ -1667,14 +1887,13 @@ class WorldRenderer {
 
         for (let i = 0; i < parts.length; i++) {
             const p = parts[i];
-            const rough = p.roughness != null ? Number(p.roughness) : 0.7;
             const px = Number((p.position && p.position[0]) ?? 0);
             const py = Number((p.position && p.position[1]) ?? 0);
             const pz = Number((p.position && p.position[2]) ?? 0);
             if (![px, py, pz].every((n) => Number.isFinite(n))) {
                 throw new Error(`procedural.parts[${i}]: position must be finite [x,y,z]`);
             }
-            const mat = this._mat(p.color, Number.isFinite(rough) ? rough : 0.7);
+            const mat = this._matPBR(p, p.color, 0.7, 0.02);
             let mesh;
 
             if (p.shape === "box") {
@@ -1820,7 +2039,7 @@ class WorldRenderer {
             const shrink = (i / steps) * 0.08;
             const step = new THREE.Mesh(
                 new THREE.BoxGeometry(w - shrink, stepH, d - shrink),
-                this._mat(color)
+                this._matPBR(comp, color, 0.75)
             );
             step.position.y = baseY + i * stepH + stepH / 2;
             group.add(step);
@@ -1843,6 +2062,13 @@ class WorldRenderer {
         const color = comp.color || "#e8e0d0";
         const r = comp.radius || Math.max(0.015, w / (numCols * 5));  // scale radius to footprint
         const peripteral = comp.peripteral !== false;
+        const userRough = Number.isFinite(comp.roughness) ? Math.max(0.05, Math.min(1, comp.roughness)) : null;
+        const userMetal = Number.isFinite(comp.metalness) ? Math.max(0, Math.min(1, comp.metalness)) : null;
+        const shaftR = userRough !== null ? userRough : 0.3;
+        const baseR = userRough !== null ? Math.min(0.98, userRough + 0.05) : 0.35;
+        const capR = userRough !== null ? userRough : 0.3;
+        const entR = userRough !== null ? Math.min(0.98, userRough + 0.08) : 0.35;
+        const pbrM = userMetal !== null ? userMetal : 0.02;
 
         const baseH = style === "doric" ? 0 : r * 1.0;  // base proportional to column
         const capH = style === "corinthian" ? r * 2.0 : r * 1.3;
@@ -1872,7 +2098,7 @@ class WorldRenderer {
         // Cap segments: very thin columns need few; thick columns cap at 28 for GPU cost
         const shaftSegs = Math.min(28, Math.max(8, Math.round(r * 200)));
         const shaftGeom = new THREE.CylinderGeometry(r * 0.83, r, colH, shaftSegs);
-        const shaftMat = this._mat(color, 0.3);
+        const shaftMat = this._matPBR(Object.assign({}, comp, { roughness: shaftR, metalness: pbrM }), color, shaftR, pbrM);
         const shaftInst = new THREE.InstancedMesh(shaftGeom, shaftMat, n);
         shaftInst.castShadow = true;
         shaftInst.receiveShadow = true;
@@ -1880,7 +2106,7 @@ class WorldRenderer {
 
         if (baseH > 0) {
             const baseGeom = new THREE.CylinderGeometry(r + 0.01, r + 0.015, baseH, 8);
-            const baseMat = this._mat(color, 0.35);
+            const baseMat = this._matPBR(Object.assign({}, comp, { roughness: baseR, metalness: pbrM }), color, baseR, pbrM);
             const baseInst = new THREE.InstancedMesh(baseGeom, baseMat, n);
             baseInst.castShadow = true;
             baseInst.receiveShadow = true;
@@ -1907,7 +2133,7 @@ class WorldRenderer {
         shaftInst.instanceMatrix.needsUpdate = true;
         group.add(shaftInst);
 
-        const capMat = this._mat(color, 0.3);
+        const capMat = this._matPBR(Object.assign({}, comp, { roughness: capR, metalness: pbrM }), color, capR, pbrM);
         if (style === "corinthian") {
             const c1Geom = new THREE.BoxGeometry(capW * 0.7, capH * 0.6, capW * 0.7);
             const c2Geom = new THREE.BoxGeometry(capW, capH * 0.4, capW);
@@ -1946,7 +2172,7 @@ class WorldRenderer {
         const entH = 0.05;
         const ent = new THREE.Mesh(
             new THREE.BoxGeometry(w + 0.02, entH, d + 0.02),
-            this._mat(color, 0.35)
+            this._matPBR(Object.assign({}, comp, { roughness: entR, metalness: pbrM }), color, entR, pbrM)
         );
         ent.position.y = baseY + baseH + colH + capH + entH / 2;
         group.add(ent);
@@ -1977,10 +2203,10 @@ class WorldRenderer {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
         geo.computeVertexNormals();
-        group.add(new THREE.Mesh(geo, this._mat(color)));
+        group.add(new THREE.Mesh(geo, this._matPBR(comp, color, 0.65)));
 
         // Ridge beam
-        const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, d + 0.02), this._mat(color));
+        const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, d + 0.02), this._matPBR(comp, color, 0.65));
         ridge.position.set(0, baseY + peakH, 0);
         group.add(ridge);
 
@@ -1994,7 +2220,7 @@ class WorldRenderer {
 
         const dome = new THREE.Mesh(
             new THREE.SphereGeometry(r, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2),
-            this._mat(color, 0.4)
+            this._matPBR(comp, color, 0.4)
         );
         dome.position.y = baseY;
         group.add(dome);
@@ -2002,7 +2228,7 @@ class WorldRenderer {
         // Oculus ring at top
         const oculus = new THREE.Mesh(
             new THREE.TorusGeometry(r * 0.12, 0.01, 6, 12),
-            this._mat("#e8e0d0", 0.3)
+            this._mat("#e8e0d0", 0.28, 0.12)
         );
         oculus.rotation.x = -Math.PI / 2;
         oculus.position.y = baseY + r - 0.01;
@@ -2024,7 +2250,7 @@ class WorldRenderer {
             const sw = w - shrink, sd = d - shrink;
             const wall = new THREE.Mesh(
                 new THREE.BoxGeometry(sw, storyH - 0.01, sd),
-                this._mat(color)
+                this._matPBR(comp, color, 0.72)
             );
             wall.position.y = baseY + s * storyH + storyH / 2;
             group.add(wall);
@@ -2039,13 +2265,13 @@ class WorldRenderer {
                 const wx = -sw / 2 + winSpacing * (wi + 1);
                 const wy = baseY + s * storyH + storyH * 0.55;
 
-                // Front windows
-                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor));
+                // Front windows (slightly glossy — not tied to wall roughness unless windowRoughness added later)
+                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor, 0.38, 0.12));
                 wf.position.set(wx, wy, -sd / 2 - 0.005);
                 group.add(wf);
 
                 // Back windows
-                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor));
+                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor, 0.38, 0.12));
                 wb.position.set(wx, wy, sd / 2 + 0.005);
                 group.add(wb);
             }
@@ -2054,7 +2280,7 @@ class WorldRenderer {
             if (s > 0) {
                 const ledge = new THREE.Mesh(
                     new THREE.BoxGeometry(sw + 0.02, 0.015, sd + 0.02),
-                    this._mat(color)
+                    this._matPBR(comp, color, 0.72)
                 );
                 ledge.position.y = baseY + s * storyH;
                 group.add(ledge);
@@ -2078,7 +2304,7 @@ class WorldRenderer {
             const px = -w / 2 + i * archSpacing;
             const pillar = new THREE.Mesh(
                 new THREE.BoxGeometry(pillarW, pillarH, d),
-                this._mat(color)
+                this._matPBR(comp, color, 0.72)
             );
             pillar.position.set(px, baseY + pillarH / 2, 0);
             group.add(pillar);
@@ -2090,7 +2316,7 @@ class WorldRenderer {
             for (const z of [-d / 2, d / 2]) {
                 const arch = new THREE.Mesh(
                     new THREE.TorusGeometry(archR, 0.02, 6, 12, Math.PI),
-                    this._mat(color)
+                    this._matPBR(comp, color, 0.72)
                 );
                 arch.rotation.x = -Math.PI / 2;
                 arch.position.set(cx, baseY + pillarH, z);
@@ -2102,7 +2328,7 @@ class WorldRenderer {
         const beamH = 0.04;
         const beam = new THREE.Mesh(
             new THREE.BoxGeometry(w + 0.02, beamH, d + 0.02),
-            this._mat(color)
+            this._matPBR(comp, color, 0.72)
         );
         beam.position.y = baseY + pillarH + archR + beamH / 2;
         group.add(beam);
@@ -2118,7 +2344,7 @@ class WorldRenderer {
         for (const side of [-1, 1]) {
             const slope = new THREE.Mesh(
                 new THREE.BoxGeometry(w + 0.02, 0.03, d * 0.55),
-                this._mat(color)
+                this._matPBR(comp, color, 0.7)
             );
             slope.position.set(0, baseY + peakH * 0.5, side * d * 0.2);
             slope.rotation.x = side * 0.25;
@@ -2137,23 +2363,23 @@ class WorldRenderer {
         const gapW = w * 0.3;
         const halfW = (w - gapW) / 2;
 
-        const lf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._mat(color));
+        const lf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._matPBR(comp, color, 0.72));
         lf.position.set(-w / 2 + halfW / 2, baseY + wallH / 2, -d / 2 + t / 2);
         group.add(lf);
 
-        const rf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._mat(color));
+        const rf = new THREE.Mesh(new THREE.BoxGeometry(halfW, wallH, t), this._matPBR(comp, color, 0.72));
         rf.position.set(w / 2 - halfW / 2, baseY + wallH / 2, -d / 2 + t / 2);
         group.add(rf);
 
-        const bw = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, t), this._mat(color));
+        const bw = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, t), this._matPBR(comp, color, 0.72));
         bw.position.set(0, baseY + wallH / 2, d / 2 - t / 2);
         group.add(bw);
 
-        const lw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._mat(color));
+        const lw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._matPBR(comp, color, 0.72));
         lw.position.set(-w / 2 + t / 2, baseY + wallH / 2, 0);
         group.add(lw);
 
-        const rw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._mat(color));
+        const rw = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), this._matPBR(comp, color, 0.72));
         rw.position.set(w / 2 - t / 2, baseY + wallH / 2, 0);
         group.add(rw);
 
@@ -2179,15 +2405,15 @@ class WorldRenderer {
         const figH = totalH * 0.5;
         const headR = totalH * 0.08;
 
-        const ped = new THREE.Mesh(new THREE.BoxGeometry(0.12, pedH, 0.12), this._mat(pedColor));
+        const ped = new THREE.Mesh(new THREE.BoxGeometry(0.12, pedH, 0.12), this._matPBR(comp, pedColor, 0.82));
         ped.position.y = baseY + pedH / 2;
         group.add(ped);
 
-        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, figH, 8), this._mat(color, 0.5));
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, figH, 8), this._matPBR(comp, color, 0.5));
         body.position.y = baseY + pedH + figH / 2;
         group.add(body);
 
-        const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), this._mat(color, 0.5));
+        const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), this._matPBR(comp, color, 0.5));
         head.position.y = baseY + pedH + figH + headR;
         group.add(head);
 
@@ -2203,7 +2429,7 @@ class WorldRenderer {
         // Basin
         const basin = new THREE.Mesh(
             new THREE.CylinderGeometry(r, r - 0.02, h * 0.35, 12),
-            this._mat(color)
+            this._matPBR(comp, color, 0.75)
         );
         basin.position.y = baseY + h * 0.175;
         group.add(basin);
@@ -2220,7 +2446,7 @@ class WorldRenderer {
         // Central spout column
         const col = new THREE.Mesh(
             new THREE.CylinderGeometry(0.015, 0.02, h * 0.7, 8),
-            this._mat(color)
+            this._matPBR(comp, color, 0.75)
         );
         col.position.y = baseY + h * 0.35 + h * 0.35;
         group.add(col);
@@ -2233,7 +2459,7 @@ class WorldRenderer {
         const color = comp.color || "#cc3333";
         const awning = new THREE.Mesh(
             new THREE.BoxGeometry(w * 0.85, 0.02, d * 0.4),
-            this._mat(color)
+            this._matPBR(comp, color, 0.75)
         );
         awning.position.set(0, baseY - 0.05, -d / 2 - d * 0.15);
         awning.rotation.x = 0.15;
@@ -2252,7 +2478,7 @@ class WorldRenderer {
         for (let i = 0; i < numMerlons; i++) {
             if (i % 2 === 0) {
                 for (const z of [-d / 2, d / 2]) {
-                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonW, merlonH, 0.04), this._mat(color));
+                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonW, merlonH, 0.04), this._matPBR(comp, color, 0.72));
                     m.position.set(-w / 2 + spacing * (i + 0.5), baseY + merlonH / 2, z);
                     group.add(m);
                 }
@@ -2269,7 +2495,7 @@ class WorldRenderer {
 
         const tier = new THREE.Mesh(
             new THREE.TorusGeometry(r, h / 2, 6, 24),
-            this._mat(color)
+            this._matPBR(comp, color, 0.68)
         );
         tier.rotation.x = Math.PI / 2;
         tier.position.y = baseY + h / 2;
@@ -2286,7 +2512,7 @@ class WorldRenderer {
 
         const door = new THREE.Mesh(
             new THREE.BoxGeometry(doorW, doorH, 0.02),
-            this._mat(color)
+            this._matPBR(comp, color, 0.55)
         );
         door.position.set(comp.x || 0, baseY + doorH / 2, comp.z || 0);
         group.add(door);
@@ -2295,7 +2521,7 @@ class WorldRenderer {
         const archR = doorW * 0.6;
         const arch = new THREE.Mesh(
             new THREE.TorusGeometry(archR, 0.01, 6, 8, Math.PI),
-            this._mat(comp.frameColor || "#8a7e6e")
+            this._matPBR(comp, comp.frameColor || "#8a7e6e", 0.45)
         );
         arch.rotation.x = -Math.PI / 2;
         arch.position.set(comp.x || 0, baseY + doorH, comp.z || 0);
@@ -2315,7 +2541,7 @@ class WorldRenderer {
             for (let i = 0; i < count; i++) {
                 const pil = new THREE.Mesh(
                     new THREE.BoxGeometry(0.04, h, 0.05),
-                    this._mat(color, 0.4)
+                    this._matPBR(comp, color, 0.4)
                 );
                 pil.position.set(side * (w / 2 + 0.01), baseY + h / 2, -d / 2 + spacing * (i + 1));
                 group.add(pil);
@@ -2346,7 +2572,7 @@ class WorldRenderer {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
         geo.computeVertexNormals();
-        group.add(new THREE.Mesh(geo, this._mat(color)));
+        group.add(new THREE.Mesh(geo, this._matPBR(comp, color, 0.72)));
 
         return baseY + vaultH;
     }
@@ -2359,7 +2585,7 @@ class WorldRenderer {
 
         const roof = new THREE.Mesh(
             new THREE.BoxGeometry(w + overhang, thickness, d + overhang),
-            this._mat(color)
+            this._matPBR(comp, color, 0.72)
         );
         roof.position.y = baseY + thickness / 2;
         group.add(roof);
@@ -2376,7 +2602,7 @@ class WorldRenderer {
 
         const cella = new THREE.Mesh(
             new THREE.BoxGeometry(cellaW, h, cellaD),
-            this._mat(color)
+            this._matPBR(comp, color, 0.72)
         );
         cella.position.set(0, baseY + h / 2, 0);
         group.add(cella);
@@ -2390,19 +2616,19 @@ class WorldRenderer {
         const t = comp.thickness || 0.06;
         const color = comp.color || "#d4a373";
 
-        const front = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._mat(color));
+        const front = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._matPBR(comp, color, 0.72));
         front.position.set(0, baseY + h / 2, -d / 2 + t / 2);
         group.add(front);
 
-        const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._mat(color));
+        const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._matPBR(comp, color, 0.72));
         back.position.set(0, baseY + h / 2, d / 2 - t / 2);
         group.add(back);
 
-        const left = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._mat(color));
+        const left = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._matPBR(comp, color, 0.72));
         left.position.set(-w / 2 + t / 2, baseY + h / 2, 0);
         group.add(left);
 
-        const right = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._mat(color));
+        const right = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._matPBR(comp, color, 0.72));
         right.position.set(w / 2 - t / 2, baseY + h / 2, 0);
         group.add(right);
 

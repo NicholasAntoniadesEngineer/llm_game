@@ -8,6 +8,9 @@ from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
 from agents.base import AgentGenerationError, BaseAgent
 from agents.golden_specs import get_golden_example
+
+# Master-plan building_types that are rendered as procedural terrain (no Urbanista components).
+OPEN_TERRAIN_TYPES = frozenset({"road", "forum", "garden", "water", "grass"})
 from llm_agents import (
     KEY_CARTOGRAPHUS_REFINE,
     KEY_CARTOGRAPHUS_SKELETON,
@@ -580,7 +583,9 @@ class BuildEngine:
             f"5. SPACING: historically accurate.\n\n"
             f"For EVERY structure, write RICH prose (see system prompt): `description` = long Historian layer "
             f"(form, orientation, materials, circulation, condition at this date); `historical_note` = long evidence layer "
-            f"(sources, phases, excavations, measurable facts). Thin one-liners are not acceptable."
+            f"(sources, phases, excavations, measurable facts). Thin one-liners are not acceptable.\n"
+            f"For roads, forums, gardens, water, and grass: include `environment_note` (3+ sentences) and strong open-space "
+            f"`description` as in the system prompt. Prefer optional `district_scenery_summary` for full-district passes."
         )
 
     async def _surveyor_generate_bounded(self, prompt: str) -> dict:
@@ -753,9 +758,16 @@ class BuildEngine:
             neighbor_desc = ctx["neighbor_desc"]
             nearest = ctx["nearest"]
 
-            await self._chat("cartographus", "info",
-                f"Building: {name} ({btype}, {len(tiles)} tiles). "
-                + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""))
+            await self._chat(
+                "cartographus",
+                "info",
+                (
+                    f"Scenery: {name} ({btype}, {len(tiles)} tiles). "
+                    if btype in OPEN_TERRAIN_TYPES
+                    else f"Building: {name} ({btype}, {len(tiles)} tiles). "
+                )
+                + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""),
+            )
 
             hist_result = {
                 "commentary": desc or f"{name} ({btype}) in {district.get('name', 'this district')}.",
@@ -777,41 +789,75 @@ class BuildEngine:
             tile_elevations = [t.get("elevation", district.get("elevation", 0.0)) for t in tiles]
             avg_elevation = round(sum(tile_elevations) / len(tile_elevations), 2) if tile_elevations else 0.0
 
-            try:
-                golden_example_str = get_golden_example(btype, footprint_w, footprint_d)
-            except ValueError as exc:
-                await self._pause_for_api_issue("unknown", str(exc), "urbanista")
-                return False
+            env_note = (structure.get("environment_note") or "").strip()
 
-            ref_entry = lookup_architectural_reference(btype, city_loc, district_ref_year_i)
-            ref_db_block = format_reference_for_prompt(ref_entry)
-            ref_db_section = ""
-            if ref_db_block:
-                ref_db_section = (
-                    f"MEASURED REFERENCE (curated database — numeric ranges for proportion_rules / sanity checks; "
-                    f"use when they align with the site brief):\n{ref_db_block}\n\n"
+            if btype in OPEN_TERRAIN_TYPES:
+                golden_example_str = "[]"
+                ref_db_section = ""
+                prompt = (
+                    f"OPEN SPACE / SCENERY (not a building): {name}\n"
+                    f"Surface type: {btype}\n"
+                    f"City: {city_loc}, {scenario.get('period', '')}\n"
+                    f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
+                    f"Reference corner tile: ({anchor_x}, {anchor_y}), mean elevation: {avg_elevation}\n"
+                    f"Survey tile list (coordinates and elevations): {json.dumps(tiles)}\n\n"
+                    f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
                 )
+                if env_note:
+                    prompt += f"SURVEYOR `environment_note`:\n{env_note}\n\n"
+                prompt += (
+                    f"SITE BRIEF (Historian + evidence):\n{physical_desc}\n\n"
+                    f"OUTPUT REQUIREMENTS:\n"
+                    f"- Return JSON with `tiles` — one entry per survey coordinate above.\n"
+                    f"- Each tile MUST set `terrain` to the literal string \"{btype}\".\n"
+                    f"- Each tile MAY include `spec`: {{ \"color\": \"#RRGGBB\", \"scenery\": {{ "
+                    f"\"vegetation_density\": 0..1 (garden/grass), \"pavement_detail\": 0..1 (road/forum), "
+                    f"\"water_murk\": 0..1 (water) }} }}.\n"
+                    f"- Do NOT emit spec.components, spec.template, or spec.anchor — the client uses procedural meshes.\n"
+                    f"- Rich `description` on every tile; substantive `commentary` and `reference` (paving, hydrology, planting).\n"
+                    f"- Match elevations to the survey (mean {avg_elevation}).\n"
+                )
+            else:
+                try:
+                    golden_example_str = get_golden_example(btype, footprint_w, footprint_d)
+                except ValueError as exc:
+                    await self._pause_for_api_issue("unknown", str(exc), "urbanista")
+                    return False
 
-            prompt = (
-                f"Design: {name}\nType: {btype}\n"
-                f"City: {city_loc}, {scenario.get('period', '')}\n"
-                f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
-                f"Anchor tile: ({anchor_x}, {anchor_y}), elevation: {avg_elevation}\n"
-                f"All tiles: {json.dumps(tiles)}\n\n"
-                f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
-                f"{ref_db_section}"
-                f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
-                f"Use it as a REFERENCE for sensible heights, radii, and stack order. You MUST still emit your own full "
-                f"spec.components list derived from the site brief below — do not paste this block verbatim. "
-                f"Adapt, add, remove, or replace parts (including type procedural) for {city_loc}. "
-                f"Only use spec.template if you deliberately choose id \"open\" or a shortcut; the default output is always top-level spec.components.\n\n"
-                f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n\n"
-                f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
-                f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
-                f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"
-                f"- Set elevation={avg_elevation} on all tiles\n"
-                f"- Set spec.anchor on EVERY tile to {{\"x\":{anchor_x},\"y\":{anchor_y}}}"
-            )
+                ref_entry = lookup_architectural_reference(btype, city_loc, district_ref_year_i)
+                ref_db_block = format_reference_for_prompt(ref_entry)
+                ref_db_section = ""
+                if ref_db_block:
+                    ref_db_section = (
+                        f"MEASURED REFERENCE (curated database — numeric ranges for proportion_rules / sanity checks; "
+                        f"use when they align with the site brief):\n{ref_db_block}\n\n"
+                    )
+
+                prompt = (
+                    f"Design: {name}\nType: {btype}\n"
+                    f"City: {city_loc}, {scenario.get('period', '')}\n"
+                    f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
+                    f"Anchor tile: ({anchor_x}, {anchor_y}), elevation: {avg_elevation}\n"
+                    f"All tiles: {json.dumps(tiles)}\n\n"
+                    f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
+                    f"{ref_db_section}"
+                    f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
+                    f"Use it as a REFERENCE for sensible heights, radii, and stack order. You MUST still emit your own full "
+                    f"spec.components list derived from the site brief below — do not paste this block verbatim. "
+                    f"Adapt, add, remove, or replace parts (including type procedural) for {city_loc}. "
+                    f"Only use spec.template if you deliberately choose id \"open\" or a shortcut; the default output is always top-level spec.components.\n\n"
+                    f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n\n"
+                    f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
+                    f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
+                    f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"
+                    f"- Set elevation={avg_elevation} on all tiles\n"
+                    f"- Set spec.anchor on EVERY tile to {{\"x\":{anchor_x},\"y\":{anchor_y}}}"
+                )
+                if env_note:
+                    prompt += (
+                        f"\n\nSURVEYOR `environment_note` (edges, planting, circulation — use for façades and setting):\n"
+                        f"{env_note}\n"
+                    )
             urban_jobs.append({
                 "name": name,
                 "btype": btype,
@@ -879,8 +925,8 @@ class BuildEngine:
                 )
                 return False
 
-            # Inject anchors for multi-tile buildings if AI didn't set them
-            if len(tiles) > 1:
+            # Inject anchors for multi-tile buildings if AI didn't set them (not for procedural terrain)
+            if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
                 for td in final_tiles:
                     if not td.get("spec"):
                         td["spec"] = {}

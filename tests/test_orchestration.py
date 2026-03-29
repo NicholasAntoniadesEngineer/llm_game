@@ -99,6 +99,62 @@ class ValidationTests(unittest.TestCase):
             }],
         })
 
+    def test_open_terrain_tiles_no_components_ok(self):
+        validate_urbanista_arch_result({
+            "tiles": [
+                {
+                    "x": 1,
+                    "y": 2,
+                    "terrain": "road",
+                    "spec": {"color": "#707070", "scenery": {"pavement_detail": 0.55}},
+                },
+                {
+                    "x": 3,
+                    "y": 2,
+                    "terrain": "garden",
+                    "spec": {"scenery": {"vegetation_density": 0.4}},
+                },
+            ],
+        })
+
+    def test_surface_detail_fields_ok(self):
+        validate_urbanista_arch_result({
+            "tiles": [{
+                "x": 0,
+                "y": 0,
+                "terrain": "building",
+                "spec": {
+                    "components": [{
+                        "type": "podium",
+                        "steps": 1,
+                        "height": 0.1,
+                        "color": "#F5E6C8",
+                        "surface_detail": 0.5,
+                        "detail_repeat": 10,
+                    }],
+                },
+            }],
+        })
+
+    def test_invalid_surface_detail_rejected(self):
+        with self.assertRaises(UrbanistaValidationError):
+            validate_urbanista_arch_result({
+                "tiles": [{
+                    "x": 0,
+                    "y": 0,
+                    "terrain": "building",
+                    "spec": {
+                        "components": [{
+                            "type": "podium",
+                            "steps": 1,
+                            "height": 0.1,
+                            "color": "#F5E6C8",
+                            "surface_detail": 1.5,
+                        }],
+                    },
+                }],
+            })
+
     def test_both_template_and_components_rejected(self):
         with self.assertRaises(UrbanistaValidationError):
             validate_urbanista_arch_result({

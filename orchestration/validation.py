@@ -23,6 +23,7 @@ STACK_ROLES = frozenset({
 
 MAX_PROCEDURAL_PARTS = 48
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_MAP_URL_MAX_LEN = 2048
 
 # Optional spec.phase4 — must match static/renderer3d.js _applyPhase4ContextualPolish
 _PHASE4_BOOL_KEYS = frozenset({
@@ -80,6 +81,42 @@ def _require_color(part: dict, ctx: str) -> None:
         raise UrbanistaValidationError(f"{ctx}: each procedural part requires color as #RRGGBB hex")
 
 
+def _validate_optional_pbr(comp: dict, ctx: str) -> None:
+    """Optional roughness / metalness / surface_detail / detail_repeat / map_url — must match renderer3d _matPBR."""
+    for key in ("roughness", "metalness"):
+        v = comp.get(key)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise UrbanistaValidationError(f"{ctx}: {key} must be a number")
+        if not (0.0 <= float(v) <= 1.0):
+            raise UrbanistaValidationError(f"{ctx}: {key} must be between 0 and 1")
+
+    sd = comp.get("surface_detail")
+    if sd is not None:
+        if isinstance(sd, bool) or not isinstance(sd, (int, float)):
+            raise UrbanistaValidationError(f"{ctx}: surface_detail must be a number")
+        if not (0.0 <= float(sd) <= 1.0):
+            raise UrbanistaValidationError(f"{ctx}: surface_detail must be between 0 and 1")
+
+    dr = comp.get("detail_repeat")
+    if dr is not None:
+        if isinstance(dr, bool) or not isinstance(dr, (int, float)):
+            raise UrbanistaValidationError(f"{ctx}: detail_repeat must be a number")
+        if not (0.5 <= float(dr) <= 40.0):
+            raise UrbanistaValidationError(f"{ctx}: detail_repeat must be between 0.5 and 40")
+
+    mu = comp.get("map_url")
+    if mu is not None:
+        if not isinstance(mu, str) or not mu.strip():
+            raise UrbanistaValidationError(f"{ctx}: map_url must be a non-empty string")
+        s = mu.strip()
+        if len(s) > _MAP_URL_MAX_LEN:
+            raise UrbanistaValidationError(f"{ctx}: map_url exceeds max length")
+        if not (s.startswith("https://") or s.startswith("http://")):
+            raise UrbanistaValidationError(f"{ctx}: map_url must start with http:// or https://")
+
+
 def _validate_procedural_component(comp: dict, ctx: str) -> None:
     role = comp.get("stack_role")
     if role not in STACK_ROLES:
@@ -107,6 +144,7 @@ def _validate_procedural_component(comp: dict, ctx: str) -> None:
                 f"{pc}: shape must be one of {sorted(PROCEDURAL_SHAPES)}, got {shape!r}"
             )
         _require_color(p, pc)
+        _validate_optional_pbr(p, pc)
 
         if shape == "box":
             if p.get("size") is not None:
@@ -212,6 +250,7 @@ def _validate_component(comp: dict, ctx: str) -> None:
         )
     if ct == "procedural":
         _validate_procedural_component(comp, ctx)
+        _validate_optional_pbr(comp, ctx)
         return
     if ct == "colonnade":
         st = comp.get("style")
@@ -235,6 +274,8 @@ def _validate_component(comp: dict, ctx: str) -> None:
                 raise UrbanistaValidationError(f"{ctx} relates_to[{j}]: target_id must be string")
             if r.get("relation") is not None and not isinstance(r["relation"], str):
                 raise UrbanistaValidationError(f"{ctx} relates_to[{j}]: relation must be string")
+
+    _validate_optional_pbr(comp, ctx)
 
 
 def validate_urbanista_arch_result(arch_result: dict) -> dict:
