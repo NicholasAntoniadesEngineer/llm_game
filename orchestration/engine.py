@@ -28,8 +28,8 @@ class BuildEngine:
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
         # Core agents — only Urbanista uses sonnet (spatial reasoning critical)
-        self.planner = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_PLAN, CLAUDE_MODEL)
-        self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, CLAUDE_MODEL)
+        self.planner = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_PLAN, "sonnet")
+        self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, "sonnet")
         self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, CLAUDE_MODEL)
         self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, "sonnet")
 
@@ -56,7 +56,7 @@ class BuildEngine:
             await self._build_district(district)
 
             self.district_index += 1
-            save_state(self.world, self.chat_history, self.district_index, self.districts)
+            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
             logger.info(f"=== Completed: {district['name']} ===")
 
         if self.running:
@@ -181,6 +181,16 @@ class BuildEngine:
         logger.info(f"Master plan: {len(master_plan)} structures")
         await self.broadcast({"type": "master_plan", "plan": master_plan})
 
+        # Precompute centers for neighbor distance calculation
+        centers = {}
+        for s in master_plan:
+            stiles = s.get("tiles", [])
+            if stiles:
+                centers[s.get("name", "")] = (
+                    sum(t["x"] for t in stiles) / len(stiles),
+                    sum(t["y"] for t in stiles) / len(stiles),
+                )
+
         # ─── Build each structure — maximum parallelism ───
         for structure in master_plan:
             if not self.running:
@@ -203,25 +213,19 @@ class BuildEngine:
                 await self._chat("cartographus", "info", f"Skipping {name} — already built.")
                 continue
 
-            # Calculate distances to nearby structures from master plan
-            def tile_center(tile_list):
-                if not tile_list: return (0, 0)
-                cx = sum(t["x"] for t in tile_list) / len(tile_list)
-                cy = sum(t["y"] for t in tile_list) / len(tile_list)
-                return (cx, cy)
-
-            my_center = tile_center(tiles)
+            # Calculate distances to nearby structures using precomputed centers
+            my_center = centers.get(name, (0, 0))
             neighbors = []
             for other in master_plan:
-                if other.get("name") == name:
+                other_name = other.get("name", "")
+                if other_name == name:
                     continue
-                other_tiles = other.get("tiles", [])
-                if not other_tiles:
+                oc = centers.get(other_name)
+                if not oc:
                     continue
-                oc = tile_center(other_tiles)
                 dist_tiles = round(((my_center[0] - oc[0])**2 + (my_center[1] - oc[1])**2)**0.5, 1)
                 dist_meters = round(dist_tiles * 10)
-                neighbors.append({"name": other.get("name"), "type": other.get("building_type"), "distance_tiles": dist_tiles, "distance_m": dist_meters})
+                neighbors.append({"name": other_name, "type": other.get("building_type"), "distance_tiles": dist_tiles, "distance_m": dist_meters})
             neighbors.sort(key=lambda n: n["distance_tiles"])
             nearest = neighbors[:5]
 
@@ -360,7 +364,7 @@ class BuildEngine:
 
             # Save after every building so progress survives crashes
             self.world.turn += 1
-            save_state(self.world, self.chat_history, self.district_index, self.districts)
+            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
 
             await asyncio.sleep(STEP_DELAY)
 

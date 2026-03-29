@@ -13,6 +13,10 @@ class WorldRenderer {
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
         this.hoveredGroup = null;
+        this._meshList = [];
+        this._meshListDirty = true;
+        this._waterMeshes = [];
+        this._animatingGroups = new Set();
 
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
@@ -176,11 +180,13 @@ class WorldRenderer {
         const key = `${color}:${roughness}`;
         if (!this._matCache) this._matCache = new Map();
         if (!this._matCache.has(key)) {
-            this._matCache.set(key, new THREE.MeshStandardMaterial({
+            const mat = new THREE.MeshStandardMaterial({
                 color: new THREE.Color(color),
                 roughness: Math.max(0.3, Math.min(0.9, roughness)),
                 metalness: 0.01,
-            }));
+            });
+            mat._cached = true;
+            this._matCache.set(key, mat);
         }
         return this._matCache.get(key);
     }
@@ -284,7 +290,14 @@ class WorldRenderer {
         if (this.buildingGroups.has(key)) {
             const old = this.buildingGroups.get(key);
             this.scene.remove(old);
-            old.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) c.material.dispose(); });
+            old.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material && !c.material._cached) c.material.dispose(); });
+            // Remove old water meshes belonging to this group
+            this._waterMeshes = this._waterMeshes.filter(m => {
+                let parent = m.parent;
+                while (parent) { if (parent === old) return false; parent = parent.parent; }
+                return true;
+            });
+            this._animatingGroups.delete(old);
         }
 
         // Calculate footprint (single tile or multi-tile)
@@ -316,7 +329,22 @@ class WorldRenderer {
         }
 
         group.traverse(c => {
-            if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; c.userData.tile = tile; }
+            if (c.isMesh) {
+                c.receiveShadow = true;
+                c.userData.tile = tile;
+                // Only large meshes cast shadows
+                if (c.geometry && c.geometry.boundingSphere) {
+                    c.geometry.computeBoundingSphere();
+                    c.castShadow = c.geometry.boundingSphere.radius > 0.05;
+                } else {
+                    c.castShadow = true;
+                }
+            }
+        });
+
+        // Track water meshes for efficient animation
+        group.traverse(c => {
+            if (c.userData && c.userData.isWater) this._waterMeshes.push(c);
         });
 
         if (animate) {
@@ -324,10 +352,12 @@ class WorldRenderer {
             group.userData.animTargetY = 0;
             group.userData.animStart = Date.now();
             group.position.y = 5 * S;
+            this._animatingGroups.add(group);
         }
 
         this.scene.add(group);
         this.buildingGroups.set(key, group);
+        this._meshListDirty = true;
     }
 
     // ─── Terrain ───
@@ -1035,14 +1065,21 @@ class WorldRenderer {
 
     // ─── Hover / Click ───
 
+    _getMeshList() {
+        if (this._meshListDirty) {
+            this._meshList = [];
+            this.buildingGroups.forEach(g => g.traverse(c => { if (c.isMesh) this._meshList.push(c); }));
+            this._meshListDirty = false;
+        }
+        return this._meshList;
+    }
+
     _updateHover(e) {
         const rect = this.renderer3d.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycaster.setFromCamera(this.mouse, this.camera);
-        const meshes = [];
-        this.buildingGroups.forEach(g => g.traverse(c => { if (c.isMesh) meshes.push(c); }));
-        const hits = this.raycaster.intersectObjects(meshes);
+        const hits = this.raycaster.intersectObjects(this._getMeshList());
 
         if (this.hoveredGroup) {
             this.hoveredGroup.traverse(c => {
@@ -1085,9 +1122,7 @@ class WorldRenderer {
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycaster.setFromCamera(this.mouse, this.camera);
-        const meshes = [];
-        this.buildingGroups.forEach(g => g.traverse(c => { if (c.isMesh) meshes.push(c); }));
-        const hits = this.raycaster.intersectObjects(meshes);
+        const hits = this.raycaster.intersectObjects(this._getMeshList());
         if (hits.length > 0) {
             const tile = hits[0].object.userData.tile;
             if (tile) this.renderer3d.domElement.dispatchEvent(new CustomEvent("tileclick", { detail: { x: tile.x, y: tile.y, tile } }));
@@ -1119,19 +1154,18 @@ class WorldRenderer {
             if (this._keysDown.has("f")) this.cameraDistance = Math.min(500, this.cameraDistance * 1.03);
             this._updateCamera();
         }
-        this.buildingGroups.forEach(group => {
-            if (group.userData.animStart) {
-                const t = Math.min(1, (now - group.userData.animStart) / 600);
-                const ease = 1 - Math.pow(1 - t, 3);
-                group.position.y = group.userData.animStartY + (group.userData.animTargetY - group.userData.animStartY) * ease;
-                if (t >= 1) delete group.userData.animStart;
-            }
-            group.traverse(c => {
-                if (c.userData && c.userData.isWater) {
-                    c.position.y = -0.03 + Math.sin(now * 0.002 + group.position.x * 2 + group.position.z * 3) * 0.012;
-                }
-            });
-        });
+        // Animate only groups that are currently dropping in
+        for (const group of this._animatingGroups) {
+            const t = Math.min(1, (now - group.userData.animStart) / 600);
+            const ease = 1 - Math.pow(1 - t, 3);
+            group.position.y = group.userData.animStartY + (group.userData.animTargetY - group.userData.animStartY) * ease;
+            if (t >= 1) { delete group.userData.animStart; this._animatingGroups.delete(group); }
+        }
+        // Animate only tracked water meshes
+        for (const c of this._waterMeshes) {
+            const gp = c.parent; // group is the direct or indirect parent
+            c.position.y = -0.03 + Math.sin(now * 0.002 + gp.position.x * 2 + gp.position.z * 3) * 0.012;
+        }
         this.renderer3d.render(this.scene, this.camera);
     }
 }
