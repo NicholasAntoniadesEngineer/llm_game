@@ -244,7 +244,7 @@ function updateStatus(status) {
 
 function formatYear(year) {
     if (year < 0) return `${Math.abs(year)} BC`;
-    return `${year} AD`;
+    return `${year}`;
 }
 
 function updateProgressBar() {

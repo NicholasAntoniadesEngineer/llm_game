@@ -101,12 +101,17 @@ city = random.choice(CITIES)
 RANDOM_YEAR = random.randint(city["year_min"], min(city["year_max"], 2024))
 WINDOW = 50
 
+def format_year(y):
+    if y < 0:
+        return f"{abs(y)} BC"
+    return str(y)
+
 SCENARIO = {
     "location": city["name"],
     "description": city["description"],
     "features": city["features"],
     "grid_note": city["grid_note"],
-    "period": f"around {abs(RANDOM_YEAR)} {'BCE' if RANDOM_YEAR < 0 else 'CE'}",
+    "period": f"around {format_year(RANDOM_YEAR)}",
     "year_start": RANDOM_YEAR - WINDOW // 2,
     "year_end": RANDOM_YEAR + WINDOW // 2,
     "ruler": "Research who ruled and what the city looked like at this exact time",
