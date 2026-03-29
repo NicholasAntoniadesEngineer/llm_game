@@ -127,7 +127,7 @@
     <div class="floating-hud-panel floating-camera-panel" id="floating-camera-panel">
         <div class="floating-tools-handle" id="floating-camera-handle" title="Drag to move panel">Camera</div>
         <div class="floating-tools-body floating-tools-body--camera">
-            <div class="nav-controls" id="nav-controls" role="toolbar" aria-label="Camera">
+            <div class="nav-controls nav-controls--camera" id="nav-controls" role="toolbar" aria-label="Camera">
                 <div class="nav-section">
                     <div class="nav-label">Move</div>
                     <div class="nav-grid">
@@ -147,19 +147,30 @@
                 <div class="nav-section">
                     <div class="nav-label">Zoom</div>
                     <div class="nav-row">
-                        <button type="button" class="nav-btn" data-action="zoom" data-f="0.7" title="Zoom in (R)">+</button>
-                        <button type="button" class="nav-btn" data-action="zoom" data-f="1.4" title="Zoom out (F)">&minus;</button>
+                        <button type="button" class="nav-btn" data-action="zoom" data-f="0.96" title="Zoom in (+ or =)">+</button>
+                        <button type="button" class="nav-btn" data-action="zoom" data-f="1.04" title="Zoom out (−)">&minus;</button>
                     </div>
                 </div>
                 <div class="nav-section">
-                    <div class="nav-label">Tilt</div>
+                    <div class="nav-label">View</div>
                     <div class="nav-row">
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up">&#9650;</button>
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down">&#9660;</button>
+                        <button type="button" class="nav-btn" data-action="reset" title="Reset camera to default framing">&#8635;</button>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-label">Tilt &amp; height</div>
+                    <div class="nav-row nav-row--tilt">
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Tilt left (Arrow Left)">&#9664;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up (Arrow Up)">&#9650;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down (Arrow Down)">&#9660;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Tilt right (Arrow Right)">&#9654;</button>
+                        <button type="button" class="nav-btn" data-action="lift" data-dir="1" title="Raise view (Space)">Sp</button>
+                        <button type="button" class="nav-btn" data-action="lift" data-dir="-1" title="Lower view (C)">C</button>
                     </div>
                 </div>
             </div>
         </div>
+        <div class="floating-tools-resize floating-camera-resize" id="floating-camera-resize" role="separator" aria-orientation="vertical" aria-label="Resize camera panel width" title="Drag to resize width"></div>
     </div>
 
     <div id="tooltip"></div>

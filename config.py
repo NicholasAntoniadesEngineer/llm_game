@@ -1,8 +1,9 @@
 """Eternal Cities — Configuration."""
 
 # Grid settings (each tile ≈ 10 m in agent prompts — total city footprint scales with size)
-GRID_WIDTH = 80
-GRID_HEIGHT = 80
+# 4× world size (linear dimensions): 80×80 → 320×320 tiles
+GRID_WIDTH = 320
+GRID_HEIGHT = 320
 
 # Legacy names — prefer per-agent settings in llm_agents.py at repo root.
 CLAUDE_MODEL = "haiku"

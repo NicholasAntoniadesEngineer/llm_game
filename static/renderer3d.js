@@ -83,7 +83,7 @@ class WorldRenderer {
         this._cullCenter = new THREE.Vector3();
         this._instDummy = new THREE.Object3D();
 
-        // Scene — sky / fog set in _setupIblAndBackground() after renderer exists
+        // Scene — sky / IBL set in _setupIblAndBackground() after renderer exists
         this.scene = new THREE.Scene();
 
         // Camera
@@ -211,15 +211,25 @@ class WorldRenderer {
         el.addEventListener("click", e => this._onClick(e));
         el.addEventListener("contextmenu", e => e.preventDefault());
 
-        // WASD / arrow keys + QE for orbit
+        // WASD pan, arrows = tilt (matches ▲/▼ buttons), +/− = zoom (matches +/− buttons), Q/E orbit, R/F zoom alt
+        // Space = raise view target; C = lower
         this._keysDown = new Set();
+        const _normKey = (e) => {
+            if (e.code === "NumpadAdd" || e.key === "+") return "+";
+            if (e.code === "NumpadSubtract" || e.key === "-") return "-";
+            if (e.key === "=") return "=";
+            if (e.code === "Space" || e.key === " ") return "space";
+            return e.key.toLowerCase();
+        };
         window.addEventListener("keydown", e => {
             // Don't capture if user is typing in an input
             if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-            this._keysDown.add(e.key.toLowerCase());
+            const nk = _normKey(e);
+            if (nk === "space") e.preventDefault();
+            this._keysDown.add(nk);
         });
         window.addEventListener("keyup", e => {
-            this._keysDown.delete(e.key.toLowerCase());
+            this._keysDown.delete(_normKey(e));
         });
     }
 
@@ -247,6 +257,46 @@ class WorldRenderer {
     zoomCamera(factor) {
         if (this._failed) return;
         this.cameraDistance = this._clampCameraDistance(this.cameraDistance * factor);
+        this._updateCamera();
+    }
+
+    /** direction: +1 = raise orbit target (Space), -1 = lower (C) — step matches pan buttons */
+    liftCamera(direction) {
+        if (this._failed) return;
+        const liftSpeed = this.cameraDistance * 0.05;
+        this.cameraTarget.y += direction * liftSpeed;
+        this._updateCamera();
+    }
+
+    /** Restore orbit target, distance, yaw, and pitch to the same framing as after world load. */
+    resetCameraToMap() {
+        if (this._failed) return;
+        if (this.width == null || this.height == null) return;
+        this._flyTarget = null;
+        const S = TILE_SIZE;
+        let minH = 0;
+        let maxH = 0;
+        if (this._cornerHeights && this._cornerHeights.length) {
+            for (const row of this._cornerHeights) {
+                for (const v of row) {
+                    if (v < minH) minH = v;
+                    if (v > maxH) maxH = v;
+                }
+            }
+        }
+        const midY = ((minH + maxH) / 2) * S;
+        const mapW = this.width * S;
+        const mapH = this.height * S;
+        this._resetCameraPoseToMapCenter(midY, mapW, mapH);
+    }
+
+    _resetCameraPoseToMapCenter(midY, mapW, mapH) {
+        const diagonal = Math.hypot(mapW, mapH);
+        this.cameraAngle = Math.PI / 4;
+        this.cameraPitch = 0.5;
+        this.cameraDistance = this._clampCameraDistance(diagonal * 0.45);
+        this.cameraTarget.set(mapW / 2, midY, mapH / 2);
+        this._syncPerspectiveFarPlane();
         this._updateCamera();
     }
 
@@ -333,8 +383,7 @@ class WorldRenderer {
         }
 
         this.scene.background = skyTex;
-        const fogColor = 0xbeb49a;
-        this.scene.fog = new THREE.FogExp2(fogColor, 0.00018);
+        this.scene.fog = null;
     }
 
     /** Warm dusty horizon + soft sun for Mediterranean / ancient city mood. */
@@ -858,7 +907,6 @@ class WorldRenderer {
         const diagonal = Math.hypot(mapW, mapH);
         this._camDistMin = 0.8;
         this._camDistMax = Math.max(5200, diagonal * 2.75);
-        this.cameraDistance = this._clampCameraDistance(diagonal * 0.45);
 
         if (this._sunLight && this._sunLight.shadow) {
             const sc = this._sunLight.shadow.camera;
@@ -873,9 +921,7 @@ class WorldRenderer {
             this._sunLight.shadow.mapSize.set(shadowMapSize, shadowMapSize);
         }
 
-        this.cameraTarget.set(mapW / 2, midY, mapH / 2);
-        this._syncPerspectiveFarPlane();
-        this._updateCamera();
+        this._resetCameraPoseToMapCenter(midY, mapW, mapH);
 
         // Earth tone heightfield — matches _surfaceYAtWorldXZ for building / terrain props
         const earth = 0x9a7b52;
@@ -2708,7 +2754,7 @@ class WorldRenderer {
         requestAnimationFrame(() => this._animate());
         const now = Date.now();
 
-        // Keyboard controls: WASD/arrows pan, QE orbit, RF zoom
+        // Keyboard: WASD pan; ArrowLeft/Right = orbit (horizontal tilt, same as ◀/▶); ArrowUp/Down = pitch (same as ▲/▼); Q/E orbit; +/− zoom; R/F fine zoom
         if (this._keysDown && this._keysDown.size > 0) {
             const panSpeed = this.cameraDistance * 0.008;
             const rightX = Math.sin(this.cameraAngle);
@@ -2716,15 +2762,40 @@ class WorldRenderer {
             const fwdX = -Math.cos(this.cameraAngle);
             const fwdZ = -Math.sin(this.cameraAngle);
             let rx = 0, rz = 0;
-            if (this._keysDown.has("w") || this._keysDown.has("arrowup"))    { rx += fwdX; rz += fwdZ; }
-            if (this._keysDown.has("s") || this._keysDown.has("arrowdown"))  { rx -= fwdX; rz -= fwdZ; }
-            if (this._keysDown.has("a") || this._keysDown.has("arrowleft"))  { rx -= rightX; rz -= rightZ; }
-            if (this._keysDown.has("d") || this._keysDown.has("arrowright")) { rx += rightX; rz += rightZ; }
+            if (this._keysDown.has("w")) { rx += fwdX; rz += fwdZ; }
+            if (this._keysDown.has("s")) { rx -= fwdX; rz -= fwdZ; }
+            if (this._keysDown.has("a")) { rx -= rightX; rz -= rightZ; }
+            if (this._keysDown.has("d")) { rx += rightX; rz += rightZ; }
             if (rx || rz) { this.cameraTarget.x += rx * panSpeed; this.cameraTarget.z += rz * panSpeed; }
-            // Q/E rotate orbit
+            // Q/E rotate orbit (same as Q/E buttons)
             if (this._keysDown.has("q")) this.cameraAngle += 0.02;
             if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
-            // R/F zoom
+            // ArrowLeft/Right = yaw around target (same step as ArrowUp/Down pitch, same as ◀ / ▶)
+            if (this._keysDown.has("arrowleft")) this.cameraAngle += 0.02;
+            if (this._keysDown.has("arrowright")) this.cameraAngle -= 0.02;
+            // ArrowUp/Down = pitch (same as floating Camera ▲ / ▼)
+            if (this._keysDown.has("arrowup")) {
+                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + 0.02));
+            }
+            if (this._keysDown.has("arrowdown")) {
+                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch - 0.02));
+            }
+            // Space: raise orbit target (world Y); C: lower
+            const liftSpeed = this.cameraDistance * 0.01;
+            if (this._keysDown.has("space")) {
+                this.cameraTarget.y += liftSpeed;
+            }
+            if (this._keysDown.has("c")) {
+                this.cameraTarget.y -= liftSpeed;
+            }
+            // +/− and = (US keyboard): same factors as Camera panel zoom buttons (~4% per step)
+            if (this._keysDown.has("+") || this._keysDown.has("=")) {
+                this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 0.96);
+            }
+            if (this._keysDown.has("-")) {
+                this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 1.04);
+            }
+            // R/F: smaller per-frame zoom (legacy)
             if (this._keysDown.has("r")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 0.97);
             if (this._keysDown.has("f")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 1.03);
             this._updateCamera();

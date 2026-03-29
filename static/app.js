@@ -1839,6 +1839,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const FLOATING_TOOLS_POS_KEY = "eternal_cities_floating_tools_pos";
     const FLOATING_CAMERA_POS_KEY = "eternal_cities_floating_camera_pos";
     const FLOATING_TOOLS_MIN_WIDTH_PX = 180;
+    const FLOATING_CAMERA_MIN_WIDTH_PX = 200;
 
     // Make all panels draggable by their header/background
     function makeDraggable(el, handleSelector) {
@@ -1918,6 +1919,121 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    function initFloatingCameraPanel() {
+        const panel = document.getElementById("floating-camera-panel");
+        const handle = document.getElementById("floating-camera-handle");
+        const resizeEl = document.getElementById("floating-camera-resize");
+        if (!panel || !handle) return;
+        panel.style.position = "fixed";
+
+        function saveCameraPanelLayout() {
+            try {
+                const r = panel.getBoundingClientRect();
+                localStorage.setItem(
+                    FLOATING_CAMERA_POS_KEY,
+                    JSON.stringify({
+                        left: r.left,
+                        top: r.top,
+                        width: clampFloatingCameraWidthPx(r.width),
+                    })
+                );
+            } catch (err) {
+                /* ignore */
+            }
+        }
+
+        try {
+            const raw = localStorage.getItem(FLOATING_CAMERA_POS_KEY);
+            if (raw) {
+                const p = JSON.parse(raw);
+                if (Number.isFinite(p.left) && Number.isFinite(p.top)) {
+                    panel.style.left = `${p.left}px`;
+                    panel.style.top = `${p.top}px`;
+                    panel.style.bottom = "auto";
+                    panel.style.right = "auto";
+                }
+                if (Number.isFinite(p.width)) {
+                    panel.style.width = `${clampFloatingCameraWidthPx(p.width)}px`;
+                }
+            }
+        } catch (e) {
+            /* ignore */
+        }
+
+        let dragging = false;
+        let offX = 0;
+        let offY = 0;
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            const r = panel.getBoundingClientRect();
+            offX = e.clientX - r.left;
+            offY = e.clientY - r.top;
+            handle.style.cursor = "grabbing";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            panel.style.left = `${e.clientX - offX}px`;
+            panel.style.top = `${e.clientY - offY}px`;
+            panel.style.bottom = "auto";
+            panel.style.right = "auto";
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.style.cursor = "grab";
+            saveCameraPanelLayout();
+        });
+
+        let resizing = false;
+        let resizeStartX = 0;
+        let resizeStartWidth = 0;
+        if (resizeEl) {
+            resizeEl.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                resizing = true;
+                resizeStartX = e.clientX;
+                resizeStartWidth = panel.getBoundingClientRect().width;
+                try {
+                    resizeEl.setPointerCapture(e.pointerId);
+                } catch (err) {
+                    /* ignore */
+                }
+            });
+            resizeEl.addEventListener("pointermove", (e) => {
+                if (!resizing) return;
+                const nextW = clampFloatingCameraWidthPx(resizeStartWidth + (e.clientX - resizeStartX));
+                panel.style.width = `${nextW}px`;
+            });
+            const endCameraResize = (e) => {
+                if (!resizing) return;
+                resizing = false;
+                try {
+                    resizeEl.releasePointerCapture(e.pointerId);
+                } catch (err) {
+                    /* ignore */
+                }
+                saveCameraPanelLayout();
+            };
+            resizeEl.addEventListener("pointerup", endCameraResize);
+            resizeEl.addEventListener("pointercancel", endCameraResize);
+        }
+
+        window.addEventListener(
+            "resize",
+            () => {
+                const w = panel.getBoundingClientRect().width;
+                const clamped = clampFloatingCameraWidthPx(w);
+                if (Math.abs(clamped - w) > 0.5) {
+                    panel.style.width = `${clamped}px`;
+                    saveCameraPanelLayout();
+                }
+            },
+            { passive: true }
+        );
+    }
+
     function floatingToolsMaxWidthPx() {
         const raw = getComputedStyle(document.documentElement).getPropertyValue("--chat-sidebar-width").trim();
         let sidebar = 420;
@@ -1930,6 +2046,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function clampFloatingToolsWidthPx(w) {
         const lo = FLOATING_TOOLS_MIN_WIDTH_PX;
+        const hi = floatingToolsMaxWidthPx();
+        return Math.min(hi, Math.max(lo, w));
+    }
+
+    function clampFloatingCameraWidthPx(w) {
+        const lo = FLOATING_CAMERA_MIN_WIDTH_PX;
         const hi = floatingToolsMaxWidthPx();
         return Math.min(hi, Math.max(lo, w));
     }
@@ -2050,7 +2172,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     initFloatingToolsPanel();
-    initFloatingHudPanel("floating-camera-panel", "floating-camera-handle", FLOATING_CAMERA_POS_KEY);
+    initFloatingCameraPanel();
     makeDraggable(document.getElementById("map-overlay"), ".map-overlay-header");
     makeDraggable(document.getElementById("log-overlay"), ".map-overlay-header");
     makeDraggable(document.getElementById("tile-detail"));
@@ -2066,6 +2188,8 @@ document.addEventListener("DOMContentLoaded", () => {
             if (action === "pan") renderer.panCamera(+btn.dataset.x, +btn.dataset.z);
             else if (action === "orbit") renderer.orbitCamera(+btn.dataset.a, +btn.dataset.p);
             else if (action === "zoom") renderer.zoomCamera(+btn.dataset.f);
+            else if (action === "lift") renderer.liftCamera(+btn.dataset.dir);
+            else if (action === "reset") renderer.resetCameraToMap();
         });
     });
 

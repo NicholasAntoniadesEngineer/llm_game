@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from world.state import WorldState
 from orchestration.bus import MessageBus
@@ -55,6 +56,15 @@ def build_app(lifespan=None):
     """Construct the FastAPI app. Optional ``lifespan`` is set from main.py (banner, auto-resume)."""
     static_dir = Path(__file__).parent.parent / "static"
     app = FastAPI(title="Roma Aeterna", lifespan=lifespan)
+
+    class _RedirectStaticIndexMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if request.url.path == "/static/index.html":
+                return RedirectResponse(url="/", status_code=302)
+            return await call_next(request)
+
+    app.add_middleware(_RedirectStaticIndexMiddleware)
+
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -66,7 +76,13 @@ def build_app(lifespan=None):
     async def index():
         html = (static_dir / "index.html").read_text()
         html = html.replace("__ASSET_VERSION__", ASSET_VERSION)
-        return HTMLResponse(html)
+        return HTMLResponse(
+            content=html,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
 
     @app.get("/api/cities")
     async def get_cities():
