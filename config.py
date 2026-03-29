@@ -1,7 +1,5 @@
 """Eternal Cities — Configuration."""
 
-import random
-
 # Grid settings
 GRID_WIDTH = 40
 GRID_HEIGHT = 40
@@ -10,6 +8,28 @@ GRID_HEIGHT = 40
 CLAUDE_MODEL = "haiku"
 CLAUDE_MODEL_FAST = "haiku"
 STEP_DELAY = 0.3
+
+# Max concurrent Historicus CLI calls (limits rate spikes; still parallel).
+HISTORICUS_MAX_CONCURRENT = 2
+
+# Max concurrent Urbanista CLI calls (design pass; placement stays ordered).
+URBANISTA_MAX_CONCURRENT = 3
+
+# Max concurrent surveyor CLI calls across parallel district surveys.
+SURVEY_MAX_CONCURRENT = 3
+
+# Surveyor: when a district lists more than this many named buildings, run multiple
+# smaller survey passes and merge (fewer tokens per call, clearer placement).
+SURVEY_BUILDINGS_PER_CHUNK = 10
+
+# Persist world to disk every N structures placed (always saved on district boundaries).
+SAVE_STATE_EVERY_N_STRUCTURES = 3
+
+# Cap chat messages stored for replay (oldest dropped).
+CHAT_HISTORY_MAX_MESSAGES = 500
+
+# Max chat messages sent to a client on WebSocket connect (most recent).
+CHAT_REPLAY_MAX_MESSAGES = 200
 
 # Agent display info
 AGENTS = {
@@ -96,9 +116,6 @@ CITIES = [
     },
 ]
 
-# Random city and year selection
-city = random.choice(CITIES)
-RANDOM_YEAR = random.randint(city["year_min"], min(city["year_max"], 2024))
 WINDOW = 50
 
 def format_year(y):
@@ -106,13 +123,29 @@ def format_year(y):
         return f"{abs(y)} BC"
     return str(y)
 
-SCENARIO = {
-    "location": city["name"],
-    "description": city["description"],
-    "features": city["features"],
-    "grid_note": city["grid_note"],
-    "period": f"around {format_year(RANDOM_YEAR)}",
-    "year_start": RANDOM_YEAR - WINDOW // 2,
-    "year_end": RANDOM_YEAR + WINDOW // 2,
-    "ruler": "Research who ruled and what the city looked like at this exact time",
-}
+def get_city(name):
+    """Look up a city by name."""
+    for c in CITIES:
+        if c["name"].lower() == name.lower():
+            return c
+    return None
+
+def create_scenario(city_name, year):
+    """Create a SCENARIO dict from user-selected city and year."""
+    city = get_city(city_name)
+    if not city:
+        city = CITIES[0]
+    year = max(city["year_min"], min(year, city["year_max"]))
+    return {
+        "location": city["name"],
+        "description": city["description"],
+        "features": city["features"],
+        "grid_note": city["grid_note"],
+        "period": f"around {format_year(year)}",
+        "year_start": year - WINDOW // 2,
+        "year_end": year + WINDOW // 2,
+        "ruler": "Research who ruled and what the city looked like at this exact time",
+    }
+
+# Default scenario (set by user selection via /api/start)
+SCENARIO = None

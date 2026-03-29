@@ -12,7 +12,15 @@ from fastapi.staticfiles import StaticFiles
 
 from world.state import WorldState
 from orchestration.bus import MessageBus
-from config import GRID_WIDTH, GRID_HEIGHT
+from config import (
+    GRID_WIDTH,
+    GRID_HEIGHT,
+    CITIES,
+    create_scenario,
+    format_year,
+    CHAT_HISTORY_MAX_MESSAGES,
+    CHAT_REPLAY_MAX_MESSAGES,
+)
 
 logger = logging.getLogger("roma.server")
 
@@ -22,8 +30,10 @@ bus = MessageBus()
 ws_connections: list[WebSocket] = []
 chat_history: list[dict] = []
 
-# Reset callback — set by main.py after engine is created
+# Callbacks — set by main.py after engine is created
 reset_callback = None
+start_callback = None  # Called with (city_name, year) when user clicks Start
+resume_callback = None  # Resume build after API/network pause
 
 app = FastAPI(title="Roma Aeterna")
 
@@ -40,6 +50,19 @@ async def index():
     return HTMLResponse(html)
 
 
+@app.get("/api/cities")
+async def get_cities():
+    return [
+        {
+            "name": c["name"],
+            "year_min": c["year_min"],
+            "year_max": c["year_max"],
+            "description": c["description"],
+        }
+        for c in CITIES
+    ]
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -48,15 +71,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         await websocket.send_json(world.to_dict())
-        # Send city/period info for UI
-        from config import SCENARIO
-        await websocket.send_json({
-            "type": "scenario",
-            "city": SCENARIO["location"],
-            "period": SCENARIO["period"],
-            "description": SCENARIO.get("description", ""),
-        })
-        for msg in chat_history:
+        # Send scenario if already started (reconnect case)
+        import config
+        if config.SCENARIO:
+            await websocket.send_json({
+                "type": "scenario",
+                "city": config.SCENARIO["location"],
+                "period": config.SCENARIO["period"],
+                "description": config.SCENARIO.get("description", ""),
+            })
+        replay = chat_history[-CHAT_REPLAY_MAX_MESSAGES:]
+        for msg in replay:
             await websocket.send_json(msg)
     except Exception:
         if websocket in ws_connections:
@@ -70,10 +95,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 tile = world.get_tile(data.get("x", 0), data.get("y", 0))
                 if tile:
                     await websocket.send_json({"type": "tile_detail", "tile": tile.to_dict()})
+            elif data.get("type") == "start":
+                city_name = data.get("city", "Rome")
+                year = data.get("year", 0)
+                logger.info(f"Start requested: {city_name}, year {year}")
+                if start_callback:
+                    await start_callback(city_name, year)
             elif data.get("type") == "reset":
                 logger.info("Reset requested by client")
                 if reset_callback:
                     await reset_callback()
+            elif data.get("type") == "resume":
+                logger.info("Resume requested by client after pause")
+                if resume_callback:
+                    await resume_callback()
     except WebSocketDisconnect:
         if websocket in ws_connections:
             ws_connections.remove(websocket)
@@ -84,8 +119,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 async def broadcast(message: dict):
-    if message.get("type") in ("chat", "phase", "timeline", "master_plan", "map_description", "map_image"):
+    if message.get("type") in (
+        "chat",
+        "phase",
+        "timeline",
+        "master_plan",
+        "map_description",
+        "map_image",
+        "placement_warnings",
+        "complete",
+        "paused",
+    ):
         chat_history.append(message)
+        if len(chat_history) > CHAT_HISTORY_MAX_MESSAGES:
+            del chat_history[: len(chat_history) - CHAT_HISTORY_MAX_MESSAGES]
 
     dead = []
     for ws in ws_connections:

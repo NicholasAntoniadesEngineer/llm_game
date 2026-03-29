@@ -3,8 +3,11 @@
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from world.state import WorldState
+
+import config
 
 logger = logging.getLogger("roma.persistence")
 
@@ -14,6 +17,7 @@ SURVEYS_CACHE = Path(__file__).parent / "roma_surveys_cache.json"
 
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
+    scenario: dict[str, Any] | None = getattr(config, "SCENARIO", None)
     data = {
         "district_index": district_index,
         "districts": districts or [],
@@ -21,6 +25,7 @@ def save_state(world: WorldState, chat_history: list[dict], district_index: int,
         "current_period": world.current_period,
         "current_year": world.current_year,
         "chat_history": chat_history,
+        "scenario": scenario,
         "tiles": [],
     }
     for y in range(world.height):
@@ -85,6 +90,9 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
         chat_history = data.get("chat_history", [])
         district_index = data.get("district_index", 0)
         districts = data.get("districts", [])
+        scen = data.get("scenario")
+        if isinstance(scen, dict) and scen:
+            config.SCENARIO = scen
 
         logger.info(f"Loaded: {len(data['tiles'])} tiles, district #{district_index}, {len(districts)} districts")
         return chat_history, district_index, districts

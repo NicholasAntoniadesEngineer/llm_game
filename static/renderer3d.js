@@ -3,7 +3,64 @@
 
 const TILE_SIZE = 14; // world units per tile — controls overall scale of everything
 
+/** Terrain types the renderer paints without spec.components (must match _buildTerrain branches). */
+const TERRAIN_WITH_PROCEDURAL_MESH = new Set(["road", "forum", "garden", "water", "grass"]);
+
+/** Phase 4 — contextual polish (neighbor-aware); meshes tagged isPhase4Context for debugging. */
+const PHASE4_MAX_DECOR_MESHES = 96;
+const PHASE4_STEP_DEPTH = 0.045;
+const PHASE4_STEP_HEIGHT = 0.018;
+const PHASE4_STEP_COUNT = 3;
+/** Extra world half-height margin for frustum culling when Phase 4 adds façade extrusions (tile units × TILE_SIZE). */
+const PHASE4_CULL_HEIGHT_EXTRA = 0.12;
+
 class WorldRenderer {
+    static _VALID_STACK_ROLES = new Set([
+        "foundation", "structural", "infill", "roof", "decorative", "freestanding",
+    ]);
+    static _DEFAULT_STACK_ROLE = {
+        podium: "foundation",
+        colonnade: "structural",
+        block: "structural",
+        walls: "structural",
+        arcade: "structural",
+        cella: "infill",
+        atrium: "infill",
+        tier: "infill",
+        pediment: "roof",
+        dome: "roof",
+        tiled_roof: "roof",
+        flat_roof: "roof",
+        vault: "roof",
+        door: "decorative",
+        pilasters: "decorative",
+        awning: "decorative",
+        battlements: "decorative",
+        statue: "freestanding",
+        fountain: "freestanding",
+    };
+    static _BUILDER_METHODS = {
+        podium: "_buildPodium",
+        colonnade: "_buildColonnade",
+        pediment: "_buildPediment",
+        dome: "_buildDome",
+        block: "_buildBlock",
+        arcade: "_buildArcade",
+        tiled_roof: "_buildTiledRoof",
+        atrium: "_buildAtrium",
+        statue: "_buildStatue",
+        fountain: "_buildFountain",
+        awning: "_buildAwning",
+        battlements: "_buildBattlements",
+        tier: "_buildTier",
+        door: "_buildDoor",
+        pilasters: "_buildPilasters",
+        vault: "_buildVault",
+        flat_roof: "_buildFlatRoof",
+        cella: "_buildCella",
+        walls: "_buildWalls",
+    };
+
     constructor(container) {
         this.container = container;
         this.grid = null;
@@ -17,6 +74,12 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups = new Set();
+        // Frustum culling (bounding spheres per building tile)
+        this._frustum = new THREE.Frustum();
+        this._projScreenMatrix = new THREE.Matrix4();
+        this._cullSphere = new THREE.Sphere();
+        this._cullCenter = new THREE.Vector3();
+        this._instDummy = new THREE.Object3D();
 
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
@@ -55,7 +118,8 @@ class WorldRenderer {
         const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
         sun.position.set(400, 500, 250);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(4096, 4096);
+        // 2048² is a good balance for many buildings; raise if GPU-bound and quality-first
+        sun.shadow.mapSize.set(2048, 2048);
         const sc = sun.shadow.camera;
         sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
         this.scene.add(sun);
@@ -201,8 +265,50 @@ class WorldRenderer {
         return this._matCache.get(key);
     }
 
+    // ─── Clear scene for reset ───
+    _clearScene() {
+        // Remove all dynamic objects (buildings, ground, grid) but keep lights and camera
+        const keep = new Set();
+        this.scene.children.forEach(child => {
+            if (child.isLight || child.isCamera || child === this.camera) keep.add(child);
+        });
+        const toRemove = this.scene.children.filter(child => !keep.has(child));
+        for (const obj of toRemove) {
+            this.scene.remove(obj);
+            obj.traverse(c => {
+                if (c.geometry) c.geometry.dispose();
+                if (c.material) {
+                    if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+                    else if (!c.material._cached) c.material.dispose();
+                }
+            });
+        }
+        this.buildingGroups.clear();
+        this._meshList = [];
+        this._meshListDirty = true;
+        this._waterMeshes = [];
+        this._animatingGroups.clear();
+    }
+
+    _disposeGroupResources(group) {
+        group.traverse((c) => {
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) {
+                if (Array.isArray(c.material)) c.material.forEach((m) => { if (m && !m._cached) m.dispose(); });
+                else if (!c.material._cached) c.material.dispose();
+            }
+        });
+    }
+
+    _emitRenderError(error, tile, key) {
+        window.dispatchEvent(new CustomEvent("world-render-error", {
+            detail: { error, key, tile: { x: tile.x, y: tile.y, terrain: tile.terrain } },
+        }));
+    }
+
     // ─── Init ───
     init(worldState) {
+        this._clearScene();
         this.width = worldState.width;
         this.height = worldState.height;
         this.grid = worldState.grid;
@@ -246,6 +352,7 @@ class WorldRenderer {
                     this._buildFromSpec(tile, false);
                 }
             }
+        // Errors are returned per tile and emitted as world-render-error; no silent fallbacks.
     }
 
     updateTiles(tiles) {
@@ -286,35 +393,394 @@ class WorldRenderer {
         return { minX, maxX, minY, maxY };
     }
 
-    // ═══════════════════════════════════════════════
-    // COMPONENT-BASED RENDERER
-    // Interprets spec.components (stacked architectural parts)
-    // or generates type-specific defaults.
-    // ═══════════════════════════════════════════════
+    _tileAt(gridX, gridY) {
+        if (!this.grid || gridX < 0 || gridY < 0 || gridX >= this.width || gridY >= this.height) return null;
+        return this.grid[gridY][gridX];
+    }
 
-    _buildFromSpec(tile, animate) {
-        const spec = tile.spec || {};
-        const key = spec.anchor ? `${spec.anchor.x},${spec.anchor.y}` : `${tile.x},${tile.y}`;
+    _structureKey(t) {
+        if (!t) return "";
+        if (t.spec && t.spec.anchor) return `${t.spec.anchor.x},${t.spec.anchor.y}`;
+        return `${t.x},${t.y}`;
+    }
 
-        // Clean up previous group
-        if (this.buildingGroups.has(key)) {
-            const old = this.buildingGroups.get(key);
-            this.scene.remove(old);
-            old.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material && !c.material._cached) c.material.dispose(); });
-            // Remove old water meshes belonging to this group
-            this._waterMeshes = this._waterMeshes.filter(m => {
-                let parent = m.parent;
-                while (parent) { if (parent === old) return false; parent = parent.parent; }
-                return true;
-            });
-            this._animatingGroups.delete(old);
+    /**
+     * Cardinal adjacency for this footprint: roads, other buildings, water, green, forum.
+     */
+    _computeNeighborContext(tile, spec) {
+        const fp = spec && spec.anchor
+            ? this._getAnchorFootprint(spec.anchor)
+            : { minX: tile.x, maxX: tile.x, minY: tile.y, maxY: tile.y };
+        const myKey = this._structureKey(tile);
+        const at = (x, y) => this._tileAt(x, y);
+        const road = (t) => t && t.terrain === "road";
+        const water = (t) => t && t.terrain === "water";
+        const green = (t) => t && (t.terrain === "garden" || t.terrain === "grass");
+        const forum = (t) => t && t.terrain === "forum";
+        const otherBuilding = (t) => t && t.terrain === "building" && this._structureKey(t) !== myKey;
+
+        const anyNorth = () => {
+            if (fp.minY <= 0) return { road: false, water: false, green: false, forum: false, otherBuilding: false };
+            let r = false, w = false, g = false, f = false, o = false;
+            for (let x = fp.minX; x <= fp.maxX; x++) {
+                const t = at(x, fp.minY - 1);
+                if (road(t)) r = true;
+                if (water(t)) w = true;
+                if (green(t)) g = true;
+                if (forum(t)) f = true;
+                if (otherBuilding(t)) o = true;
+            }
+            return { road: r, water: w, green: g, forum: f, otherBuilding: o };
+        };
+        const anySouth = () => {
+            if (fp.maxY >= this.height - 1) return { road: false, water: false, green: false, forum: false, otherBuilding: false };
+            let r = false, w = false, g = false, f = false, o = false;
+            for (let x = fp.minX; x <= fp.maxX; x++) {
+                const t = at(x, fp.maxY + 1);
+                if (road(t)) r = true;
+                if (water(t)) w = true;
+                if (green(t)) g = true;
+                if (forum(t)) f = true;
+                if (otherBuilding(t)) o = true;
+            }
+            return { road: r, water: w, green: g, forum: f, otherBuilding: o };
+        };
+        const anyEast = () => {
+            if (fp.maxX >= this.width - 1) return { road: false, water: false, green: false, forum: false, otherBuilding: false };
+            let r = false, w = false, g = false, f = false, o = false;
+            for (let y = fp.minY; y <= fp.maxY; y++) {
+                const t = at(fp.maxX + 1, y);
+                if (road(t)) r = true;
+                if (water(t)) w = true;
+                if (green(t)) g = true;
+                if (forum(t)) f = true;
+                if (otherBuilding(t)) o = true;
+            }
+            return { road: r, water: w, green: g, forum: f, otherBuilding: o };
+        };
+        const anyWest = () => {
+            if (fp.minX <= 0) return { road: false, water: false, green: false, forum: false, otherBuilding: false };
+            let r = false, w = false, g = false, f = false, o = false;
+            for (let y = fp.minY; y <= fp.maxY; y++) {
+                const t = at(fp.minX - 1, y);
+                if (road(t)) r = true;
+                if (water(t)) w = true;
+                if (green(t)) g = true;
+                if (forum(t)) f = true;
+                if (otherBuilding(t)) o = true;
+            }
+            return { road: r, water: w, green: g, forum: f, otherBuilding: o };
+        };
+
+        return {
+            footprint: fp,
+            n: anyNorth(),
+            s: anySouth(),
+            e: anyEast(),
+            w: anyWest(),
+        };
+    }
+
+    _phase4RuinIntensity(tile, spec, p4) {
+        if (p4 && p4.ruin_overgrowth != null) {
+            const v = Number(p4.ruin_overgrowth);
+            if (Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+        }
+        const bt = String(tile.building_type || "").toLowerCase();
+        if (bt.includes("ruin")) return 0.78;
+        return 0;
+    }
+
+    _applyPhase4ContextualPolish(group, tile, tileW, tileD, spec, ctx) {
+        const p4 = spec && typeof spec.phase4 === "object" && spec.phase4 ? spec.phase4 : {};
+        if (p4.disable_all) return;
+
+        let budget = PHASE4_MAX_DECOR_MESHES;
+        const baseY = 0;
+        const stepMat = this._mat(p4.step_color || "#c4b5a0", 0.88);
+        const wallMat = this._mat(p4.party_wall_color || "#2c2826", 0.9);
+        const fasciaMat = this._mat(p4.street_front_color || "#6b5344", 0.75);
+        const waterMat = this._mat("#5c4a38", 0.85);
+        const hedgeMat = this._mat("#3d5c32", 0.82);
+        const ivyMat = this._mat("#2d4a28", 0.65);
+
+        const COST_STEPS = PHASE4_STEP_COUNT;
+        const COST_FASCIA = 1;
+        const COST_PARTY = 1;
+        const COST_WATER = 3;
+        const COST_HEDGE = 1;
+        const COST_AWNING = 1;
+        const COST_SIGN = 1;
+
+        const addRoadAwning = (edge) => {
+            if (p4.disable_road_awning) return;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            const depth = 0.09;
+            const thick = 0.014;
+            const y0 =
+                typeof p4.awning_height === "number" && Number.isFinite(p4.awning_height)
+                    ? p4.awning_height
+                    : 0.17;
+            const awningMat = this._mat(p4.awning_color || "#7a6045", 0.78);
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.8, thick, depth), awningMat);
+            mesh.userData.isPhase4Context = true;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (edge === "n") {
+                mesh.position.set(0, baseY + y0, -D / 2 + depth * 0.35);
+                mesh.rotation.x = -0.42;
+            } else if (edge === "s") {
+                mesh.position.set(0, baseY + y0, D / 2 - depth * 0.35);
+                mesh.rotation.x = 0.42;
+            } else if (edge === "w") {
+                mesh.position.set(-W / 2 + depth * 0.35, baseY + y0, 0);
+                mesh.rotation.z = 0.42;
+            } else {
+                mesh.position.set(W / 2 - depth * 0.35, baseY + y0, 0);
+                mesh.rotation.z = -0.42;
+            }
+            group.add(mesh);
+        };
+
+        const addStreetSign = (edge) => {
+            if (p4.disable_street_signs) return;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            const signMat = this._mat(p4.sign_color || "#3d2e24", 0.85);
+            const board = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.045, 0.012), signMat);
+            board.userData.isPhase4Context = true;
+            board.castShadow = true;
+            board.receiveShadow = true;
+            const seed = tile.x * 131 + tile.y * 17;
+            const along = ((seed % 1000) / 1000 - 0.5) * 0.45 * Math.min(W, D);
+            const ySign = 0.2 + ((seed * 7) % 10) / 250;
+            if (edge === "n") {
+                board.position.set(along, baseY + ySign, -D / 2 + 0.045);
+            } else if (edge === "s") {
+                board.position.set(along, baseY + ySign, D / 2 - 0.045);
+            } else if (edge === "w") {
+                board.position.set(-W / 2 + 0.045, baseY + ySign, along);
+            } else {
+                board.position.set(W / 2 - 0.045, baseY + ySign, along);
+            }
+            group.add(board);
+        };
+
+        const addSteps = (edge) => {
+            if (p4.disable_auto_steps) return;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            for (let i = 0; i < PHASE4_STEP_COUNT; i++) {
+                const dz = PHASE4_STEP_DEPTH;
+                const h = PHASE4_STEP_HEIGHT;
+                let mesh;
+                if (edge === "n") {
+                    mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, h, dz), stepMat);
+                    mesh.position.set(0, baseY + h / 2 + i * h * 0.92, -D / 2 + dz / 2 + i * dz * 0.98);
+                } else if (edge === "s") {
+                    mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, h, dz), stepMat);
+                    mesh.position.set(0, baseY + h / 2 + i * h * 0.92, D / 2 - dz / 2 - i * dz * 0.98);
+                } else if (edge === "w") {
+                    mesh = new THREE.Mesh(new THREE.BoxGeometry(dz, h, D * 0.92), stepMat);
+                    mesh.position.set(-W / 2 + dz / 2 + i * dz * 0.98, baseY + h / 2 + i * h * 0.92, 0);
+                } else {
+                    mesh = new THREE.Mesh(new THREE.BoxGeometry(dz, h, D * 0.92), stepMat);
+                    mesh.position.set(W / 2 - dz / 2 - i * dz * 0.98, baseY + h / 2 + i * h * 0.92, 0);
+                }
+                mesh.userData.isPhase4Context = true;
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                group.add(mesh);
+            }
+        };
+
+        const addParty = (edge) => {
+            if (p4.disable_party_walls) return;
+            const h = typeof p4.party_wall_height === "number" ? p4.party_wall_height : 0.4;
+            const t = 0.02;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            let mesh;
+            if (edge === "n") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.93, h, t), wallMat);
+                mesh.position.set(0, baseY + h / 2, -D / 2 + t / 2);
+            } else if (edge === "s") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.93, h, t), wallMat);
+                mesh.position.set(0, baseY + h / 2, D / 2 - t / 2);
+            } else if (edge === "w") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(t, h, D * 0.93), wallMat);
+                mesh.position.set(-W / 2 + t / 2, baseY + h / 2, 0);
+            } else {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(t, h, D * 0.93), wallMat);
+                mesh.position.set(W / 2 - t / 2, baseY + h / 2, 0);
+            }
+            mesh.userData.isPhase4Context = true;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            group.add(mesh);
+        };
+
+        const addFascia = (edge) => {
+            if (p4.disable_street_fascia) return;
+            const fy = typeof p4.street_fascia_height === "number" ? p4.street_fascia_height : 0.11;
+            const fh = 0.035;
+            const fd = 0.055;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            let mesh;
+            if (edge === "n") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.88, fh, fd), fasciaMat);
+                mesh.position.set(0, baseY + fy, -D / 2 + fd / 2 + 0.01);
+            } else if (edge === "s") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.88, fh, fd), fasciaMat);
+                mesh.position.set(0, baseY + fy, D / 2 - fd / 2 - 0.01);
+            } else if (edge === "w") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(fd, fh, D * 0.88), fasciaMat);
+                mesh.position.set(-W / 2 + fd / 2 + 0.01, baseY + fy, 0);
+            } else {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(fd, fh, D * 0.88), fasciaMat);
+                mesh.position.set(W / 2 - fd / 2 - 0.01, baseY + fy, 0);
+            }
+            mesh.userData.isPhase4Context = true;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            group.add(mesh);
+        };
+
+        const addWaterPosts = (edge) => {
+            if (p4.disable_water_mooring) return;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            const nPost = 3;
+            const r = 0.022;
+            const postH = 0.14;
+            for (let i = 0; i < nPost; i++) {
+                const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.1, postH, 6), waterMat);
+                let px = 0, pz = 0;
+                const f = (i + 0.5) / nPost - 0.5;
+                if (edge === "n") {
+                    px = f * W * 0.75;
+                    pz = -D / 2 + 0.04;
+                } else if (edge === "s") {
+                    px = f * W * 0.75;
+                    pz = D / 2 - 0.04;
+                } else if (edge === "w") {
+                    px = -W / 2 + 0.04;
+                    pz = f * D * 0.75;
+                } else {
+                    px = W / 2 - 0.04;
+                    pz = f * D * 0.75;
+                }
+                mesh.position.set(px, baseY + postH / 2, pz);
+                mesh.userData.isPhase4Context = true;
+                mesh.castShadow = true;
+                group.add(mesh);
+            }
+        };
+
+        const addGardenHedge = (edge) => {
+            if (p4.disable_garden_hedge) return;
+            const hh = 0.07;
+            const th = 0.04;
+            const W = Math.max(0.35, tileW);
+            const D = Math.max(0.35, tileD);
+            let mesh;
+            if (edge === "n") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.85, hh, th), hedgeMat);
+                mesh.position.set(0, baseY + hh / 2, -D / 2 + th / 2 + 0.02);
+            } else if (edge === "s") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(W * 0.85, hh, th), hedgeMat);
+                mesh.position.set(0, baseY + hh / 2, D / 2 - th / 2 - 0.02);
+            } else if (edge === "w") {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(th, hh, D * 0.85), hedgeMat);
+                mesh.position.set(-W / 2 + th / 2 + 0.02, baseY + hh / 2, 0);
+            } else {
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(th, hh, D * 0.85), hedgeMat);
+                mesh.position.set(W / 2 - th / 2 - 0.02, baseY + hh / 2, 0);
+            }
+            mesh.userData.isPhase4Context = true;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            group.add(mesh);
+        };
+
+        const edgeKeys = ["n", "s", "e", "w"];
+        for (const e of edgeKeys) {
+            const seg = ctx[e];
+            if (seg.road) {
+                if (!p4.disable_auto_steps && budget >= COST_STEPS) {
+                    addSteps(e);
+                    budget -= COST_STEPS;
+                }
+                if (!p4.disable_street_fascia && budget >= COST_FASCIA) {
+                    addFascia(e);
+                    budget -= COST_FASCIA;
+                }
+                if (!p4.disable_road_awning && budget >= COST_AWNING) {
+                    addRoadAwning(e);
+                    budget -= COST_AWNING;
+                }
+                if (!p4.disable_street_signs && budget >= COST_SIGN) {
+                    addStreetSign(e);
+                    budget -= COST_SIGN;
+                }
+            }
+            if (seg.otherBuilding && !p4.disable_party_walls && budget >= COST_PARTY) {
+                addParty(e);
+                budget -= COST_PARTY;
+            }
+            if (seg.water && !p4.disable_water_mooring && budget >= COST_WATER) {
+                addWaterPosts(e);
+                budget -= COST_WATER;
+            }
+            if ((seg.green || seg.forum) && !p4.disable_garden_hedge && budget >= COST_HEDGE) {
+                addGardenHedge(e);
+                budget -= COST_HEDGE;
+            }
         }
 
-        // Calculate footprint (single tile or multi-tile)
+        const ruinI = this._phase4RuinIntensity(tile, spec, p4);
+        if (!p4.disable_ruin_vegetation && ruinI > 0 && budget > 4) {
+            const nIvy = Math.min(budget, Math.floor(8 + ruinI * 26));
+            const seed = tile.x * 131 + tile.y * 97;
+            for (let i = 0; i < nIvy; i++) {
+                const rx = ((seed * (i + 3)) % 1000) / 1000 - 0.5;
+                const rz = ((seed * (i + 7)) % 1000) / 1000 - 0.5;
+                const px = rx * tileW * 0.42;
+                const pz = rz * tileD * 0.42;
+                const rs = 0.025 + ((seed + i * 11) % 20) / 700;
+                const py = baseY + 0.22 + ((seed * i) % 15) / 100;
+                const mesh = new THREE.Mesh(new THREE.SphereGeometry(rs, 5, 4), ivyMat);
+                mesh.position.set(px, py, pz);
+                mesh.userData.isPhase4Context = true;
+                mesh.castShadow = true;
+                group.add(mesh);
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════
+    // COMPONENT-BASED RENDERER
+    // Terrain tiles use procedural meshes; buildings require spec.components OR spec.template (parametric_templates.js).
+    // No placeholder geometry — violations return { ok: false } and emit world-render-error.
+    // ═══════════════════════════════════════════════
+
+    /**
+     * @returns {{ ok: true } | { ok: false, error: string, key: string }}
+     */
+    _buildFromSpec(tile, animate) {
+        const spec = tile.spec;
+        const key = spec && spec.anchor ? `${spec.anchor.x},${spec.anchor.y}` : `${tile.x},${tile.y}`;
+        const oldGroup = this.buildingGroups.get(key) || null;
+
+        const terrain = tile.terrain;
+        const isTerrainMesh = TERRAIN_WITH_PROCEDURAL_MESH.has(terrain);
+
         const S = TILE_SIZE;
         let tileW = 0.9, tileD = 0.9;
         let centerX = (tile.x + 0.5) * S, centerZ = (tile.y + 0.5) * S;
-        if (spec.anchor && this.grid) {
+        if (spec && spec.anchor && this.grid) {
             const fp = this._getAnchorFootprint(spec.anchor);
             tileW = (fp.maxX - fp.minX + 1) - 0.1;
             tileD = (fp.maxY - fp.minY + 1) - 0.1;
@@ -322,27 +788,97 @@ class WorldRenderer {
             centerZ = (fp.minY + fp.maxY + 1) / 2 * S;
         }
 
-        const group = new THREE.Group();
-        group.position.set(centerX, 0, centerZ);
-        group.scale.set(S, S, S);
-        group.userData = { tile };
-
-        const components = spec.components || [];
-        const terrain = tile.terrain;
-
-        if (components.length > 0) {
-            this._buildComponents(group, components, tileW, tileD);
-        } else if (["road", "forum", "garden", "water", "grass"].includes(terrain)) {
-            this._buildTerrain(group, tile, spec);
-        } else {
-            this._placeholderBlock(group, tile, tileW, tileD);
+        let resolvedComponents = null;
+        if (!isTerrainMesh && spec) {
+            const tmpl = spec.template;
+            if (tmpl && typeof tmpl === "object" && tmpl.id) {
+                if (typeof globalThis.expandParametricTemplate !== "function") {
+                    const err =
+                        "expandParametricTemplate missing — ensure parametric_templates.js loads before renderer3d.js";
+                    this._emitRenderError(err, tile, key);
+                    return { ok: false, error: err, key };
+                }
+                try {
+                    resolvedComponents = globalThis.expandParametricTemplate(
+                        String(tmpl.id),
+                        tmpl.params && typeof tmpl.params === "object" ? tmpl.params : {},
+                        tileW,
+                        tileD
+                    );
+                } catch (e) {
+                    const msg = e && e.message ? e.message : String(e);
+                    const err = `Parametric template failed for tile (${tile.x},${tile.y}): ${msg}`;
+                    this._emitRenderError(err, tile, key);
+                    return { ok: false, error: err, key };
+                }
+            } else if (Array.isArray(spec.components) && spec.components.length > 0) {
+                resolvedComponents = spec.components;
+            }
         }
 
-        group.traverse(c => {
+        if (!isTerrainMesh) {
+            if (!spec || !resolvedComponents || resolvedComponents.length === 0) {
+                const err = `Building tile (${tile.x},${tile.y}) requires spec.components or spec.template with a known id; terrain=${JSON.stringify(terrain)}`;
+                this._emitRenderError(err, tile, key);
+                return { ok: false, error: err, key };
+            }
+        }
+
+        let elev = tile.elevation || 0;
+        if (spec && spec.anchor && this.grid) {
+            const anchorTile = this.grid[spec.anchor.y] && this.grid[spec.anchor.y][spec.anchor.x];
+            if (anchorTile) elev = anchorTile.elevation || 0;
+        }
+        const elevation = elev * S;
+
+        const group = new THREE.Group();
+        group.position.set(centerX, elevation, centerZ);
+        group.scale.set(S, S, S);
+        group.userData = { tile, baseY: elevation };
+        if (spec && spec.tradition != null) {
+            group.userData.tradition = spec.tradition;
+        }
+
+        try {
+            if (isTerrainMesh) {
+                this._buildTerrain(group, tile, spec || {});
+            } else {
+                const proportionRules = spec && spec.proportion_rules && typeof spec.proportion_rules === "object"
+                    ? spec.proportion_rules
+                    : null;
+                this._buildComponents(group, resolvedComponents, tileW, tileD, proportionRules);
+            }
+        } catch (e) {
+            this._disposeGroupResources(group);
+            const err = e && e.message ? e.message : String(e);
+            const msg = `Build failed for tile (${tile.x},${tile.y}): ${err}`;
+            this._emitRenderError(msg, tile, key);
+            return { ok: false, error: msg, key };
+        }
+
+        if (!isTerrainMesh && this.grid && spec) {
+            const neighborContext = this._computeNeighborContext(tile, spec);
+            this._applyPhase4ContextualPolish(group, tile, tileW, tileD, spec, neighborContext);
+        }
+
+        if (oldGroup) {
+            this.scene.remove(oldGroup);
+            this._disposeGroupResources(oldGroup);
+            this._waterMeshes = this._waterMeshes.filter((m) => {
+                let parent = m.parent;
+                while (parent) {
+                    if (parent === oldGroup) return false;
+                    parent = parent.parent;
+                }
+                return true;
+            });
+            this._animatingGroups.delete(oldGroup);
+        }
+
+        group.traverse((c) => {
             if (c.isMesh) {
                 c.receiveShadow = true;
                 c.userData.tile = tile;
-                // Only large meshes cast shadows
                 if (c.geometry && c.geometry.boundingSphere) {
                     c.geometry.computeBoundingSphere();
                     c.castShadow = c.geometry.boundingSphere.radius > 0.05;
@@ -352,28 +888,37 @@ class WorldRenderer {
             }
         });
 
-        // Track water meshes for efficient animation
-        group.traverse(c => {
+        group.traverse((c) => {
             if (c.userData && c.userData.isWater) this._waterMeshes.push(c);
         });
 
         if (animate) {
-            group.userData.animStartY = -2 * S;
-            group.userData.animTargetY = 0;
+            group.userData.animStartY = elevation - 2 * S;
+            group.userData.animTargetY = elevation;
             group.userData.animStart = Date.now();
-            group.position.y = -2 * S;
+            group.position.y = elevation - 2 * S;
             this._animatingGroups.add(group);
         }
+
+        const worldHalfFootprint = Math.max(tileW, tileD) * S * 0.5;
+        const hasStructuralComponents = resolvedComponents && resolvedComponents.length > 0;
+        const p4 = spec && typeof spec.phase4 === "object" && spec.phase4 ? spec.phase4 : {};
+        const phase4CullExtra =
+            !isTerrainMesh && spec && p4.disable_all !== true ? S * PHASE4_CULL_HEIGHT_EXTRA : 0;
+        const worldHalfHeight = (hasStructuralComponents ? S * 2.8 : S * 0.04) + phase4CullExtra;
+        group.userData.cullCenterOffsetY = worldHalfHeight;
+        group.userData.cullRadius = Math.hypot(worldHalfFootprint, worldHalfHeight);
 
         this.scene.add(group);
         this.buildingGroups.set(key, group);
         this._meshListDirty = true;
+        return { ok: true };
     }
 
     // ─── Terrain ───
 
     _buildTerrain(g, tile, spec) {
-        const terrain = tile.terrain || tile.building_type;
+        const terrain = tile.terrain;
         if (terrain === "road") {
             const road = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.05, 0.98), this._mat(spec.color || "#606060", 0.9));
             road.position.y = 0.025;
@@ -413,6 +958,8 @@ class WorldRenderer {
                 canopy.position.set(px, 0.04 + treeH + canopySize * 0.5, pz);
                 g.add(canopy);
             }
+        } else {
+            throw new Error(`Terrain "${terrain}" has no procedural mesh (internal inconsistency with TERRAIN_WITH_PROCEDURAL_MESH)`);
         }
     }
 
@@ -430,81 +977,434 @@ class WorldRenderer {
     // The AI just lists components; the renderer places them correctly.
     // ═══════════════════════════════════════════════
 
-    _buildComponents(group, components, w, d) {
-        // Architectural role of each component type
-        const FOUNDATION  = new Set(["podium"]);
-        const STRUCTURAL  = new Set(["colonnade", "block", "walls", "arcade"]);
-        const INFILL      = new Set(["cella", "atrium", "tier"]);
-        const ROOF        = new Set(["pediment", "dome", "tiled_roof", "flat_roof", "vault"]);
-        const DECORATIVE  = new Set(["door", "pilasters", "awning", "battlements"]);
-        // Everything else (statue, fountain) = FREESTANDING, stacks normally
+    /** @param {unknown} v @returns {number|null} */
+    _finiteRuleNumber(v) {
+        if (v == null || v === "") return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    }
 
-        const builders = {
-            podium: "_buildPodium", colonnade: "_buildColonnade",
-            pediment: "_buildPediment", dome: "_buildDome",
-            block: "_buildBlock", arcade: "_buildArcade",
-            tiled_roof: "_buildTiledRoof", atrium: "_buildAtrium",
-            statue: "_buildStatue", fountain: "_buildFountain",
-            awning: "_buildAwning", battlements: "_buildBattlements",
-            tier: "_buildTier", door: "_buildDoor",
-            pilasters: "_buildPilasters", vault: "_buildVault",
-            flat_roof: "_buildFlatRoof", cella: "_buildCella",
-            walls: "_buildWalls",
+    /**
+     * Apply optional spec.proportion_rules only. No civilization-specific defaults —
+     * every clamp comes from generative JSON; omitted keys mean no clamp on that axis.
+     */
+    _applyGenerativeProportionRules(components, w, d, rules) {
+        const out = components.map((c) =>
+            c && typeof c === "object" && c.type ? { ...c } : c
+        );
+        if (!rules || typeof rules !== "object") return out;
+
+        const minSpan = Math.max(0.22, Math.min(w, d));
+
+        const colR = rules.colonnade;
+        if (colR && typeof colR === "object") {
+            for (const col of out.filter((c) => c && c.type === "colonnade")) {
+                let n = this._finiteRuleNumber(col.columns);
+                if (n != null) {
+                    const lo = this._finiteRuleNumber(colR.columns_min);
+                    const hi = this._finiteRuleNumber(colR.columns_max);
+                    if (lo != null) n = Math.max(lo, n);
+                    if (hi != null) n = Math.min(hi, n);
+                    col.columns = Math.round(n);
+                } else if (this._finiteRuleNumber(colR.columns_min) != null || this._finiteRuleNumber(colR.columns_max) != null) {
+                    const lo = this._finiteRuleNumber(colR.columns_min) ?? 2;
+                    const hi = this._finiteRuleNumber(colR.columns_max) ?? 48;
+                    const base = Number(col.columns);
+                    let v = Number.isFinite(base) ? base : lo;
+                    v = Math.max(lo, Math.min(hi, v));
+                    col.columns = Math.round(v);
+                }
+                if (col.radius != null) {
+                    let r = Number(col.radius);
+                    const rMin = this._finiteRuleNumber(colR.min_radius);
+                    const rMax = this._finiteRuleNumber(colR.max_radius);
+                    if (rMin != null) r = Math.max(rMin, r);
+                    if (rMax != null) r = Math.min(rMax, r);
+                    col.radius = r;
+                }
+                if (col.height != null && col.radius != null) {
+                    let h = Number(col.height);
+                    const r = Number(col.radius);
+                    const ratio = this._finiteRuleNumber(colR.height_to_lower_diameter_ratio);
+                    if (ratio != null) {
+                        const slack = this._finiteRuleNumber(colR.ratio_slack) ?? 1;
+                        h = Math.min(h, r * ratio * slack);
+                    }
+                    const capFrac = this._finiteRuleNumber(colR.max_shaft_height_fraction_of_min_span);
+                    if (capFrac != null) h = Math.min(h, minSpan * capFrac);
+                    const hMin = this._finiteRuleNumber(colR.min_shaft_height);
+                    const hMax = this._finiteRuleNumber(colR.max_shaft_height);
+                    if (hMin != null) h = Math.max(hMin, h);
+                    if (hMax != null) h = Math.min(hMax, h);
+                    col.height = h;
+                } else if (col.height != null) {
+                    let h = Number(col.height);
+                    const hMin = this._finiteRuleNumber(colR.min_shaft_height);
+                    const hMax = this._finiteRuleNumber(colR.max_shaft_height);
+                    const capFrac = this._finiteRuleNumber(colR.max_shaft_height_fraction_of_min_span);
+                    if (hMin != null) h = Math.max(hMin, h);
+                    if (hMax != null) h = Math.min(hMax, h);
+                    if (capFrac != null) h = Math.min(h, minSpan * capFrac);
+                    col.height = h;
+                }
+            }
+        }
+
+        const cellaR = rules.cella;
+        if (cellaR && typeof cellaR === "object") {
+            const inset = this._finiteRuleNumber(cellaR.inset_per_side) ?? 0;
+            const maxW0 = Math.max(0.05, w - inset * 2);
+            const maxD0 = Math.max(0.05, d - inset * 2);
+            const wf = this._finiteRuleNumber(cellaR.max_width_fraction);
+            const df = this._finiteRuleNumber(cellaR.max_depth_fraction);
+            const maxH = this._finiteRuleNumber(cellaR.max_height);
+            for (const cella of out.filter((c) => c && c.type === "cella")) {
+                if (cella.width != null) {
+                    let cw = Number(cella.width);
+                    if (wf != null) cw = Math.min(cw, maxW0 * wf);
+                    cella.width = cw;
+                }
+                if (cella.depth != null) {
+                    let cd = Number(cella.depth);
+                    if (df != null) cd = Math.min(cd, maxD0 * df);
+                    cella.depth = cd;
+                }
+                if (cella.height != null && maxH != null) {
+                    cella.height = Math.min(Number(cella.height), maxH);
+                }
+            }
+        }
+
+        const podR = rules.podium;
+        if (podR && typeof podR === "object") {
+            for (const p of out.filter((c) => c && c.type === "podium")) {
+                if (p.steps != null) {
+                    let s = Math.round(Number(p.steps));
+                    const smin = this._finiteRuleNumber(podR.steps_min);
+                    const smax = this._finiteRuleNumber(podR.steps_max);
+                    if (smin != null) s = Math.max(smin, s);
+                    if (smax != null) s = Math.min(smax, s);
+                    p.steps = s;
+                }
+                if (p.height != null) {
+                    let h = Number(p.height);
+                    const hMin = this._finiteRuleNumber(podR.min_height);
+                    const hMax = this._finiteRuleNumber(podR.max_height);
+                    if (hMin != null) h = Math.max(hMin, h);
+                    if (hMax != null) h = Math.min(hMax, h);
+                    p.height = h;
+                }
+            }
+        }
+
+        const domeR = rules.dome;
+        if (domeR && typeof domeR === "object") {
+            for (const dm of out.filter((c) => c && c.type === "dome")) {
+                if (dm.radius != null) {
+                    let rad = Number(dm.radius);
+                    const rMin = this._finiteRuleNumber(domeR.min_radius);
+                    const rMax = this._finiteRuleNumber(domeR.max_radius);
+                    const rFrac = this._finiteRuleNumber(domeR.max_radius_fraction_of_min_span);
+                    if (rMin != null) rad = Math.max(rMin, rad);
+                    if (rMax != null) rad = Math.min(rMax, rad);
+                    if (rFrac != null) rad = Math.min(rad, minSpan * rFrac);
+                    dm.radius = rad;
+                }
+            }
+        }
+
+        const pedR = rules.pediment;
+        if (pedR && typeof pedR === "object") {
+            for (const ped of out.filter((c) => c && c.type === "pediment")) {
+                if (ped.height != null) {
+                    let h = Number(ped.height);
+                    const hMax = this._finiteRuleNumber(pedR.max_height);
+                    const hf = this._finiteRuleNumber(pedR.max_height_fraction_of_w);
+                    if (hMax != null) h = Math.min(h, hMax);
+                    if (hf != null) h = Math.min(h, w * hf);
+                    ped.height = h;
+                }
+            }
+        }
+
+        const blockR = rules.block;
+        if (blockR && typeof blockR === "object") {
+            for (const b of out.filter((c) => c && c.type === "block")) {
+                if (b.stories != null) {
+                    let st = Math.round(Number(b.stories));
+                    const smin = this._finiteRuleNumber(blockR.stories_min);
+                    const smax = this._finiteRuleNumber(blockR.stories_max);
+                    if (smin != null) st = Math.max(smin, st);
+                    if (smax != null) st = Math.min(smax, st);
+                    b.stories = st;
+                }
+                if (b.storyHeight != null) {
+                    let sh = Number(b.storyHeight);
+                    const shMin = this._finiteRuleNumber(blockR.min_story_height);
+                    const shMax = this._finiteRuleNumber(blockR.max_story_height);
+                    if (shMin != null) sh = Math.max(shMin, sh);
+                    if (shMax != null) sh = Math.min(shMax, sh);
+                    b.storyHeight = sh;
+                }
+                const aggMax = this._finiteRuleNumber(blockR.max_aggregate_height);
+                if (aggMax != null && b.stories != null && b.storyHeight != null) {
+                    const st = Number(b.stories);
+                    let sh = Number(b.storyHeight);
+                    if (st * sh > aggMax) b.storyHeight = aggMax / Math.max(1, st);
+                }
+            }
+        }
+
+        const wallR = rules.walls;
+        if (wallR && typeof wallR === "object") {
+            for (const wl of out.filter((c) => c && c.type === "walls")) {
+                if (wl.height != null) {
+                    let h = Number(wl.height);
+                    const hMin = this._finiteRuleNumber(wallR.min_height);
+                    const hMax = this._finiteRuleNumber(wallR.max_height);
+                    if (hMin != null) h = Math.max(hMin, h);
+                    if (hMax != null) h = Math.min(hMax, h);
+                    wl.height = h;
+                }
+                if (wl.thickness != null) {
+                    let t = Number(wl.thickness);
+                    const tMin = this._finiteRuleNumber(wallR.min_thickness);
+                    const tMax = this._finiteRuleNumber(wallR.max_thickness);
+                    if (tMin != null) t = Math.max(tMin, t);
+                    if (tMax != null) t = Math.min(tMax, t);
+                    wl.thickness = t;
+                }
+            }
+        }
+
+        const applyMinMaxHeight = (type, key) => {
+            const r = rules[key];
+            if (!r || typeof r !== "object") return;
+            const hMin = this._finiteRuleNumber(r.min_height);
+            const hMax = this._finiteRuleNumber(r.max_height);
+            for (const o of out.filter((c) => c && c.type === type)) {
+                if (o.height == null) continue;
+                let h = Number(o.height);
+                if (hMin != null) h = Math.max(hMin, h);
+                if (hMax != null) h = Math.min(hMax, h);
+                o.height = h;
+            }
         };
+        applyMinMaxHeight("arcade", "arcade");
+        applyMinMaxHeight("tiled_roof", "tiled_roof");
+        applyMinMaxHeight("vault", "vault");
+        applyMinMaxHeight("atrium", "atrium");
+        applyMinMaxHeight("tier", "tier");
+        applyMinMaxHeight("statue", "statue");
 
-        // Two-pass: first collect all components, then render in correct order
-        let baseLevel = 0;       // top of foundation (podium)
-        let structuralTop = 0;   // top of tallest structural element
+        const fountR = rules.fountain;
+        if (fountR && typeof fountR === "object") {
+            for (const f of out.filter((c) => c && c.type === "fountain")) {
+                if (f.height != null) {
+                    let h = Number(f.height);
+                    const hMin = this._finiteRuleNumber(fountR.min_height);
+                    const hMax = this._finiteRuleNumber(fountR.max_height);
+                    if (hMin != null) h = Math.max(hMin, h);
+                    if (hMax != null) h = Math.min(hMax, h);
+                    f.height = h;
+                }
+                if (f.radius != null) {
+                    let rad = Number(f.radius);
+                    const rMin = this._finiteRuleNumber(fountR.min_radius);
+                    const rMax = this._finiteRuleNumber(fountR.max_radius);
+                    if (rMin != null) rad = Math.max(rMin, rad);
+                    if (rMax != null) rad = Math.min(rMax, rad);
+                    f.radius = rad;
+                }
+            }
+        }
 
-        // Pass 1: foundations set the base level
-        for (const comp of components) {
-            if (!FOUNDATION.has(comp.type) || !builders[comp.type]) continue;
-            const topY = this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        return out;
+    }
+
+    _resolveStackRole(comp) {
+        const VALID = WorldRenderer._VALID_STACK_ROLES;
+        if (comp.stack_role) {
+            if (!VALID.has(comp.stack_role)) {
+                throw new Error(`Invalid stack_role ${JSON.stringify(comp.stack_role)}`);
+            }
+            return comp.stack_role;
+        }
+        if (comp.type === "procedural") {
+            throw new Error("type procedural requires stack_role (foundation|structural|infill|roof|decorative|freestanding)");
+        }
+        const d = WorldRenderer._DEFAULT_STACK_ROLE[comp.type];
+        if (!d) {
+            throw new Error(`Unknown component type for renderer: ${JSON.stringify(comp.type)}`);
+        }
+        return d;
+    }
+
+    _invokeBuilder(group, comp, anchorY, w, d) {
+        if (comp.type === "procedural") {
+            return this._buildProcedural(group, comp, anchorY, w, d);
+        }
+        const method = WorldRenderer._BUILDER_METHODS[comp.type];
+        if (!method) {
+            throw new Error(`No builder for component type ${JSON.stringify(comp.type)}`);
+        }
+        if (comp.type === "statue" || comp.type === "fountain" || comp.type === "door") {
+            return this[method](group, comp, anchorY);
+        }
+        return this[method](group, comp, anchorY, w, d);
+    }
+
+    /**
+     * Generative geometry: primitive parts only. Positions are centers in tile-local space;
+     * Y is added to anchorY. Each part requires color #RRGGBB (validated server-side).
+     */
+    _buildProcedural(group, comp, anchorY, w, d) {
+        const parts = comp.parts;
+        let maxTop = anchorY;
+        const capSeg = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(n) || lo));
+
+        for (let i = 0; i < parts.length; i++) {
+            const p = parts[i];
+            const rough = p.roughness != null ? Number(p.roughness) : 0.7;
+            const px = Number((p.position && p.position[0]) ?? 0);
+            const py = Number((p.position && p.position[1]) ?? 0);
+            const pz = Number((p.position && p.position[2]) ?? 0);
+            if (![px, py, pz].every((n) => Number.isFinite(n))) {
+                throw new Error(`procedural.parts[${i}]: position must be finite [x,y,z]`);
+            }
+            const mat = this._mat(p.color, Number.isFinite(rough) ? rough : 0.7);
+            let mesh;
+
+            if (p.shape === "box") {
+                let sx, sy, sz;
+                if (Array.isArray(p.size) && p.size.length === 3) {
+                    sx = Number(p.size[0]); sy = Number(p.size[1]); sz = Number(p.size[2]);
+                } else {
+                    sx = Number(p.width); sy = Number(p.height); sz = Number(p.depth);
+                }
+                if (![sx, sy, sz].every((n) => Number.isFinite(n) && n > 0)) {
+                    throw new Error(`procedural.parts[${i}]: box needs positive size or width/height/depth`);
+                }
+                mesh = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + sy / 2);
+            } else if (p.shape === "cylinder") {
+                const rBot = Number(p.radiusBottom ?? p.radius);
+                const rTop = Number(p.radiusTop ?? p.radius);
+                const h = Number(p.height);
+                const seg = capSeg(p.radialSegments ?? 16, 6, 32);
+                if (![rBot, rTop, h].every((n) => Number.isFinite(n) && n > 0)) {
+                    throw new Error(`procedural.parts[${i}]: cylinder needs positive radius/height`);
+                }
+                mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBot, h, seg), mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + h / 2);
+            } else if (p.shape === "sphere") {
+                const r = Number(p.radius);
+                if (!Number.isFinite(r) || r <= 0) throw new Error(`procedural.parts[${i}]: sphere needs radius`);
+                const ws = capSeg(p.widthSegments ?? 12, 6, 32);
+                const hs = capSeg(p.heightSegments ?? 8, 4, 24);
+                mesh = new THREE.Mesh(new THREE.SphereGeometry(r, ws, hs), mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + r);
+            } else if (p.shape === "cone") {
+                const r = Number(p.radius);
+                const h = Number(p.height);
+                const seg = capSeg(p.radialSegments ?? 12, 6, 32);
+                if (![r, h].every((n) => Number.isFinite(n) && n > 0)) {
+                    throw new Error(`procedural.parts[${i}]: cone needs positive radius and height`);
+                }
+                mesh = new THREE.Mesh(new THREE.ConeGeometry(r, h, seg), mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + h / 2);
+            } else if (p.shape === "torus") {
+                const R = Number(p.radius);
+                const tube = Number(p.tube);
+                if (![R, tube].every((n) => Number.isFinite(n) && n > 0)) {
+                    throw new Error(`procedural.parts[${i}]: torus needs radius and tube`);
+                }
+                const rs = capSeg(p.radialSegments ?? 12, 6, 32);
+                const ts = capSeg(p.tubularSegments ?? 24, 8, 48);
+                mesh = new THREE.Mesh(new THREE.TorusGeometry(R, tube, rs, ts), mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + tube + R);
+            } else if (p.shape === "plane") {
+                const pw = Number(p.width);
+                const ph = Number(p.height);
+                if (![pw, ph].every((n) => Number.isFinite(n) && n > 0)) {
+                    throw new Error(`procedural.parts[${i}]: plane needs width and height (XZ extent)`);
+                }
+                mesh = new THREE.Mesh(new THREE.PlaneGeometry(pw, ph), mat);
+                mesh.rotation.x = -Math.PI / 2;
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + 0.002);
+            } else {
+                throw new Error(`procedural.parts[${i}]: unknown shape ${JSON.stringify(p.shape)}`);
+            }
+
+            if (Array.isArray(p.rotation) && p.rotation.length >= 3) {
+                mesh.rotation.x += Number(p.rotation[0]) || 0;
+                mesh.rotation.y += Number(p.rotation[1]) || 0;
+                mesh.rotation.z += Number(p.rotation[2]) || 0;
+            }
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (comp.component_id) mesh.userData.componentId = comp.component_id;
+            group.add(mesh);
+        }
+        return maxTop;
+    }
+
+    _buildComponents(group, components, w, d, proportionRules) {
+        const comps = this._applyGenerativeProportionRules(components, w, d, proportionRules);
+        const buckets = {
+            foundation: [], structural: [], infill: [], roof: [], decorative: [], freestanding: [],
+        };
+        for (const comp of comps) {
+            if (!comp || typeof comp !== "object" || !comp.type) {
+                throw new Error("Invalid component entry in spec.components");
+            }
+            const role = this._resolveStackRole(comp);
+            buckets[role].push(comp);
+        }
+        const stackPri = (c) => (c.stack_priority != null && Number.isFinite(Number(c.stack_priority))
+            ? Number(c.stack_priority)
+            : 0);
+        for (const k of Object.keys(buckets)) {
+            buckets[k].sort((a, b) => stackPri(a) - stackPri(b));
+        }
+
+        let baseLevel = 0;
+        let structuralTop = 0;
+
+        for (const comp of buckets.foundation) {
+            const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
             baseLevel = Math.max(baseLevel, topY);
         }
         structuralTop = baseLevel;
 
-        // Pass 2: structural elements sit on the foundation
-        for (const comp of components) {
-            if (!STRUCTURAL.has(comp.type) || !builders[comp.type]) continue;
-            const topY = this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        for (const comp of buckets.structural) {
+            const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
             structuralTop = Math.max(structuralTop, topY);
         }
 
-        // Pass 3: infill sits INSIDE structural, at the foundation level
-        for (const comp of components) {
-            if (!INFILL.has(comp.type) || !builders[comp.type]) continue;
-            this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        for (const comp of buckets.infill) {
+            this._invokeBuilder(group, comp, baseLevel, w, d);
         }
 
-        // Pass 4: roofs go on top of the tallest structural element
-        for (const comp of components) {
-            if (!ROOF.has(comp.type) || !builders[comp.type]) continue;
-            const topY = this._callBuilder(builders[comp.type], group, comp, structuralTop, w, d);
+        for (const comp of buckets.roof) {
+            const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
             structuralTop = Math.max(structuralTop, topY);
         }
 
-        // Pass 5: decorative at base level
-        for (const comp of components) {
-            if (!DECORATIVE.has(comp.type) || !builders[comp.type]) continue;
-            this._callBuilder(builders[comp.type], group, comp, baseLevel, w, d);
+        for (const comp of buckets.decorative) {
+            this._invokeBuilder(group, comp, baseLevel, w, d);
         }
 
-        // Pass 6: freestanding elements stack on top of everything
-        for (const comp of components) {
-            if (FOUNDATION.has(comp.type) || STRUCTURAL.has(comp.type) ||
-                INFILL.has(comp.type) || ROOF.has(comp.type) ||
-                DECORATIVE.has(comp.type) || !builders[comp.type]) continue;
-            const topY = this._callBuilder(builders[comp.type], group, comp, structuralTop, w, d);
+        for (const comp of buckets.freestanding) {
+            const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
             structuralTop = Math.max(structuralTop, topY);
         }
-    }
-
-    _callBuilder(method, group, comp, baseY, w, d) {
-        if (comp.type === "statue" || comp.type === "fountain" || comp.type === "door") {
-            return this[method](group, comp, baseY);
-        }
-        return this[method](group, comp, baseY, w, d);
     }
 
     // Stepped platform
@@ -530,7 +1430,14 @@ class WorldRenderer {
     _buildColonnade(group, comp, baseY, w, d) {
         const numCols = comp.columns || 6;
         const colH = comp.height || 0.7;
-        const style = comp.style || "ionic";
+        const stRaw = comp.style;
+        if (!stRaw || typeof stRaw !== "string") {
+            throw new Error("colonnade requires style: doric | ionic | corinthian");
+        }
+        const style = stRaw.toLowerCase();
+        if (!["doric", "ionic", "corinthian"].includes(style)) {
+            throw new Error(`colonnade style not supported: ${JSON.stringify(stRaw)}`);
+        }
         const color = comp.color || "#e8e0d0";
         const r = comp.radius || Math.max(0.015, w / (numCols * 5));  // scale radius to footprint
         const peripteral = comp.peripteral !== false;
@@ -559,39 +1466,78 @@ class WorldRenderer {
             }
         }
 
-        for (const pos of positions) {
-            // Shaft — slight taper (entasis): top = 5/6 of bottom per Vitruvius
-            const shaft = new THREE.Mesh(
-                new THREE.CylinderGeometry(r * 0.83, r, colH, Math.max(8, Math.round(r * 200))),
-                this._mat(color, 0.3)
-            );
-            shaft.position.set(pos.x, baseY + baseH + colH / 2, pos.z);
-            group.add(shaft);
+        const n = positions.length;
+        // Cap segments: very thin columns need few; thick columns cap at 28 for GPU cost
+        const shaftSegs = Math.min(28, Math.max(8, Math.round(r * 200)));
+        const shaftGeom = new THREE.CylinderGeometry(r * 0.83, r, colH, shaftSegs);
+        const shaftMat = this._mat(color, 0.3);
+        const shaftInst = new THREE.InstancedMesh(shaftGeom, shaftMat, n);
+        shaftInst.castShadow = true;
+        shaftInst.receiveShadow = true;
+        const dummy = this._instDummy;
 
-            // Base (not for doric)
-            if (baseH > 0) {
-                const base = new THREE.Mesh(
-                    new THREE.CylinderGeometry(r + 0.01, r + 0.015, baseH, 8),
-                    this._mat(color, 0.35)
-                );
-                base.position.set(pos.x, baseY + baseH / 2, pos.z);
-                group.add(base);
+        if (baseH > 0) {
+            const baseGeom = new THREE.CylinderGeometry(r + 0.01, r + 0.015, baseH, 8);
+            const baseMat = this._mat(color, 0.35);
+            const baseInst = new THREE.InstancedMesh(baseGeom, baseMat, n);
+            baseInst.castShadow = true;
+            baseInst.receiveShadow = true;
+            for (let i = 0; i < n; i++) {
+                const pos = positions[i];
+                dummy.position.set(pos.x, baseY + baseH / 2, pos.z);
+                dummy.rotation.set(0, 0, 0);
+                dummy.scale.set(1, 1, 1);
+                dummy.updateMatrix();
+                baseInst.setMatrixAt(i, dummy.matrix);
             }
+            baseInst.instanceMatrix.needsUpdate = true;
+            group.add(baseInst);
+        }
 
-            // Capital
-            if (style === "corinthian") {
-                // Ornate: stacked boxes
-                const c1 = new THREE.Mesh(new THREE.BoxGeometry(capW * 0.7, capH * 0.6, capW * 0.7), this._mat(color, 0.3));
-                c1.position.set(pos.x, baseY + baseH + colH + capH * 0.3, pos.z);
-                group.add(c1);
-                const c2 = new THREE.Mesh(new THREE.BoxGeometry(capW, capH * 0.4, capW), this._mat(color, 0.3));
-                c2.position.set(pos.x, baseY + baseH + colH + capH * 0.8, pos.z);
-                group.add(c2);
-            } else {
-                const cap = new THREE.Mesh(new THREE.BoxGeometry(capW, capH, capW), this._mat(color, 0.3));
-                cap.position.set(pos.x, baseY + baseH + colH + capH / 2, pos.z);
-                group.add(cap);
+        for (let i = 0; i < n; i++) {
+            const pos = positions[i];
+            dummy.position.set(pos.x, baseY + baseH + colH / 2, pos.z);
+            dummy.rotation.set(0, 0, 0);
+            dummy.scale.set(1, 1, 1);
+            dummy.updateMatrix();
+            shaftInst.setMatrixAt(i, dummy.matrix);
+        }
+        shaftInst.instanceMatrix.needsUpdate = true;
+        group.add(shaftInst);
+
+        const capMat = this._mat(color, 0.3);
+        if (style === "corinthian") {
+            const c1Geom = new THREE.BoxGeometry(capW * 0.7, capH * 0.6, capW * 0.7);
+            const c2Geom = new THREE.BoxGeometry(capW, capH * 0.4, capW);
+            const c1Inst = new THREE.InstancedMesh(c1Geom, capMat, n);
+            const c2Inst = new THREE.InstancedMesh(c2Geom, capMat, n);
+            c1Inst.castShadow = c2Inst.castShadow = true;
+            c1Inst.receiveShadow = c2Inst.receiveShadow = true;
+            for (let i = 0; i < n; i++) {
+                const pos = positions[i];
+                dummy.position.set(pos.x, baseY + baseH + colH + capH * 0.3, pos.z);
+                dummy.updateMatrix();
+                c1Inst.setMatrixAt(i, dummy.matrix);
+                dummy.position.set(pos.x, baseY + baseH + colH + capH * 0.8, pos.z);
+                dummy.updateMatrix();
+                c2Inst.setMatrixAt(i, dummy.matrix);
             }
+            c1Inst.instanceMatrix.needsUpdate = true;
+            c2Inst.instanceMatrix.needsUpdate = true;
+            group.add(c1Inst, c2Inst);
+        } else {
+            const capGeom = new THREE.BoxGeometry(capW, capH, capW);
+            const capInst = new THREE.InstancedMesh(capGeom, capMat, n);
+            capInst.castShadow = true;
+            capInst.receiveShadow = true;
+            for (let i = 0; i < n; i++) {
+                const pos = positions[i];
+                dummy.position.set(pos.x, baseY + baseH + colH + capH / 2, pos.z);
+                dummy.updateMatrix();
+                capInst.setMatrixAt(i, dummy.matrix);
+            }
+            capInst.instanceMatrix.needsUpdate = true;
+            group.add(capInst);
         }
 
         // Entablature
@@ -1061,18 +2007,6 @@ class WorldRenderer {
         return baseY + h;
     }
 
-    // Minimal placeholder for tiles that arrive without an AI-generated spec.
-    // Every real building should have its spec generated by the URBANISTA agent.
-    _placeholderBlock(group, tile, w, d) {
-        const h = 0.3;
-        const color = tile.color || "#d4a373";
-        const body = new THREE.Mesh(new THREE.BoxGeometry(w * 0.8, h, d * 0.8), this._mat(color, 0.9));
-        body.position.y = h / 2;
-        body.material.transparent = true;
-        body.material.opacity = 0.5;
-        group.add(body);
-    }
-
     // ─── Hover / Click ───
 
     _getMeshList() {
@@ -1187,6 +2121,20 @@ class WorldRenderer {
             this._updateCamera();
             if (t >= 1) this._flyTarget = null;
         }
+
+        this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+        this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+        this.buildingGroups.forEach((group) => {
+            if (group.userData.cullRadius == null) return;
+            this._cullCenter.set(
+                group.position.x,
+                group.position.y + (group.userData.cullCenterOffsetY || 0),
+                group.position.z
+            );
+            this._cullSphere.set(this._cullCenter, group.userData.cullRadius);
+            group.visible = this._frustum.intersectsSphere(this._cullSphere);
+        });
+
         this.renderer3d.render(this.scene, this.camera);
     }
 }

@@ -1,15 +1,16 @@
-"""Roma Aeterna — Entry point."""
+"""Eternal Cities — Entry point."""
 
 import asyncio
 import logging
 import uvicorn
 from pathlib import Path
 
+import config
 import server.app as server_module
 from server.app import app, world, bus, broadcast, chat_history
 from orchestration.engine import BuildEngine
 from persistence import load_state, SAVE_FILE, DISTRICTS_CACHE, SURVEYS_CACHE
-from config import GRID_WIDTH, GRID_HEIGHT
+from config import GRID_WIDTH, GRID_HEIGHT, create_scenario
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,13 +18,16 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from config import SCENARIO as _sc
-BANNER = f"""
+# pkill -f regex: only child processes from agents/base.py (claude --print --system-prompt ...).
+# Broader patterns like "claude.*--print" can match unrelated Claude CLI usage.
+CLAUDE_AGENT_PKILL_PATTERN = r"claude.*--print.*--system-prompt"
+
+BANNER = """
 ╔══════════════════════════════════════════════════╗
 ║                                                  ║
 ║          E T E R N A L   C I T I E S             ║
 ║                                                  ║
-║   {_sc['location']:^12s}, {_sc['period']:^24s}   ║
+║     Waiting for city selection...                ║
 ║                                                  ║
 ║          Open: http://localhost:8000              ║
 ║                                                  ║
@@ -41,20 +45,69 @@ if saved:
     engine.districts = districts
     logging.info(f"Resumed: district #{district_index}, {len(districts)} districts, {len(loaded_chat)} messages")
 else:
-    logging.info("Starting fresh")
+    logging.info("Starting fresh — awaiting user selection")
+
+
+async def handle_start(city_name, year):
+    """User selected a city and year — create scenario and start engine."""
+    # Stop if already running
+    if engine.running:
+        engine.running = False
+        await asyncio.sleep(0.5)
+        import subprocess
+        subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+
+    await engine.abort_pipeline_tasks()
+    engine.reset_pipeline_for_new_run()
+
+    # Create and set the scenario
+    config.SCENARIO = create_scenario(city_name, year)
+    logging.info(f"Starting: {config.SCENARIO['location']}, {config.SCENARIO['period']}")
+
+    # Reset world state for fresh build
+    from world.state import WorldState
+    new_world = WorldState(GRID_WIDTH, GRID_HEIGHT)
+    world.grid = new_world.grid
+    world.turn = 0
+    world.current_period = ""
+    world.current_year = year
+    world.build_log = []
+
+    chat_history.clear()
+    engine.districts = []
+    engine.district_index = 0
+
+    # Delete old caches
+    if SAVE_FILE.exists():
+        SAVE_FILE.unlink()
+    if DISTRICTS_CACHE.exists():
+        DISTRICTS_CACHE.unlink()
+    if SURVEYS_CACHE.exists():
+        SURVEYS_CACHE.unlink()
+
+    # Broadcast scenario to all clients
+    await broadcast(world.to_dict())
+    await broadcast({
+        "type": "scenario",
+        "city": config.SCENARIO["location"],
+        "period": config.SCENARIO["period"],
+        "description": config.SCENARIO.get("description", ""),
+    })
+
+    # Start the engine
+    asyncio.create_task(engine.run())
 
 
 async def handle_reset():
     """Reset world, clear save, restart engine."""
-    # Stop current engine
     engine.running = False
     await asyncio.sleep(0.5)
+    await engine.abort_pipeline_tasks()
+    engine.reset_pipeline_for_new_run()
 
-    # Kill any running claude subprocesses
     import subprocess
-    subprocess.run(["pkill", "-f", "claude.*--print"], capture_output=True)
+    subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
 
-    # Clear world state
     from world.state import WorldState
     new_world = WorldState(GRID_WIDTH, GRID_HEIGHT)
     world.grid = new_world.grid
@@ -63,12 +116,10 @@ async def handle_reset():
     world.current_year = -44
     world.build_log = []
 
-    # Clear chat and engine state
     chat_history.clear()
     engine.districts = []
     engine.district_index = 0
 
-    # Delete save files (districts cache survives restart, only cleared on reset)
     if SAVE_FILE.exists():
         SAVE_FILE.unlink()
     if DISTRICTS_CACHE.exists():
@@ -76,21 +127,31 @@ async def handle_reset():
     if SURVEYS_CACHE.exists():
         SURVEYS_CACHE.unlink()
 
-    # Send fresh world state to all clients
+    # Back to selection screen
+    config.SCENARIO = None
     await broadcast(world.to_dict())
 
-    # Restart engine
-    logging.info("World reset — restarting engine")
+
+async def handle_resume():
+    """Continue build after API rate limit / error / network pause."""
+    if not config.SCENARIO:
+        logging.warning("Resume ignored: no active scenario")
+        return
+    if engine.running:
+        logging.warning("Resume ignored: engine already running")
+        return
     asyncio.create_task(engine.run())
 
 
 server_module.reset_callback = handle_reset
+server_module.start_callback = handle_start
+server_module.resume_callback = handle_resume
 
 
 @app.on_event("startup")
 async def startup():
     print(BANNER)
-    asyncio.create_task(engine.run())
+    # Don't auto-start — wait for user to select city and click Start
 
 
 if __name__ == "__main__":

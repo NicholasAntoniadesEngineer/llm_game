@@ -44,6 +44,8 @@ function handleMessage(msg) {
             document.title = `${msg.city} — Eternal Cities`;
             const sub = document.getElementById("subtitle");
             if (sub) sub.textContent = `${msg.city}, ${msg.period} — AI agents reconstruct this city in real time`;
+            // Hide selection overlay (reconnecting to active session)
+            document.getElementById("select-overlay").classList.add("hidden");
             break;
 
         case "tile_update":
@@ -54,7 +56,7 @@ function handleMessage(msg) {
             // Auto-fly camera to new building
             if (msg.tiles && msg.tiles.length > 0 && renderer.flyTo) {
                 const t = msg.tiles[0];
-                const S = 10; // TILE_SIZE from renderer
+                const S = 14; // TILE_SIZE (must match renderer3d.js)
                 renderer.flyTo((t.x + 0.5) * S, (t.y + 0.5) * S);
             }
             hideLoading();
@@ -98,6 +100,14 @@ function handleMessage(msg) {
             updateProgressBar();
             break;
 
+        case "placement_warnings":
+            if (msg.warnings && msg.warnings.length) {
+                const district = msg.district || "district";
+                const preview = msg.warnings.slice(0, 6).join(" · ");
+                appendSystemMessage(`Placement check (${district}, ${msg.count || msg.warnings.length}): ${preview}`);
+            }
+            break;
+
         case "map_description":
             setMapDescription(msg.description);
             break;
@@ -110,7 +120,58 @@ function handleMessage(msg) {
             appendSystemMessage("Roma Aeterna is complete. Glory to the Empire!");
             resetAllAgentStatus();
             break;
+
+        case "paused":
+            showPausedOverlay(msg);
+            resetAllAgentStatus();
+            break;
     }
+}
+
+const PAUSED_TITLES = {
+    rate_limit: "Rate limit",
+    api_error: "API error",
+    network: "Connection problem",
+    cli_missing: "CLI not found",
+    unknown: "Build paused",
+};
+
+function showPausedOverlay(msg) {
+    const overlay = document.getElementById("paused-overlay");
+    const titleEl = document.getElementById("paused-title");
+    const bodyEl = document.getElementById("paused-body");
+    const detailEl = document.getElementById("paused-detail");
+    if (!overlay || !titleEl || !bodyEl || !detailEl) return;
+
+    const reasonKey = msg.reason && PAUSED_TITLES[msg.reason] ? msg.reason : "unknown";
+    titleEl.textContent = PAUSED_TITLES[reasonKey] || PAUSED_TITLES.unknown;
+    bodyEl.textContent = msg.summary || "The build stopped. You can try again when the issue is resolved.";
+
+    const detailText = (msg.detail || "").trim();
+    if (detailText) {
+        detailEl.textContent = detailText;
+        detailEl.hidden = false;
+    } else {
+        detailEl.textContent = "";
+        detailEl.hidden = true;
+    }
+
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+}
+
+function dismissPausedOverlay() {
+    const overlay = document.getElementById("paused-overlay");
+    if (!overlay) return;
+    overlay.classList.remove("visible");
+    overlay.setAttribute("aria-hidden", "true");
+}
+
+function resumeBuildAfterPause() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resume" }));
+    }
+    dismissPausedOverlay();
 }
 
 // --- Agent Status & Timers ---
@@ -318,7 +379,16 @@ function resetWorld() {
     mapDescription = null;
     mapImageUrl = null;
     agentLogs.length = 0;
-    showLoading("imperator", "Resetting world...");
+    totalStructures = 0;
+    builtStructures = 0;
+
+    // Show selection screen again
+    selectedCity = null;
+    selectedYear = null;
+    document.querySelectorAll(".city-card").forEach(c => c.classList.remove("selected"));
+    document.getElementById("year-control").classList.remove("active");
+    document.getElementById("start-btn").disabled = true;
+    document.getElementById("select-overlay").classList.remove("hidden");
 }
 
 // --- Loading overlay ---
@@ -596,11 +666,91 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// --- City Selection Screen ---
+
+let cities = [];
+let selectedCity = null;
+let selectedYear = null;
+
+async function loadCities() {
+    const res = await fetch("/api/cities");
+    cities = await res.json();
+    renderCityGrid();
+}
+
+function renderCityGrid() {
+    const grid = document.getElementById("city-grid");
+    grid.innerHTML = "";
+    for (const city of cities) {
+        const card = document.createElement("div");
+        card.className = "city-card";
+        card.dataset.name = city.name;
+        const minLabel = formatYear(city.year_min);
+        const maxLabel = formatYear(Math.min(city.year_max, 2024));
+        card.innerHTML = `
+            <div class="city-name">${escapeHtml(city.name)}</div>
+            <div class="city-years">${minLabel} — ${maxLabel}</div>
+            <div class="city-desc">${escapeHtml(city.description)}</div>
+        `;
+        card.addEventListener("click", () => selectCity(city));
+        grid.appendChild(card);
+    }
+}
+
+function selectCity(city) {
+    selectedCity = city;
+    // Highlight selected card
+    document.querySelectorAll(".city-card").forEach(c => c.classList.remove("selected"));
+    document.querySelector(`.city-card[data-name="${city.name}"]`).classList.add("selected");
+
+    // Enable year slider
+    const yearControl = document.getElementById("year-control");
+    yearControl.classList.add("active");
+    const slider = document.getElementById("year-slider");
+    slider.min = city.year_min;
+    slider.max = Math.min(city.year_max, 2024);
+    // Default to middle of range
+    const mid = Math.round((city.year_min + Math.min(city.year_max, 2024)) / 2);
+    slider.value = mid;
+    updateYearDisplay(mid);
+
+    document.getElementById("year-min-label").textContent = formatYear(city.year_min);
+    document.getElementById("year-max-label").textContent = formatYear(Math.min(city.year_max, 2024));
+
+    // Enable start button
+    document.getElementById("start-btn").disabled = false;
+}
+
+function updateYearDisplay(year) {
+    selectedYear = parseInt(year);
+    document.getElementById("year-display").textContent = formatYear(selectedYear);
+}
+
+function startReconstruction() {
+    if (!selectedCity || selectedYear === null) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    ws.send(JSON.stringify({
+        type: "start",
+        city: selectedCity.name,
+        year: selectedYear,
+    }));
+
+    // Hide selection overlay
+    document.getElementById("select-overlay").classList.add("hidden");
+}
+
 // --- Init ---
 
 document.addEventListener("DOMContentLoaded", () => {
     const container = document.getElementById("world-container");
     renderer = new WorldRenderer(container);
+
+    window.addEventListener("world-render-error", (e) => {
+        const d = e.detail || {};
+        console.error("[WorldRenderer]", d.error, d.tile, d.key);
+        appendSystemMessage(`Render error: ${d.error}`);
+    });
 
     // Tile click -> request detail from server
     renderer.renderer3d.domElement.addEventListener("tileclick", (e) => {
@@ -617,6 +767,14 @@ document.addEventListener("DOMContentLoaded", () => {
     document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") closeTileDetail();
     });
+
+    // Year slider
+    document.getElementById("year-slider").addEventListener("input", (e) => {
+        updateYearDisplay(e.target.value);
+    });
+
+    // Start button
+    document.getElementById("start-btn").addEventListener("click", startReconstruction);
 
     // Make all panels draggable by their header/background
     function makeDraggable(el, handleSelector) {
@@ -663,5 +821,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
 
+    // Load cities for selection screen, then connect
+    loadCities();
     connect();
 });

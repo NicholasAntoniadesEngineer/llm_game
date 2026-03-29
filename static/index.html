@@ -143,7 +143,44 @@
     <div id="tooltip"></div>
     <div class="connection-status" id="connection-status">Connecting...</div>
 
+    <!-- City selection overlay — shown on open -->
+    <div class="select-overlay" id="select-overlay">
+        <div class="select-content">
+            <h1 class="select-title">ETERNAL CITIES</h1>
+            <p class="select-subtitle">Choose a city and year to reconstruct</p>
+
+            <div class="city-grid" id="city-grid"></div>
+
+            <div class="year-control" id="year-control">
+                <label class="year-label">
+                    Year: <span id="year-display">—</span>
+                </label>
+                <input type="range" id="year-slider" min="0" max="100" value="50" class="year-slider">
+                <div class="year-range">
+                    <span id="year-min-label">—</span>
+                    <span id="year-max-label">—</span>
+                </div>
+            </div>
+
+            <button class="start-btn" id="start-btn" disabled>BEGIN RECONSTRUCTION</button>
+        </div>
+    </div>
+
+    <!-- Paused: API limit / error / network -->
+    <div class="paused-overlay" id="paused-overlay" aria-hidden="true">
+        <div class="paused-content">
+            <h2 class="paused-title" id="paused-title">Build paused</h2>
+            <p class="paused-summary" id="paused-body"></p>
+            <pre class="paused-detail" id="paused-detail" hidden></pre>
+            <div class="paused-actions">
+                <button type="button" class="start-btn" id="paused-retry-btn" onclick="resumeBuildAfterPause()">Try again</button>
+                <button type="button" class="paused-dismiss-btn" onclick="dismissPausedOverlay()">Dismiss</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/tiles.js?v=__ASSET_VERSION__"></script>
+    <script src="/static/parametric_templates.js?v=__ASSET_VERSION__"></script>
     <script src="/static/renderer3d.js?v=__ASSET_VERSION__"></script>
     <script src="/static/app.js?v=__ASSET_VERSION__"></script>
 </body>

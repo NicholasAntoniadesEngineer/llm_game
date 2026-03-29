@@ -1,0 +1,144 @@
+"""Curated architectural reference data — measurements and proportion hints for agents."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("roma.reference_db")
+
+_CACHE: list[dict[str, Any]] | None = None
+
+
+def _data_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "data" / "architectural_reference.json"
+
+
+def load_architectural_entries() -> list[dict[str, Any]]:
+    global _CACHE
+    if _CACHE is not None:
+        return _CACHE
+    path = _data_path()
+    if not path.is_file():
+        logger.warning("No architectural_reference.json at %s", path)
+        _CACHE = []
+        return _CACHE
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    entries = raw.get("entries")
+    if not isinstance(entries, list):
+        logger.warning("architectural_reference.json missing entries array")
+        _CACHE = []
+        return _CACHE
+    _CACHE = entries
+    return _CACHE
+
+
+def lookup_architectural_reference(
+    building_type: str,
+    city: str,
+    year: int,
+) -> dict[str, Any] | None:
+    """
+    Return the best-matching reference entry for Urbanista/Historicus prompts.
+    More specific matches (city + year window) beat generic entries.
+    """
+    btype = (building_type or "").strip().lower()
+    city_l = (city or "").strip().lower()
+    try:
+        yi = int(year)
+    except (TypeError, ValueError):
+        yi = 0
+
+    best: dict[str, Any] | None = None
+    best_score = -1
+
+    for e in load_architectural_entries():
+        if not isinstance(e, dict):
+            continue
+        m = e.get("match")
+        if not isinstance(m, dict):
+            m = {}
+
+        btypes = [str(x).lower() for x in m.get("building_types", [])]
+        if btypes and btype not in btypes:
+            continue
+
+        cities = [str(c).strip().lower() for c in m.get("cities", [])]
+        if cities and city_l not in cities:
+            continue
+
+        ymin = m.get("year_min")
+        ymax = m.get("year_max")
+        if ymin is not None:
+            try:
+                if yi < int(ymin):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        if ymax is not None:
+            try:
+                if yi > int(ymax):
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        score = 0
+        if btypes:
+            score += 3
+        if cities:
+            score += 4
+        if ymin is not None or ymax is not None:
+            score += 2
+        if score > best_score:
+            best_score = score
+            best = e
+
+    return best
+
+
+def format_reference_for_historicus(entry: dict[str, Any] | None) -> str:
+    """Shorter block for Historicus — ask for explicit numbers in commentary when DB aligns."""
+    if not entry:
+        return ""
+    lines: list[str] = [
+        "MEASUREMENT REFERENCE (curated database — cite concrete meters and counts in your commentary when they fit the sources):",
+    ]
+    if entry.get("title"):
+        lines.append(str(entry["title"]))
+    if entry.get("measurements_meters_typical"):
+        lines.append(json.dumps(entry["measurements_meters_typical"], indent=2))
+    if entry.get("proportion_rules_hints"):
+        lines.append("Proportion bands (for Urbanista proportion_rules later):")
+        lines.append(json.dumps(entry["proportion_rules_hints"], indent=2))
+    if entry.get("notes"):
+        lines.append(str(entry["notes"]))
+    if entry.get("citation"):
+        lines.append(f"Source note: {entry['citation']}")
+    return "\n".join(lines).strip()
+
+
+def format_reference_for_prompt(entry: dict[str, Any] | None) -> str:
+    """Compact text block for LLM injection (not full raw JSON)."""
+    if not entry:
+        return ""
+    lines: list[str] = []
+    if entry.get("id"):
+        lines.append(f"id: {entry['id']}")
+    if entry.get("title"):
+        lines.append(str(entry["title"]))
+    if entry.get("notes"):
+        lines.append(str(entry["notes"]))
+    if entry.get("proportion_rules_hints"):
+        lines.append("proportion_rules_hints (merge into spec.proportion_rules when Historian agrees):")
+        lines.append(json.dumps(entry["proportion_rules_hints"], indent=2))
+    if entry.get("measurements_meters_typical"):
+        lines.append("typical_meter_ranges (sanity-check against Historian):")
+        lines.append(json.dumps(entry["measurements_meters_typical"], indent=2))
+    if entry.get("material_hints"):
+        lines.append("material_hints (#RRGGBB):")
+        lines.append(json.dumps(entry["material_hints"], indent=2))
+    if entry.get("citation"):
+        lines.append(f"citation: {entry['citation']}")
+    return "\n".join(lines).strip()

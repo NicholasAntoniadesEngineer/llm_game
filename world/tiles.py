@@ -9,6 +9,7 @@ class Tile:
     x: int
     y: int
     terrain: str = "empty"
+    elevation: float = 0.0  # Height in world units (0 = sea level, positive = hills)
     building_name: Optional[str] = None
     building_type: Optional[str] = None
     period: Optional[str] = None
@@ -24,7 +25,7 @@ class Tile:
     def to_dict(self) -> dict:
         d = {}
         for k, v in self.__dict__.items():
-            if v is not None or k in ("x", "y", "terrain", "color", "icon", "turn"):
+            if v is not None or k in ("x", "y", "terrain", "elevation", "color", "icon", "turn"):
                 d[k] = v
         return d
 

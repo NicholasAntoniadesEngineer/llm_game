@@ -966,57 +966,30 @@ than pure aesthetic rules.
 
 ## Implementation Recommendation
 
-### Phase 1: Constraint Solver (1 week)
+### Phase 1–2: Generative constraints and tradition (current)
 
-Add a constraint solver between the LLM and the renderer. This immediately improves
-the current system without any architecture changes:
+Cross-part numeric limits come only from optional **spec.proportion_rules** (and the renderer applies only keys the model sends). **spec.tradition** is a free-form string from the agents. No Vitruvian defaults in code and no static reference JSON.
 
-1. **Proportional constraints** — enforce Vitruvian ratios for column orders
-2. **Containment constraints** — cella fits inside colonnade
-3. **Coverage constraints** — roofs span full width
-4. **Scale constraints** — components relate to tile footprint correctly
+### Phase 3: Parametric / generative composition (implemented direction)
 
-This is the lowest-effort, highest-impact change. Buildings stop looking wrong
-immediately.
+The live client uses a **role-based stack** (foundation → structural → infill → roof → decorative → freestanding) with optional **stack_role** / **stack_priority** overrides, plus **type `procedural`** (primitive parts: box, cylinder, sphere, cone, torus, plane) for novel massing. **spec.tradition** and **proportion_rules** are fully generative from agents — no static JSON catalogs. Unknown component types **fail validation** on the server (nothing stripped).
 
-**Files to modify:** `renderer3d.js` (add constraint function before `_buildComponents`)
+### Phase 3 (parametric templates) — implemented
 
-### Phase 2: Archaeological Reference Database (1 week, parallel with Phase 1)
+`static/parametric_templates.js` includes **`open`** (culture-agnostic: `params.components` plus optional `ref_w`/`ref_d` scaling) and optional **shortcuts** named after common Greco-Roman forms (`temple`, `basilica`, …) — shortcuts are convenience only; **any** culture should use **`open`** or raw **`spec.components`** with **`procedural`** parts where named types do not fit. The anchor spec may set **`spec.template`: `{ "id", "params" }`** instead of **`spec.components`** (mutually exclusive; validated in `orchestration/validation.py`). Expansion yields the same component arrays; the renderer still runs `_buildComponents`.
 
-Build a JSON reference database of Roman building dimensions. Include in the
-Urbanista agent's prompt so the LLM makes better parameter choices.
+### Phase 4: Contextual Polish (implemented)
 
-```
-research/roman_buildings.json — archaeological measurement database
-agents/prompts.py — enhanced Urbanista prompt with reference data
-```
+Neighbor-aware post-pass in `static/renderer3d.js` (`spec.phase4` optional overrides; validated in `orchestration/validation.py`):
 
-This improves LLM output quality without changing the renderer.
+- Steps and street fascia where a footprint faces **roads**; sloped **awnings** and small **sign** boards on road fronts
+- **Party walls** where another building abuts
+- **Mooring posts** at **water**, **hedges** at garden/forum edges
+- **Ruin ivy** (density from `ruin_overgrowth` or `building_type`)
 
-### Phase 3: Parametric Templates (2-3 weeks)
+Frustum culling adds a small height margin when Phase 4 is active so façade extras do not pop out of view.
 
-Replace the flat component-stack system with dedicated template functions for each
-building type:
-
-1. Start with temples (most visible, best documented, clearest proportional rules)
-2. Add insulae and domus (most numerous building types)
-3. Add public buildings (basilica, thermae, amphitheater)
-4. Add infrastructure (aqueduct, walls, gates, bridges)
-
-Each template is a standalone function that takes parameters and returns a Three.js
-Group. The existing component builders (`_buildPodium`, `_buildColonnade`, etc.)
-become internal utilities called by templates, not assembled by the LLM.
-
-**New LLM interface:** The Urbanista agent specifies building type + parameters.
-The renderer picks the right template. The LLM no longer lists individual components.
-
-### Phase 4: Contextual Polish (1 week)
-
-Add neighbor-aware details inspired by Townscaper:
-- Steps where buildings meet roads
-- Shared walls between adjacent buildings
-- Street-level details (awnings, signs) facing roads
-- Vegetation growing on ruins
+**Next (optional) roadmap item:** Deeper template libraries (more parameters, non-Roman typologies via procedural emphasis) or Vitruvian reference data — see appendix.
 
 ### What NOT to Build
 
@@ -1048,12 +1021,16 @@ The recommended system distributes knowledge across three layers:
 | Knowledge | Where It Lives | Example |
 |---|---|---|
 | What to build | LLM (Urbanista) | "Build a prostyle Ionic temple" |
-| How it should look | Reference database | "8 columns, 11m tall, grey granite" |
-| How parts fit together | Template functions | Column height = diameter x order ratio |
+| How it should look | Reference database | `data/architectural_reference.json` — curated ranges; `orchestration/reference_db.py` injects the best match into Urbanista by city/year/building_type |
+| How parts fit together | Template functions + stack | Column height = diameter × order ratio; `parametric_templates.js` optional |
 
 The LLM does what LLMs are good at (language, history, creative decisions). The code
 does what code is good at (spatial math, proportional relationships, geometric
 assembly). The database does what databases are good at (storing measurements).
+
+**Functional placement:** `orchestration/placement.py` checks survey `master_plan` for (1) road adjacency for commerce, (2) water adjacency for bridges, (3) ceremonial buildings (`temple`, `monument`, `basilica`) not stranded far from roads/plazas. Warnings are logged, broadcast as `placement_warnings` to the client, and summarized in chat. Survey prompt (`CARTOGRAPHUS_SURVEY`) encodes the same rules for Cartographus.
+
+**Reference data file:** `data/architectural_reference.json` (v2+) holds typology entries with `match` filters and `proportion_rules_hints`. `orchestration/reference_db.py` resolves the best match by city/year/building_type; `format_reference_for_historicus` feeds Historicus, `format_reference_for_prompt` feeds Urbanista (after golden example scaling).
 
 ---
 

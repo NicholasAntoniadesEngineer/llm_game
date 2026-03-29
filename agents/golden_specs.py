@@ -2,6 +2,7 @@
 Injected as few-shot examples into the Urbanista prompt so the AI knows what
 correct proportions look like at the actual building size."""
 
+import copy
 import json
 
 # Each spec is tuned for a reference footprint size.
@@ -90,7 +91,7 @@ GOLDEN_SPECS = {
         "components": [
             {"type": "arcade", "arches": 1, "height": 0.5, "color": "#F5E6C8"},
             {"type": "battlements", "height": 0.08, "color": "#C8B070"},
-            {"type": "colonnade", "columns": 4, "style": "composite", "height": 0.4, "color": "#F0F0F0", "radius": 0.015, "peripteral": False},
+            {"type": "colonnade", "columns": 4, "style": "corinthian", "height": 0.4, "color": "#F0F0F0", "radius": 0.015, "peripteral": False},
             {"type": "flat_roof", "color": "#F5E6C8", "overhang": 0.04},
         ]
     },
@@ -110,12 +111,33 @@ GOLDEN_SPECS = {
     },
 }
 
+# Every `building_type` the agents may emit must exist in GOLDEN_SPECS (explicit keys; no runtime defaulting).
+_EXPLICIT_GOLDEN_ALIASES = {
+    "building": "temple",
+    "forum": "basilica",
+    "road": "market",
+    "water": "market",
+    "garden": "domus",
+    "grass": "domus",
+    "circus": "amphitheater",
+    "bridge": "aqueduct",
+    "taberna": "market",
+    "warehouse": "insula",
+}
+
+for _alias_key, _canonical_key in _EXPLICIT_GOLDEN_ALIASES.items():
+    if _alias_key not in GOLDEN_SPECS:
+        GOLDEN_SPECS[_alias_key] = copy.deepcopy(GOLDEN_SPECS[_canonical_key])
+
+
 def get_golden_example(building_type, target_w, target_d):
     """Return a scaled golden spec as a JSON string for prompt injection."""
     ref = GOLDEN_SPECS.get(building_type)
     if not ref:
-        # Use temple as generic fallback
-        ref = GOLDEN_SPECS["temple"]
+        raise ValueError(
+            f"No golden spec for building_type={building_type!r}. "
+            f"Add an entry to GOLDEN_SPECS or use a known type."
+        )
 
     ref_w, ref_d = ref["ref_w"], ref["ref_d"]
     scale = ((target_w / ref_w) + (target_d / ref_d)) / 2
