@@ -18,11 +18,24 @@ body {
 .header {
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
     border-bottom: 2px solid #c9a84c;
-    padding: 8px 20px;
+    padding: 6px 12px;
     margin-top: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
+}
+
+.header > div:first-child {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+@media (min-width: 720px) {
+    .header > div:first-child {
+        /* Leave more width for the agent pills; subtitle wraps instead of squeezing them. */
+        max-width: min(420px, 48%);
+    }
 }
 
 .header h1 {
@@ -44,19 +57,25 @@ body {
 /* Agent status bar */
 .agent-status-bar {
     display: flex;
-    gap: 16px;
+    flex-wrap: wrap;
+    gap: 6px 8px;
     align-items: center;
+    justify-content: flex-end;
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .agent-status {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
+    gap: 5px;
+    padding: 3px 8px;
     border-radius: 12px;
     background: rgba(255,255,255,0.05);
     font-size: 0.75rem;
     transition: all 0.3s ease;
+    min-width: 0;
+    flex: 0 0 auto;
 }
 
 .agent-status .agent-dot {
@@ -71,6 +90,7 @@ body {
     color: #888;
     font-weight: bold;
     letter-spacing: 0.5px;
+    white-space: nowrap;
 }
 
 .agent-status.thinking .agent-label {
@@ -108,6 +128,7 @@ body {
 .agent-status .agent-purpose {
     color: #666;
     font-size: 0.65rem;
+    white-space: nowrap;
 }
 
 .agent-status .agent-timer {
@@ -117,6 +138,17 @@ body {
     font-variant-numeric: tabular-nums;
     min-width: 3.2em;
     margin-left: 6px;
+    white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+    .agent-status-bar {
+        max-width: none;
+        justify-content: center;
+    }
+    .agent-status {
+        justify-content: space-between;
+    }
 }
 
 .agent-status .agent-timer:empty {
@@ -748,7 +780,8 @@ body {
     right: 0;
     bottom: 0;
     background: rgba(10, 8, 20, 0.92);
-    z-index: 2500;
+    /* Must sit above AI Settings modal (z-index: 2600) so errors are always visible. */
+    z-index: 3200;
     display: none;
     align-items: center;
     justify-content: center;
@@ -1093,12 +1126,45 @@ body {
     color: #9a9285;
 }
 
+.llm-settings-connection-status {
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: #8fbc8f;
+    margin: 0 20px 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(30, 45, 35, 0.35);
+    border: 1px solid #2d4a35;
+}
+
+.llm-settings-connection-status.llm-conn-warn {
+    color: #d4a84b;
+    background: rgba(55, 45, 25, 0.35);
+    border-color: #5a4a28;
+}
+
+.llm-settings-connection-status.llm-conn-bad {
+    color: #c97a6a;
+    background: rgba(50, 30, 28, 0.35);
+    border-color: #5a3530;
+}
+
 .llm-settings-rows {
     padding: 0 16px 12px;
     overflow-y: auto;
     flex: 1 1 auto;
     min-height: min(50vh, 420px);
     min-width: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    align-content: start;
+}
+
+@media (max-width: 980px) {
+    .llm-settings-rows {
+        grid-template-columns: 1fr;
+    }
 }
 
 .llm-settings-loading,
@@ -1117,8 +1183,9 @@ body {
     border: 1px solid #2a2635;
     border-radius: 8px;
     padding: 10px 12px;
-    margin-bottom: 12px;
+    margin: 0;
     background: #0a090e;
+    min-width: 0;
 }
 
 .llm-two-col {

@@ -39,18 +39,159 @@ let reconnectDelay = 1000;
 let totalStructures = 0;
 let builtStructures = 0;
 
+/** Last REST outcome for AI Settings panel (GET /api/llm-settings). */
+let llmSettingsRestStatusLine = null;
+
+function formatWebSocketReadyState() {
+    if (!ws) return "WebSocket: (none)";
+    switch (ws.readyState) {
+        case WebSocket.CONNECTING:
+            return "WebSocket: connecting…";
+        case WebSocket.OPEN:
+            return "WebSocket: connected";
+        case WebSocket.CLOSING:
+            return "WebSocket: closing…";
+        default:
+            return "WebSocket: disconnected";
+    }
+}
+
+function updateAiSettingsConnectionStatus() {
+    const el = document.getElementById("llm-settings-connection-status");
+    const overlay = document.getElementById("llm-settings-overlay");
+    if (!el) return;
+    if (!overlay || !overlay.classList.contains("visible")) {
+        el.textContent = "";
+        el.className = "llm-settings-connection-status";
+        return;
+    }
+    const rest =
+        llmSettingsRestStatusLine ||
+        "REST: not verified yet — open loaded or click Reconnect";
+    const line = `${rest} · ${formatWebSocketReadyState()}`;
+    el.textContent = line;
+    el.className = "llm-settings-connection-status";
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+        el.classList.add("llm-conn-bad");
+    } else if (ws.readyState !== WebSocket.OPEN) {
+        el.classList.add("llm-conn-warn");
+    } else if (llmSettingsRestStatusLine && llmSettingsRestStatusLine.startsWith("REST: error")) {
+        el.classList.add("llm-conn-bad");
+    }
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const r = await fetch(url, { signal: controller.signal });
+        const text = await r.text();
+        if (!r.ok) {
+            throw new Error(`HTTP ${r.status}: ${text.slice(0, 160)}`);
+        }
+        try {
+            return JSON.parse(text);
+        } catch (e) {
+            throw new Error("Server did not return JSON (is this the Eternal Cities server?)");
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
+async function reconnectAiSettings() {
+    try {
+        const rows = document.getElementById("llm-settings-rows");
+        if (rows) {
+            rows.innerHTML =
+                '<p class="llm-settings-loading">Reconnecting… testing API…</p>';
+        }
+    } catch (e) {
+        /* ignore */
+    }
+
+    reconnectDelay = 1000;
+    try {
+        if (!ws || ws.readyState === WebSocket.CLOSED) {
+            connect();
+        } else {
+            // Force a clean reconnect without waiting for backoff.
+            try {
+                ws.onclose = null;
+            } catch (e) {
+                /* ignore */
+            }
+            try {
+                ws.close();
+            } catch (e) {
+                /* ignore */
+            }
+            setConnectionStatus(false);
+            setTimeout(connect, 50);
+        }
+    } catch (e) {
+        console.error("Reconnect failed:", e);
+    }
+
+    // Test API response explicitly, then render settings on success.
+    try {
+        const msg = await fetchJsonWithTimeout(apiUrl("/api/llm-settings"), 4000);
+        llmSettingsRestStatusLine = "REST: OK (GET /api/llm-settings)";
+        renderLlmSettings(msg);
+        updateAiSettingsConnectionStatus();
+        [100, 400, 1000].forEach((ms) => {
+            setTimeout(updateAiSettingsConnectionStatus, ms);
+        });
+    } catch (e) {
+        const message = e && e.message ? e.message : "Unknown error";
+        llmSettingsRestStatusLine = `REST: error — ${message}`;
+        updateAiSettingsConnectionStatus();
+        const rows = document.getElementById("llm-settings-rows");
+        if (rows) {
+            rows.innerHTML = `<p class="llm-settings-error">Reconnect failed: ${escapeHtml(message)}</p>`;
+        }
+        showPausedOverlay({
+            reason: "api_error",
+            summary: "AI Settings reconnect failed. Check the server/API and try again.",
+            detail: message,
+        });
+        // Still attempt the existing fallback flow (WS request) if possible.
+        try {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "get_llm_settings" }));
+            }
+        } catch (err) {
+            /* ignore */
+        }
+    }
+}
+
 function connect() {
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+        try {
+            ws.onclose = null;
+        } catch (e) {
+            /* ignore */
+        }
+        try {
+            ws.close();
+        } catch (e) {
+            /* ignore */
+        }
+    }
     ws = new WebSocket(eternalCitiesWsUrl());
 
     ws.onopen = () => {
         console.log("Connected to Roma Aeterna");
         setConnectionStatus(true);
         reconnectDelay = 1000;
+        updateAiSettingsConnectionStatus();
     };
 
     ws.onclose = () => {
         console.log("Disconnected, reconnecting...");
         setConnectionStatus(false);
+        updateAiSettingsConnectionStatus();
         setTimeout(connect, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 10000);
     };
@@ -197,11 +338,16 @@ async function requestLlmSettingsFromServer() {
         } catch (parseErr) {
             throw new Error("Server did not return JSON (is this the Eternal Cities server?)");
         }
+        llmSettingsRestStatusLine = "REST: OK (GET /api/llm-settings)";
         renderLlmSettings(msg);
+        updateAiSettingsConnectionStatus();
     } catch (e) {
         console.error("LLM settings load failed:", e);
+        const detailMsg = e && e.message ? e.message : "Unknown error";
+        llmSettingsRestStatusLine = `REST: error — ${detailMsg}`;
+        updateAiSettingsConnectionStatus();
         if (rows) {
-            const detail = e && e.message ? escapeHtml(e.message) : "Unknown error";
+            const detail = escapeHtml(detailMsg);
             rows.innerHTML = `<p class="llm-settings-error">Could not load AI settings: ${detail}${fileHint ? `. ${fileHint}` : ""}</p>`;
         }
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -221,6 +367,7 @@ function toggleLlmSettingsOverlay() {
             rows.innerHTML =
                 '<p class="llm-settings-loading">Loading AI settings from the server…</p>';
         }
+        updateAiSettingsConnectionStatus();
         void requestLlmSettingsFromServer();
     }
 }
@@ -239,6 +386,29 @@ function llmProviderDisplayName(providerRaw) {
         : "Claude CLI";
 }
 
+function formatTokenUsageLine(usageEntry) {
+    if (!usageEntry) return "Tokens: —";
+    const last = usageEntry.last || null;
+    const tot = usageEntry.total || null;
+    if (!last && !tot) return "Tokens: —";
+    const lastTotal = last && typeof last.total_tokens === "number" ? last.total_tokens : null;
+    const lastPrompt = last && typeof last.prompt_tokens === "number" ? last.prompt_tokens : null;
+    const lastCompletion = last && typeof last.completion_tokens === "number" ? last.completion_tokens : null;
+    const exact = !!(last && last.exact);
+    const totalTotal = tot && typeof tot.total_tokens === "number" ? tot.total_tokens : null;
+    const parts = [];
+    if (lastTotal != null) {
+        const suffix = exact ? "" : " (est)";
+        if (lastPrompt != null && lastCompletion != null) {
+            parts.push(`Last: ${lastTotal}${suffix} (p${lastPrompt} + c${lastCompletion})`);
+        } else {
+            parts.push(`Last: ${lastTotal}${suffix}`);
+        }
+    }
+    if (totalTotal != null) parts.push(`Session: ${totalTotal}`);
+    return `Tokens: ${parts.join(" · ") || "—"}`;
+}
+
 function renderLlmSettings(msg) {
     const container = document.getElementById("llm-settings-rows");
     if (!container) return;
@@ -248,6 +418,7 @@ function renderLlmSettings(msg) {
         return;
     }
     const labels = msg.labels || {};
+    const tokenUsage = msg.token_usage || {};
     container.innerHTML = "";
     for (const [key, spec] of Object.entries(msg.agents)) {
         const label = labels[key] || key;
@@ -262,6 +433,7 @@ function renderLlmSettings(msg) {
         const fieldset = document.createElement("fieldset");
         fieldset.className = "llm-agent-row";
         fieldset.dataset.agentKey = key;
+        const tokensLine = formatTokenUsageLine(tokenUsage[key]);
         fieldset.innerHTML = `
             <legend class="llm-legend">${escapeHtml(label)}</legend>
             <div class="llm-two-col">
@@ -270,6 +442,7 @@ function renderLlmSettings(msg) {
                     <dl class="llm-current-dl">
                         <dt>Provider</dt><dd class="llm-current-provider">${escapeHtml(llmProviderDisplayName(prov))}</dd>
                         <dt>Model</dt><dd class="llm-current-model">${escapeHtml(model || "—")}</dd>
+                        <dt>Usage</dt><dd class="llm-current-usage">${escapeHtml(tokensLine)}</dd>
                         <dt class="llm-current-openai-only">API base URL</dt>
                         <dd class="llm-current-openai-only">${currentBaseDisplay}</dd>
                         <dt class="llm-current-openai-only">API key</dt>
@@ -609,6 +782,7 @@ function setConnectionStatus(connected) {
         el.className = "connection-status disconnected";
         el.textContent = "Reconnecting...";
     }
+    updateAiSettingsConnectionStatus();
 }
 
 // --- Reset ---

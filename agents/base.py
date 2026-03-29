@@ -6,6 +6,7 @@ import logging
 
 import llm_agents
 from agents.provider import LlmProvider, build_provider_from_spec
+from token_usage import STORE as TOKEN_USAGE_STORE, estimate_tokens_from_text
 
 logger = logging.getLogger("roma.agents")
 
@@ -91,6 +92,33 @@ class BaseAgent:
                 system_prompt=self.system_prompt,
                 user_text=prompt,
                 model=model,
+            )
+            # Token usage tracking (exact when backend provides it, else estimate).
+            prompt_tokens_est = estimate_tokens_from_text(self.system_prompt) + estimate_tokens_from_text(prompt)
+            completion_tokens_est = estimate_tokens_from_text(raw)
+            provider_kind = str(spec.get("provider") or "claude_cli")
+            exact = False
+            prompt_tokens = prompt_tokens_est
+            completion_tokens = completion_tokens_est
+            total_tokens = prompt_tokens + completion_tokens
+            usage = getattr(provider, "last_usage", None)
+            if isinstance(usage, dict):
+                pt = usage.get("prompt_tokens")
+                ct = usage.get("completion_tokens")
+                tt = usage.get("total_tokens")
+                if isinstance(pt, int) and isinstance(ct, int):
+                    prompt_tokens = max(0, pt)
+                    completion_tokens = max(0, ct)
+                    total_tokens = max(0, int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens))
+                    exact = True
+            TOKEN_USAGE_STORE.record(
+                agent_key=self.llm_agent_key,
+                provider=provider_kind,
+                model=str(model or ""),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                exact=exact,
             )
             logger.info(f"[{self.role}] response ({len(raw)} chars)")
             result = self._parse_json(raw)

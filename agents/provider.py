@@ -187,6 +187,11 @@ class OpenAICompatibleProvider:
             data = json.loads(body)
         except json.JSONDecodeError as e:
             raise AgentGenerationError("api_error", f"Invalid JSON from API: {e}") from e
+        # Best-effort usage reporting (OpenAI-compatible servers often include usage.*).
+        try:
+            self.last_usage = data.get("usage") if isinstance(data, dict) else None
+        except Exception:
+            self.last_usage = None
         choices = data.get("choices")
         if not choices:
             raise AgentGenerationError("api_error", "API response missing choices[].")

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Eternal Cities</title>
+    <link rel="icon" href="/static/favicon.svg?v=__ASSET_VERSION__" type="image/svg+xml">
     <link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
@@ -138,7 +139,7 @@
     <div class="bottom-buttons">
         <button class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
         <button class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
-        <button class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="Configure which model each agent uses (same as Configure AI on the start screen)">Configure AI</button>
+        <button class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="AI Settings (provider/model per agent)">AI Settings</button>
         <button class="map-btn reset-btn" id="reset-btn" onclick="resetWorld()" title="Reset and rebuild from scratch">RESET</button>
     </div>
     <div id="tooltip"></div>
@@ -150,7 +151,7 @@
             <h1 class="select-title">ETERNAL CITIES</h1>
             <p class="select-subtitle">Choose a city and year to reconstruct</p>
             <p class="select-ai-note">Set which model each agent uses here in the app — no config files to edit.</p>
-            <button type="button" class="select-ai-btn" id="select-ai-btn" onclick="toggleLlmSettingsOverlay()">Configure AI</button>
+            <button type="button" class="select-ai-btn" id="select-ai-btn" onclick="toggleLlmSettingsOverlay()">AI Settings</button>
 
             <div class="city-grid" id="city-grid"></div>
 
@@ -173,12 +174,14 @@
     <div class="llm-settings-overlay" id="llm-settings-overlay" aria-hidden="true">
         <div class="llm-settings-panel">
             <div class="llm-settings-header">
-                <h2 class="llm-settings-title">AI backends</h2>
+                <h2 class="llm-settings-title">AI Settings</h2>
                 <button type="button" class="close-btn" onclick="closeLlmSettingsOverlay()" aria-label="Close">&times;</button>
             </div>
             <p class="llm-settings-hint"><strong>Current</strong> is what is running now. <strong>New</strong> is what you are about to apply — click Save. Your choices are remembered for the next time you open the app. To keep an existing API key, leave the new key field blank.</p>
+            <p class="llm-settings-connection-status" id="llm-settings-connection-status" aria-live="polite"></p>
             <div class="llm-settings-rows" id="llm-settings-rows"></div>
             <div class="llm-settings-actions">
+                <button type="button" class="paused-dismiss-btn" id="llm-settings-reconnect-btn" onclick="reconnectAiSettings()">Reconnect</button>
                 <button type="button" class="start-btn" id="llm-settings-save-btn" onclick="saveLlmSettingsFromForm()">Save</button>
                 <button type="button" class="paused-dismiss-btn" onclick="closeLlmSettingsOverlay()">Close</button>
             </div>

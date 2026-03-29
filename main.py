@@ -168,6 +168,7 @@ server_module.reset_callback = handle_reset
 server_module.start_callback = handle_start
 server_module.resume_callback = handle_resume
 server_module.llm_settings_callback = handle_llm_settings_save
+server_module.engine_is_running = lambda: engine.running
 
 
 @app.on_event("startup")
