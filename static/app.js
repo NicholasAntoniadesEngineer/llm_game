@@ -35,9 +35,58 @@ function eternalCitiesWsUrl() {
 
 let ws = null;
 let renderer = null;
+/** Grid dimensions from last world_state (mini-map, UI). */
+let worldGridWidth = 80;
+let worldGridHeight = 80;
+/** One automatic resume per full page load when server sends suggest_auto_resume (reconnect after pause). */
+let autoResumeOnceThisPageAttempted = false;
 let reconnectDelay = 1000;
+/** Single scheduled reconnect from ws.onclose — cleared on manual connect() or AI reconnect. */
+let wsReconnectTimer = null;
+
+function clearWebSocketReconnectTimer() {
+    if (wsReconnectTimer != null) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+    }
+}
+
 let totalStructures = 0;
 let builtStructures = 0;
+let runStartedAtMs = null;
+let runLengthInterval = null;
+
+/** Stable run start for UI clock across refresh if server omits started_at_s (localStorage; cleared on reset). */
+const RUN_START_LOCAL_KEY = "eternal_cities_run_started_ms";
+
+function applyRunStartFromScenario(msg) {
+    if (typeof msg.started_at_s === "number" && Number.isFinite(msg.started_at_s)) {
+        runStartedAtMs = Math.floor(msg.started_at_s * 1000);
+        try {
+            localStorage.setItem(RUN_START_LOCAL_KEY, String(runStartedAtMs));
+        } catch (e) {
+            /* ignore */
+        }
+        return;
+    }
+    let ms = null;
+    try {
+        const s = localStorage.getItem(RUN_START_LOCAL_KEY);
+        if (s) ms = parseInt(s, 10);
+    } catch (e) {
+        /* ignore */
+    }
+    if (ms != null && !Number.isNaN(ms)) {
+        runStartedAtMs = ms;
+    } else {
+        runStartedAtMs = Date.now();
+        try {
+            localStorage.setItem(RUN_START_LOCAL_KEY, String(runStartedAtMs));
+        } catch (e) {
+            /* ignore */
+        }
+    }
+}
 
 /** Last REST outcome for AI Settings panel (GET /api/llm-settings). */
 let llmSettingsRestStatusLine = null;
@@ -111,6 +160,7 @@ async function reconnectAiSettings() {
     }
 
     reconnectDelay = 1000;
+    clearWebSocketReconnectTimer();
     try {
         if (!ws || ws.readyState === WebSocket.CLOSED) {
             connect();
@@ -127,7 +177,7 @@ async function reconnectAiSettings() {
                 /* ignore */
             }
             setConnectionStatus(false);
-            setTimeout(connect, 50);
+            setTimeout(() => connect(), 50);
         }
     } catch (e) {
         console.error("Reconnect failed:", e);
@@ -150,11 +200,7 @@ async function reconnectAiSettings() {
         if (rows) {
             rows.innerHTML = `<p class="llm-settings-error">Reconnect failed: ${escapeHtml(message)}</p>`;
         }
-        showPausedOverlay({
-            reason: "api_error",
-            summary: "AI Settings reconnect failed. Check the server/API and try again.",
-            detail: message,
-        });
+        // Do not open the global build-paused modal — that implies the sim stopped; only AI Settings failed.
         // Still attempt the existing fallback flow (WS request) if possible.
         try {
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -167,6 +213,7 @@ async function reconnectAiSettings() {
 }
 
 function connect() {
+    clearWebSocketReconnectTimer();
     if (ws && ws.readyState !== WebSocket.CLOSED) {
         try {
             ws.onclose = null;
@@ -192,7 +239,11 @@ function connect() {
         console.log("Disconnected, reconnecting...");
         setConnectionStatus(false);
         updateAiSettingsConnectionStatus();
-        setTimeout(connect, reconnectDelay);
+        clearWebSocketReconnectTimer();
+        wsReconnectTimer = setTimeout(() => {
+            wsReconnectTimer = null;
+            connect();
+        }, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 10000);
     };
 
@@ -209,6 +260,8 @@ function connect() {
 function handleMessage(msg) {
     switch (msg.type) {
         case "world_state":
+            if (typeof msg.width === "number" && msg.width > 0) worldGridWidth = msg.width;
+            if (typeof msg.height === "number" && msg.height > 0) worldGridHeight = msg.height;
             renderer.init(msg);
             updateTimeline(msg.period, msg.year);
             break;
@@ -217,8 +270,15 @@ function handleMessage(msg) {
             document.title = `${msg.city} — Eternal Cities`;
             const sub = document.getElementById("subtitle");
             if (sub) sub.textContent = `${msg.city}, ${msg.period} — AI agents reconstruct this city in real time`;
+            applyRunStartFromScenario(msg);
+            startRunLengthTicker();
+            updateTimeline(msg.period, msg.year);
             // Hide selection overlay (reconnecting to active session)
             document.getElementById("select-overlay").classList.add("hidden");
+            break;
+
+        case "token_usage":
+            applyTokenUsageToHeader(msg.by_ui_agent);
             break;
 
         case "tile_update":
@@ -297,6 +357,14 @@ function handleMessage(msg) {
         case "paused":
             showPausedOverlay(msg);
             resetAllAgentStatus();
+            if (msg.suggest_auto_resume === true && !autoResumeOnceThisPageAttempted) {
+                autoResumeOnceThisPageAttempted = true;
+                setTimeout(() => {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                    ws.send(JSON.stringify({ type: "resume" }));
+                    dismissPausedOverlay();
+                }, 400);
+            }
             break;
 
         case "llm_settings":
@@ -409,6 +477,49 @@ function formatTokenUsageLine(usageEntry) {
     return `Tokens: ${parts.join(" · ") || "—"}`;
 }
 
+function fillClaudeModelSelect(fieldset, currentModel, choices) {
+    const sel = fieldset.querySelector(".llm-claude-model-select");
+    const custom = fieldset.querySelector(".llm-claude-model-custom");
+    if (!sel || !custom) return;
+    const list = Array.isArray(choices) && choices.length ? choices : ["haiku", "sonnet", "opus"];
+    sel.innerHTML = "";
+    list.forEach((m) => {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        sel.appendChild(o);
+    });
+    if (currentModel && !list.includes(currentModel)) {
+        const o = document.createElement("option");
+        o.value = currentModel;
+        o.textContent = `${currentModel} (saved)`;
+        sel.appendChild(o);
+    }
+    const oOther = document.createElement("option");
+    oOther.value = "__custom__";
+    oOther.textContent = "Other…";
+    sel.appendChild(oOther);
+
+    const applySelection = () => {
+        if (list.includes(currentModel)) {
+            sel.value = currentModel;
+        } else if (currentModel) {
+            sel.value = currentModel;
+        } else {
+            sel.value = list[0] || "haiku";
+        }
+    };
+    applySelection();
+
+    const syncCustom = () => {
+        const useCustom = sel.value === "__custom__";
+        custom.style.display = useCustom ? "block" : "none";
+        if (useCustom) custom.value = "";
+    };
+    sel.addEventListener("change", syncCustom);
+    syncCustom();
+}
+
 function renderLlmSettings(msg) {
     const container = document.getElementById("llm-settings-rows");
     if (!container) return;
@@ -419,6 +530,7 @@ function renderLlmSettings(msg) {
     }
     const labels = msg.labels || {};
     const tokenUsage = msg.token_usage || {};
+    const claudeCliModels = msg.claude_cli_models || [];
     container.innerHTML = "";
     for (const [key, spec] of Object.entries(msg.agents)) {
         const label = labels[key] || key;
@@ -459,9 +571,16 @@ function renderLlmSettings(msg) {
                                 <option value="openai_compatible">OpenAI-compatible API</option>
                             </select>
                         </label>
-                        <label class="llm-label">
+                        <label class="llm-label llm-claude-model-wrap">
+                            <span class="llm-label-text">Model</span>
+                            <div class="llm-claude-model-controls">
+                                <select class="llm-claude-model-select" aria-label="Claude model"></select>
+                                <input type="text" class="llm-claude-model-custom" placeholder="Custom model id" autocomplete="off" />
+                            </div>
+                        </label>
+                        <label class="llm-label llm-openai-model-wrap">
                             <span class="llm-label-text">Model id</span>
-                            <input type="text" class="llm-model" placeholder="e.g. haiku or gpt-4o-mini" />
+                            <input type="text" class="llm-model-openai" placeholder="e.g. gpt-4o-mini" />
                         </label>
                         <div class="llm-openai-fields">
                             <label class="llm-label">
@@ -480,8 +599,9 @@ function renderLlmSettings(msg) {
         const newBlock = fieldset.querySelector(".llm-new-block");
         const sel = newBlock.querySelector(".llm-provider");
         sel.value = provSelect;
-        newBlock.querySelector(".llm-model").value = model;
         newBlock.querySelector(".llm-openai-base").value = baseUrl;
+        newBlock.querySelector(".llm-model-openai").value = model;
+        fillClaudeModelSelect(fieldset, model, claudeCliModels);
         sel.addEventListener("change", () => updateLlmRowOpenAiVisibility(fieldset));
         updateLlmRowOpenAiVisibility(fieldset);
         fieldset.querySelectorAll(".llm-current-openai-only").forEach((el) => {
@@ -496,17 +616,38 @@ function updateLlmRowOpenAiVisibility(fieldset) {
     const prov = newBlock.querySelector(".llm-provider").value;
     const wrap = newBlock.querySelector(".llm-openai-fields");
     if (wrap) wrap.style.display = prov === "openai_compatible" ? "block" : "none";
+    const claudeModelWrap = newBlock.querySelector(".llm-claude-model-wrap");
+    const openaiModelWrap = newBlock.querySelector(".llm-openai-model-wrap");
+    if (claudeModelWrap) claudeModelWrap.style.display = prov === "claude_cli" ? "" : "none";
+    if (openaiModelWrap) openaiModelWrap.style.display = prov === "openai_compatible" ? "" : "none";
 }
 
 async function saveLlmSettingsFromForm() {
     const overrides = {};
-    document.querySelectorAll(".llm-agent-row").forEach((row) => {
+    const rows = document.querySelectorAll(".llm-agent-row");
+    for (const row of rows) {
         const key = row.dataset.agentKey;
-        if (!key) return;
+        if (!key) continue;
         const newBlock = row.querySelector(".llm-new-block");
-        if (!newBlock) return;
+        if (!newBlock) continue;
         const provider = newBlock.querySelector(".llm-provider").value;
-        const model = newBlock.querySelector(".llm-model").value.trim();
+        let model = "";
+        if (provider === "claude_cli") {
+            const csel = newBlock.querySelector(".llm-claude-model-select");
+            const ccustom = newBlock.querySelector(".llm-claude-model-custom");
+            if (csel && csel.value === "__custom__") {
+                model = ccustom ? ccustom.value.trim() : "";
+                if (!model) {
+                    window.alert("Enter a custom model id, or pick a model from the list.");
+                    return;
+                }
+            } else if (csel) {
+                model = csel.value.trim();
+            }
+        } else {
+            const minp = newBlock.querySelector(".llm-model-openai");
+            model = minp ? minp.value.trim() : "";
+        }
         const patch = { provider, model };
         if (provider === "openai_compatible") {
             const base = newBlock.querySelector(".llm-openai-base").value.trim();
@@ -515,7 +656,7 @@ async function saveLlmSettingsFromForm() {
             if (apiKey) patch.openai_api_key = apiKey;
         }
         overrides[key] = patch;
-    });
+    }
     try {
         const r = await fetch(apiUrl("/api/llm-settings"), {
             method: "POST",
@@ -538,6 +679,7 @@ async function saveLlmSettingsFromForm() {
 const PAUSED_TITLES = {
     rate_limit: "Rate limit",
     api_error: "API error",
+    bad_model_output: "Invalid model output",
     network: "Connection problem",
     cli_missing: "CLI not found",
     unknown: "Build paused",
@@ -629,7 +771,7 @@ function setAgentStatus(agent, status) {
 }
 
 function resetAllAgentStatus() {
-    for (const agent of ["imperator", "cartographus", "urbanista", "historicus", "faber", "civis"]) {
+    for (const agent of ["imperator", "cartographus", "urbanista", "faber", "civis"]) {
         setAgentStatus(agent, "idle");
     }
 }
@@ -707,8 +849,169 @@ function hideTyping() {
 function updateTimeline(period, year) {
     const periodEl = document.getElementById("timeline-period");
     const yearEl = document.getElementById("timeline-year");
-    if (periodEl) periodEl.textContent = period || "";
-    if (yearEl) yearEl.textContent = year ? formatYear(year) : "";
+    const periodWrap = document.getElementById("timeline-period-wrap");
+    const yearWrap = document.getElementById("timeline-year-wrap");
+    const p = period == null ? "" : String(period).trim();
+    const hasPeriod = Boolean(p);
+    if (periodEl) periodEl.textContent = hasPeriod ? p : "—";
+    if (periodWrap) periodWrap.style.display = hasPeriod ? "" : "none";
+
+    const hasYear = year !== null && year !== undefined && year !== "";
+    let yearOk = false;
+    if (hasYear) {
+        const n = Number(year);
+        yearOk = !Number.isNaN(n);
+        if (yearEl) yearEl.textContent = yearOk ? formatYear(n) : "—";
+    } else if (yearEl) {
+        yearEl.textContent = "—";
+    }
+    if (yearWrap) yearWrap.style.display = hasYear && yearOk ? "" : "none";
+}
+
+function formatDurationHms(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = totalSeconds % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function updateRunLength() {
+    const el = document.getElementById("timeline-run-length");
+    if (!el) return;
+    if (!runStartedAtMs) {
+        el.textContent = "—";
+        return;
+    }
+    el.textContent = formatDurationHms(Date.now() - runStartedAtMs);
+}
+
+function startRunLengthTicker() {
+    if (runLengthInterval) {
+        clearInterval(runLengthInterval);
+        runLengthInterval = null;
+    }
+    const runWrap = document.getElementById("timeline-run-wrap");
+    if (runWrap) runWrap.style.display = "";
+    updateRunLength();
+    runLengthInterval = setInterval(updateRunLength, 1000);
+}
+
+function formatTokShort(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x) || x < 1) return "";
+    if (x >= 1e6) return `${(x / 1e6).toFixed(1)}M`;
+    if (x >= 1e3) return `${(x / 1e3).toFixed(1)}k`;
+    return String(Math.round(x));
+}
+
+function applyTokenUsageToHeader(byUi) {
+    const data = byUi || {};
+    const ids = ["cartographus", "urbanista"];
+    for (const id of ids) {
+        const el = document.getElementById(`agent-tokens-${id}`);
+        if (!el) continue;
+        const row = data[id];
+        const tot = row && row.total_tokens != null ? row.total_tokens : 0;
+        const s = formatTokShort(tot);
+        el.textContent = s ? `${s} tok` : "";
+    }
+}
+
+const CHAT_WIDTH_STORAGE_KEY = "eternal_cities_chat_sidebar_width";
+const CHAT_COLLAPSED_STORAGE_KEY = "eternal_cities_chat_collapsed";
+
+function initChatPanelLayout() {
+    const main = document.getElementById("main-layout");
+    const split = document.getElementById("chat-split");
+    const handle = document.getElementById("chat-resize-handle");
+    const collapseBtn = document.getElementById("chat-collapse-btn");
+    const expandFab = document.getElementById("chat-expand-fab");
+    if (!main || !split) return;
+
+    const readStoredWidthPx = () => {
+        try {
+            const w = parseInt(localStorage.getItem(CHAT_WIDTH_STORAGE_KEY), 10);
+            if (!Number.isNaN(w)) return Math.min(720, Math.max(280, w));
+        } catch (e) {
+            /* ignore */
+        }
+        return 420;
+    };
+
+    let lastSidebarWidthPx = readStoredWidthPx();
+
+    const applySidebarWidthToDom = (wPx) => {
+        const clamped = Math.min(720, Math.max(280, wPx));
+        lastSidebarWidthPx = clamped;
+        document.documentElement.style.setProperty("--chat-sidebar-width", `${clamped}px`);
+        try {
+            localStorage.setItem(CHAT_WIDTH_STORAGE_KEY, String(clamped));
+        } catch (e) {
+            /* ignore */
+        }
+    };
+
+    const setChatCollapsed = (collapsed) => {
+        main.classList.toggle("chat-collapsed", collapsed);
+        if (expandFab) expandFab.hidden = !collapsed;
+        if (collapseBtn) {
+            collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            collapseBtn.title = collapsed ? "Expand chat" : "Collapse chat";
+            collapseBtn.textContent = "‹";
+        }
+        if (collapsed) {
+            document.documentElement.style.setProperty("--chat-sidebar-width", "0px");
+        } else {
+            applySidebarWidthToDom(lastSidebarWidthPx);
+        }
+        try {
+            localStorage.setItem(CHAT_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+        } catch (e) {
+            /* ignore */
+        }
+    };
+
+    try {
+        if (localStorage.getItem(CHAT_COLLAPSED_STORAGE_KEY) === "1") {
+            setChatCollapsed(true);
+        } else {
+            applySidebarWidthToDom(lastSidebarWidthPx);
+        }
+    } catch (e) {
+        applySidebarWidthToDom(lastSidebarWidthPx);
+    }
+
+    let dragging = false;
+    let startPointerX = 0;
+    let startWidthPx = 0;
+
+    handle?.addEventListener("mousedown", (e) => {
+        if (main.classList.contains("chat-collapsed")) return;
+        e.preventDefault();
+        dragging = true;
+        startPointerX = e.clientX;
+        startWidthPx = split.getBoundingClientRect().width;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const delta = startPointerX - e.clientX;
+        applySidebarWidthToDom(startWidthPx + delta);
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+    });
+
+    collapseBtn?.addEventListener("click", () => setChatCollapsed(true));
+    expandFab?.addEventListener("click", () => setChatCollapsed(false));
 }
 
 function updateDistrict(district) {
@@ -756,7 +1059,7 @@ function showTileDetail(tile) {
         return;
     }
 
-    let html = `<button class="close-btn" onclick="closeTileDetail()">&times;</button>`;
+    let html = `<button type="button" class="popup-close-btn" onclick="closeTileDetail()" aria-label="Close">&times;</button>`;
     html += `<h3>${tile.icon || ""} ${tile.building_name || tile.terrain}</h3>`;
     if (tile.description) html += `<p>${escapeHtml(tile.description)}</p>`;
     if (tile.period) html += `<p style="color:#8a7e6b;font-size:0.8rem;">Period: ${tile.period}</p>`;
@@ -775,23 +1078,193 @@ function closeTileDetail() {
 
 function setConnectionStatus(connected) {
     const el = document.getElementById("connection-status");
-    if (connected) {
-        el.className = "connection-status connected";
-        el.textContent = "Connected";
-    } else {
-        el.className = "connection-status disconnected";
-        el.textContent = "Reconnecting...";
-    }
+    if (!el) return;
+    el.classList.remove("connected", "disconnected");
+    el.classList.add(connected ? "connected" : "disconnected");
+    el.textContent = connected ? "Connected" : "Reconnecting...";
     updateAiSettingsConnectionStatus();
+}
+
+// --- Reload / restart / timeline (keeps planning caches unless full RESET) ---
+
+function reloadClientCode() {
+    try {
+        const u = new URL(window.location.href);
+        u.searchParams.set("_ec", String(Date.now()));
+        window.location.href = u.toString();
+    } catch (e) {
+        window.location.reload();
+    }
+}
+
+function restartServerViaWebSocket() {
+    return new Promise((resolve, reject) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            reject(new Error("WebSocket not connected"));
+            return;
+        }
+        const timeoutId = setTimeout(() => {
+            ws.removeEventListener("message", handler);
+            reject(new Error("Timed out waiting for restart_server_result"));
+        }, 12000);
+        function handler(event) {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === "restart_server_result") {
+                    clearTimeout(timeoutId);
+                    ws.removeEventListener("message", handler);
+                    resolve(msg);
+                }
+            } catch (e) {
+                /* ignore */
+            }
+        }
+        ws.addEventListener("message", handler);
+        try {
+            ws.send(JSON.stringify({ type: "restart_server" }));
+        } catch (e) {
+            clearTimeout(timeoutId);
+            ws.removeEventListener("message", handler);
+            reject(e);
+        }
+    });
+}
+
+async function restartServerFromUi() {
+    if (
+        !confirm(
+            "Restart the Python server?\n\n" +
+                "The current world is saved first. District and survey caches on disk are kept.\n" +
+                "Requires ETERNAL_CITIES_RELOAD=1 when you started the server."
+        )
+    ) {
+        return;
+    }
+    let j = null;
+    try {
+        const r = await fetch(apiUrl("/api/restart-server"), { method: "POST" });
+        if (r.status === 404) {
+            j = await restartServerViaWebSocket();
+        } else {
+            try {
+                j = await r.json();
+            } catch (e) {
+                j = {};
+            }
+            if (!r.ok || !j.ok) {
+                const hint = j.hint ? `\n\n${j.hint}` : "";
+                alert((j.error || `HTTP ${r.status}`) + hint);
+                return;
+            }
+        }
+    } catch (e) {
+        try {
+            j = await restartServerViaWebSocket();
+        } catch (e2) {
+            alert((e.message || String(e)) + "\n\n" + (e2.message || String(e2)));
+            return;
+        }
+    }
+    if (!j || !j.ok) {
+        const hint = j && j.hint ? `\n\n${j.hint}` : "";
+        alert((j && j.error ? j.error : "Restart failed") + hint);
+        return;
+    }
+    appendSystemMessage("Restarting server — WebSocket will reconnect when the process is back.");
+}
+
+function resetTimelineViaWebSocket() {
+    return new Promise((resolve, reject) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            reject(new Error("WebSocket not connected"));
+            return;
+        }
+        const timeoutId = setTimeout(() => {
+            ws.removeEventListener("message", handler);
+            reject(new Error("Timed out waiting for reset_timeline_result"));
+        }, 12000);
+        function handler(event) {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === "reset_timeline_result") {
+                    clearTimeout(timeoutId);
+                    ws.removeEventListener("message", handler);
+                    resolve(msg);
+                }
+            } catch (e) {
+                /* ignore */
+            }
+        }
+        ws.addEventListener("message", handler);
+        try {
+            ws.send(JSON.stringify({ type: "reset_timeline" }));
+        } catch (e) {
+            clearTimeout(timeoutId);
+            ws.removeEventListener("message", handler);
+            reject(e);
+        }
+    });
+}
+
+async function resetTimelineFromUi() {
+    if (
+        !confirm(
+            "Reset the run timer only?\n\n" +
+                "The map, chat history, and Cartographus planning files on disk are not deleted."
+        )
+    ) {
+        return;
+    }
+    let j = null;
+    try {
+        const r = await fetch(apiUrl("/api/reset-timeline"), { method: "POST" });
+        if (r.status === 404) {
+            j = await resetTimelineViaWebSocket();
+        } else {
+            try {
+                j = await r.json();
+            } catch (e) {
+                j = {};
+            }
+            if (!r.ok || !j.ok) {
+                alert(j.error || `HTTP ${r.status}`);
+                return;
+            }
+        }
+    } catch (e) {
+        try {
+            j = await resetTimelineViaWebSocket();
+        } catch (e2) {
+            alert((e.message || String(e)) + "\n\n" + (e2.message || String(e2)));
+            return;
+        }
+    }
+    if (!j || !j.ok) {
+        alert((j && j.error) || "Reset timeline failed");
+        return;
+    }
+    if (typeof j.started_at_s === "number" && Number.isFinite(j.started_at_s)) {
+        applyRunStartFromScenario({ started_at_s: j.started_at_s });
+        startRunLengthTicker();
+    }
+    appendSystemMessage("Run clock reset.");
 }
 
 // --- Reset ---
 
 function resetWorld() {
-    if (!confirm("Reset the world and rebuild from scratch?")) return;
+    if (
+        !confirm(
+            "Full reset: delete saved world, district cache, and survey cache, and return to city selection?\n\n" +
+                "Use “Restart server” or “Reload code” if you only want to refresh code without losing planning."
+        )
+    ) {
+        return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "reset" }));
     }
+    autoResumeOnceThisPageAttempted = false;
     // Clear local state
     document.getElementById("chat-messages").innerHTML = "";
     currentMasterPlan = null;
@@ -800,6 +1273,21 @@ function resetWorld() {
     agentLogs.length = 0;
     totalStructures = 0;
     builtStructures = 0;
+    runStartedAtMs = null;
+    updateRunLength();
+    const runWrap = document.getElementById("timeline-run-wrap");
+    if (runWrap) runWrap.style.display = "none";
+    if (runLengthInterval) {
+        clearInterval(runLengthInterval);
+        runLengthInterval = null;
+    }
+    applyTokenUsageToHeader({});
+    updateTimeline("", null);
+    try {
+        localStorage.removeItem(RUN_START_LOCAL_KEY);
+    } catch (e) {
+        /* ignore */
+    }
 
     // Show selection screen again
     selectedCity = null;
@@ -875,10 +1363,23 @@ function updateMapContent() {
         </div>`;
     }
 
-    // Interactive grid map — zoom and pan with mouse
+    // Interactive grid map — zoom and pan with mouse + toolbar
     if (currentMasterPlan && currentMasterPlan.length > 0) {
-        html += `<canvas id="mini-map" width="500" height="500" style="border:1px solid #333;border-radius:4px;margin-bottom:12px;cursor:grab;width:100%;"></canvas>`;
-        html += `<p style="color:#888;font-size:0.7rem;margin-bottom:4px;">Scroll to zoom, drag to pan</p>`;
+        html += `<div class="mini-map-wrap">`;
+        html += `<div class="mini-map-toolbar" role="toolbar" aria-label="Map view controls">`;
+        html += `<div class="mini-map-toolbar-row">`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Zoom in" aria-label="Zoom in" onclick="miniMapZoomIn()">+</button>`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Zoom out" aria-label="Zoom out" onclick="miniMapZoomOut()">−</button>`;
+        html += `<button type="button" class="mini-map-tool-btn mini-map-tool-wide" title="Fit entire grid in view" onclick="miniMapFitView()">Fit</button>`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Pan north" aria-label="Pan north" onclick="miniMapPan(0,1)">↑</button>`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Pan west" aria-label="Pan west" onclick="miniMapPan(1,0)">←</button>`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Pan east" aria-label="Pan east" onclick="miniMapPan(-1,0)">→</button>`;
+        html += `<button type="button" class="mini-map-tool-btn" title="Pan south" aria-label="Pan south" onclick="miniMapPan(0,-1)">↓</button>`;
+        html += `</div>`;
+        html += `</div>`;
+        html += `<canvas id="mini-map" width="500" height="500" class="mini-map-canvas"></canvas>`;
+        html += `<p class="mini-map-hint">Scroll wheel or +/− to zoom · drag to pan · arrows nudge · Fit shows the whole grid</p>`;
+        html += `</div>`;
         html += `<p style="color:#e67e22;margin-bottom:8px;">${currentMasterPlan.length} structures planned:</p>`;
         for (const item of currentMasterPlan) {
             html += `<div class="plan-item">
@@ -944,6 +1445,8 @@ function setupMiniMapControls() {
     });
     canvas.addEventListener("mouseup", () => { miniMapDragging = false; canvas.style.cursor = "grab"; });
     canvas.addEventListener("mouseleave", () => { miniMapDragging = false; canvas.style.cursor = "grab"; });
+
+    miniMapFitView();
 }
 
 function drawMiniMap() {
@@ -961,7 +1464,10 @@ function drawMiniMap() {
     // Grid lines
     ctx.strokeStyle = "#2a2a4a";
     ctx.lineWidth = 0.5;
-    for (let i = 0; i <= 40; i++) {
+    const gW = worldGridWidth;
+    const gH = worldGridHeight;
+    const gridMax = Math.max(gW, gH);
+    for (let i = 0; i <= gridMax; i++) {
         const gx = i * s + ox, gy = i * s + oy;
         if (gx >= 0 && gx <= W) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
         if (gy >= 0 && gy <= H) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
@@ -970,7 +1476,7 @@ function drawMiniMap() {
     // Grid boundary
     ctx.strokeStyle = "#444";
     ctx.lineWidth = 1;
-    ctx.strokeRect(ox, oy, 40 * s, 40 * s);
+    ctx.strokeRect(ox, oy, gW * s, gH * s);
 
     const typeColors = {
         temple: "#ffd700", basilica: "#deb887", road: "#808080", forum: "#d4c67a",
@@ -1039,6 +1545,59 @@ function drawMiniMap() {
             placed.push({ x: bgX, y: bgY, w: textW + pad * 2, h: textH + pad * 2 });
         }
     }
+}
+
+/** Zoom mini-map toward canvas center (same math as scroll wheel). */
+function miniMapApplyZoomAtCenter(factor) {
+    const canvas = document.getElementById("mini-map");
+    if (!canvas) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const mx = W / 2;
+    const my = H / 2;
+    const oldZoom = miniMapZoom;
+    miniMapZoom = Math.max(3, Math.min(40, miniMapZoom * factor));
+    const ratio = miniMapZoom / oldZoom;
+    miniMapOffsetX = mx - (mx - miniMapOffsetX) * ratio;
+    miniMapOffsetY = my - (my - miniMapOffsetY) * ratio;
+    drawMiniMap();
+}
+
+function miniMapZoomIn() {
+    miniMapApplyZoomAtCenter(1.15);
+}
+
+function miniMapZoomOut() {
+    miniMapApplyZoomAtCenter(0.87);
+}
+
+/** Fit the full city grid into the canvas with a small margin. */
+function miniMapFitView() {
+    const canvas = document.getElementById("mini-map");
+    if (!canvas || !currentMasterPlan) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    const gW = worldGridWidth;
+    const gH = worldGridHeight;
+    const pad = 0.92;
+    const s = Math.min(W / gW, H / gH) * pad;
+    miniMapZoom = Math.max(3, Math.min(40, s));
+    miniMapOffsetX = (W - gW * miniMapZoom) / 2;
+    miniMapOffsetY = (H - gH * miniMapZoom) / 2;
+    drawMiniMap();
+}
+
+/**
+ * Nudge the view (same math as drag-pan on the canvas).
+ * dx, dy ∈ { -1, 0, 1 } for one step along that axis.
+ */
+function miniMapPan(dx, dy) {
+    const canvas = document.getElementById("mini-map");
+    if (!canvas) return;
+    const step = Math.max(24, Math.round(canvas.width * 0.08));
+    miniMapOffsetX += dx * step;
+    miniMapOffsetY += dy * step;
+    drawMiniMap();
 }
 
 // --- Log viewer ---
@@ -1195,6 +1754,10 @@ document.addEventListener("DOMContentLoaded", () => {
     // Start button
     document.getElementById("start-btn").addEventListener("click", startReconstruction);
 
+    const FLOATING_TOOLS_POS_KEY = "eternal_cities_floating_tools_pos";
+    const FLOATING_CAMERA_POS_KEY = "eternal_cities_floating_camera_pos";
+    const FLOATING_TOOLS_MIN_WIDTH_PX = 180;
+
     // Make all panels draggable by their header/background
     function makeDraggable(el, handleSelector) {
         if (!el) return;
@@ -1204,7 +1767,7 @@ document.addEventListener("DOMContentLoaded", () => {
         handle.style.cursor = "grab";
         handle.addEventListener("mousedown", e => {
             if (e.target.tagName === "BUTTON" || e.target.classList.contains("nav-btn") ||
-                e.target.classList.contains("close-btn")) return;
+                e.target.classList.contains("close-btn") || e.target.classList.contains("popup-close-btn")) return;
             dragging = true;
             offX = e.clientX - el.getBoundingClientRect().left;
             offY = e.clientY - el.getBoundingClientRect().top;
@@ -1223,10 +1786,194 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    makeDraggable(document.getElementById("nav-controls"));
+    function initFloatingHudPanel(panelId, handleId, positionStorageKey) {
+        const panel = document.getElementById(panelId);
+        const handle = document.getElementById(handleId);
+        if (!panel || !handle) return;
+        panel.style.position = "fixed";
+        try {
+            const raw = localStorage.getItem(positionStorageKey);
+            if (raw) {
+                const p = JSON.parse(raw);
+                if (Number.isFinite(p.left) && Number.isFinite(p.top)) {
+                    panel.style.left = `${p.left}px`;
+                    panel.style.top = `${p.top}px`;
+                    panel.style.bottom = "auto";
+                    panel.style.right = "auto";
+                }
+            }
+        } catch (e) {
+            /* ignore */
+        }
+        let dragging = false;
+        let offX = 0;
+        let offY = 0;
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            const r = panel.getBoundingClientRect();
+            offX = e.clientX - r.left;
+            offY = e.clientY - r.top;
+            handle.style.cursor = "grabbing";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            panel.style.left = `${e.clientX - offX}px`;
+            panel.style.top = `${e.clientY - offY}px`;
+            panel.style.bottom = "auto";
+            panel.style.right = "auto";
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.style.cursor = "grab";
+            try {
+                const r = panel.getBoundingClientRect();
+                localStorage.setItem(positionStorageKey, JSON.stringify({ left: r.left, top: r.top }));
+            } catch (err) {
+                /* ignore */
+            }
+        });
+    }
+
+    function floatingToolsMaxWidthPx() {
+        const raw = getComputedStyle(document.documentElement).getPropertyValue("--chat-sidebar-width").trim();
+        let sidebar = 420;
+        if (raw.endsWith("px")) {
+            const n = parseFloat(raw);
+            if (!Number.isNaN(n)) sidebar = n;
+        }
+        return Math.max(FLOATING_TOOLS_MIN_WIDTH_PX, window.innerWidth - sidebar - 32);
+    }
+
+    function clampFloatingToolsWidthPx(w) {
+        const lo = FLOATING_TOOLS_MIN_WIDTH_PX;
+        const hi = floatingToolsMaxWidthPx();
+        return Math.min(hi, Math.max(lo, w));
+    }
+
+    function initFloatingToolsPanel() {
+        const panel = document.getElementById("floating-tools-panel");
+        const handle = document.getElementById("floating-tools-handle");
+        const resizeEl = document.getElementById("floating-tools-resize");
+        if (!panel || !handle) return;
+        panel.style.position = "fixed";
+
+        function saveToolsPanelLayout() {
+            try {
+                const r = panel.getBoundingClientRect();
+                localStorage.setItem(
+                    FLOATING_TOOLS_POS_KEY,
+                    JSON.stringify({
+                        left: r.left,
+                        top: r.top,
+                        width: clampFloatingToolsWidthPx(r.width),
+                    })
+                );
+            } catch (err) {
+                /* ignore */
+            }
+        }
+
+        try {
+            const raw = localStorage.getItem(FLOATING_TOOLS_POS_KEY);
+            if (raw) {
+                const p = JSON.parse(raw);
+                if (Number.isFinite(p.left) && Number.isFinite(p.top)) {
+                    panel.style.left = `${p.left}px`;
+                    panel.style.top = `${p.top}px`;
+                    panel.style.bottom = "auto";
+                    panel.style.right = "auto";
+                }
+                if (Number.isFinite(p.width)) {
+                    panel.style.width = `${clampFloatingToolsWidthPx(p.width)}px`;
+                }
+            }
+        } catch (e) {
+            /* ignore */
+        }
+
+        let dragging = false;
+        let offX = 0;
+        let offY = 0;
+        handle.addEventListener("mousedown", (e) => {
+            dragging = true;
+            const r = panel.getBoundingClientRect();
+            offX = e.clientX - r.left;
+            offY = e.clientY - r.top;
+            handle.style.cursor = "grabbing";
+            e.preventDefault();
+        });
+        document.addEventListener("mousemove", (e) => {
+            if (!dragging) return;
+            panel.style.left = `${e.clientX - offX}px`;
+            panel.style.top = `${e.clientY - offY}px`;
+            panel.style.bottom = "auto";
+            panel.style.right = "auto";
+        });
+        document.addEventListener("mouseup", () => {
+            if (!dragging) return;
+            dragging = false;
+            handle.style.cursor = "grab";
+            saveToolsPanelLayout();
+        });
+
+        let resizing = false;
+        let resizeStartX = 0;
+        let resizeStartWidth = 0;
+        if (resizeEl) {
+            resizeEl.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                resizing = true;
+                resizeStartX = e.clientX;
+                resizeStartWidth = panel.getBoundingClientRect().width;
+                try {
+                    resizeEl.setPointerCapture(e.pointerId);
+                } catch (err) {
+                    /* ignore */
+                }
+            });
+            resizeEl.addEventListener("pointermove", (e) => {
+                if (!resizing) return;
+                const nextW = clampFloatingToolsWidthPx(resizeStartWidth + (e.clientX - resizeStartX));
+                panel.style.width = `${nextW}px`;
+            });
+            const endResize = (e) => {
+                if (!resizing) return;
+                resizing = false;
+                try {
+                    resizeEl.releasePointerCapture(e.pointerId);
+                } catch (err) {
+                    /* ignore */
+                }
+                saveToolsPanelLayout();
+            };
+            resizeEl.addEventListener("pointerup", endResize);
+            resizeEl.addEventListener("pointercancel", endResize);
+        }
+
+        window.addEventListener(
+            "resize",
+            () => {
+                const w = panel.getBoundingClientRect().width;
+                const clamped = clampFloatingToolsWidthPx(w);
+                if (Math.abs(clamped - w) > 0.5) {
+                    panel.style.width = `${clamped}px`;
+                    saveToolsPanelLayout();
+                }
+            },
+            { passive: true }
+        );
+    }
+
+    initFloatingToolsPanel();
+    initFloatingHudPanel("floating-camera-panel", "floating-camera-handle", FLOATING_CAMERA_POS_KEY);
     makeDraggable(document.getElementById("map-overlay"), ".map-overlay-header");
     makeDraggable(document.getElementById("log-overlay"), ".map-overlay-header");
     makeDraggable(document.getElementById("tile-detail"));
+
+    initChatPanelLayout();
 
     // Wire up nav buttons via data attributes (avoids onclick/drag conflicts)
     document.querySelectorAll(".nav-btn[data-action]").forEach(btn => {
@@ -1243,4 +1990,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load cities for selection screen, then connect
     loadCities();
     connect();
+
+    // BFCache restore (back/forward): WebSocket is dead; reconnect once without stacking timers.
+    window.addEventListener("pageshow", (ev) => {
+        if (!ev.persisted) return;
+        clearWebSocketReconnectTimer();
+        reconnectDelay = 1000;
+        connect();
+    });
 });

@@ -1,8 +1,8 @@
 """Eternal Cities — Configuration."""
 
-# Grid settings
-GRID_WIDTH = 40
-GRID_HEIGHT = 40
+# Grid settings (each tile ≈ 10 m in agent prompts — total city footprint scales with size)
+GRID_WIDTH = 80
+GRID_HEIGHT = 80
 
 # Legacy names — prefer per-agent settings in llm_agents.py at repo root.
 CLAUDE_MODEL = "haiku"
@@ -15,9 +15,6 @@ OPENAI_COMPATIBLE_BASE_URL = ""
 OPENAI_COMPATIBLE_API_KEY = ""
 # Optional global override for openai_compatible model (prefer setting model in llm_agents.py per agent).
 OPENAI_COMPATIBLE_MODEL = ""
-
-# Max concurrent Historicus CLI calls (limits rate spikes; still parallel).
-HISTORICUS_MAX_CONCURRENT = 2
 
 # Max concurrent Urbanista CLI calls (design pass; placement stays ordered).
 URBANISTA_MAX_CONCURRENT = 3
@@ -42,7 +39,6 @@ CHAT_REPLAY_MAX_MESSAGES = 200
 AGENTS = {
     "cartographus": {"name": "Cartographer",  "purpose": "Surveyor & Mapmaker", "color": "#e67e22"},
     "urbanista":    {"name": "Architect",      "purpose": "Master Architect",    "color": "#4a9eff"},
-    "historicus":   {"name": "Historian",       "purpose": "Research & Detail",   "color": "#2ecc71"},
 }
 
 # ═══════════════════════════════════════════════════
@@ -139,6 +135,7 @@ def get_city(name):
 
 def create_scenario(city_name, year):
     """Create a SCENARIO dict from user-selected city and year."""
+    import time
     city = get_city(city_name)
     if not city:
         city = CITIES[0]
@@ -149,6 +146,8 @@ def create_scenario(city_name, year):
         "features": city["features"],
         "grid_note": city["grid_note"],
         "period": f"around {format_year(year)}",
+        "focus_year": year,
+        "started_at_s": time.time(),
         "year_start": year - WINDOW // 2,
         "year_end": year + WINDOW // 2,
         "ruler": "Research who ruled and what the city looked like at this exact time",

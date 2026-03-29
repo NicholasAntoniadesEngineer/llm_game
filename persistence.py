@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,28 @@ LLM_SETTINGS_FILE = Path(__file__).parent / "roma_llm_settings.json"
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
     scenario: dict[str, Any] | None = getattr(config, "SCENARIO", None)
+    run_started_at_s: float | None = None
+    if scenario and isinstance(scenario, dict):
+        if scenario.get("started_at_s") is not None:
+            try:
+                run_started_at_s = float(scenario["started_at_s"])
+            except (TypeError, ValueError):
+                run_started_at_s = None
+        if run_started_at_s is None and SAVE_FILE.exists():
+            try:
+                old = json.loads(SAVE_FILE.read_text())
+                prev = old.get("run_started_at_s")
+                if isinstance(prev, (int, float)):
+                    run_started_at_s = float(prev)
+            except Exception:
+                pass
+        if run_started_at_s is None:
+            run_started_at_s = time.time()
+            merged = dict(scenario)
+            merged["started_at_s"] = run_started_at_s
+            config.SCENARIO = merged
+            scenario = merged
+
     data = {
         "district_index": district_index,
         "districts": districts or [],
@@ -28,6 +51,7 @@ def save_state(world: WorldState, chat_history: list[dict], district_index: int,
         "current_period": world.current_period,
         "current_year": world.current_year,
         "chat_history": chat_history,
+        "run_started_at_s": run_started_at_s,
         "scenario": scenario,
         "tiles": [],
     }
@@ -94,8 +118,25 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
         district_index = data.get("district_index", 0)
         districts = data.get("districts", [])
         scen = data.get("scenario")
+        run_started_at_s = data.get("run_started_at_s")
+        if isinstance(run_started_at_s, (int, float)):
+            run_started_at_s = float(run_started_at_s)
+        else:
+            run_started_at_s = None
         if isinstance(scen, dict) and scen:
+            if scen.get("started_at_s") is None and run_started_at_s is not None:
+                scen = {**scen, "started_at_s": run_started_at_s}
+            elif scen.get("started_at_s") is None:
+                scen = {**scen, "started_at_s": time.time()}
             config.SCENARIO = scen
+            if not (world.current_period or "").strip() and scen.get("period"):
+                world.current_period = str(scen["period"])
+            fy = scen.get("focus_year")
+            if fy is not None:
+                try:
+                    world.current_year = int(fy)
+                except (TypeError, ValueError):
+                    pass
 
         logger.info(f"Loaded: {len(data['tiles'])} tiles, district #{district_index}, {len(districts)} districts")
         return chat_history, district_index, districts

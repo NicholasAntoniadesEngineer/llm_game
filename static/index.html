@@ -28,6 +28,7 @@
                 <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Surveyor)</span>
                 <span class="agent-state">idle</span>
+                <span class="agent-tokens" id="agent-tokens-cartographus" title="Session tokens (all Cartographus model calls)"></span>
             </div>
             <div class="agent-status" id="status-urbanista" data-agent="urbanista">
                 <span class="agent-dot"></span>
@@ -35,13 +36,7 @@
                 <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Architect)</span>
                 <span class="agent-state">idle</span>
-            </div>
-            <div class="agent-status" id="status-historicus" data-agent="historicus">
-                <span class="agent-dot"></span>
-                <span class="agent-label">Historicus</span>
-                <span class="agent-timer" aria-live="polite"></span>
-                <span class="agent-purpose">(Fact Check)</span>
-                <span class="agent-state">idle</span>
+                <span class="agent-tokens" id="agent-tokens-urbanista" title="Session tokens (Urbanista)"></span>
             </div>
             <div class="agent-status" id="status-faber" data-agent="faber">
                 <span class="agent-dot"></span>
@@ -61,20 +56,29 @@
     </div>
 
     <div class="timeline">
-        <span>Period: <span class="period" id="timeline-period">—</span></span>
-        <span>Year: <span class="year" id="timeline-year">—</span></span>
+        <span id="timeline-period-wrap" class="timeline-item">Period: <span class="period" id="timeline-period">—</span></span>
+        <span id="timeline-run-wrap" class="timeline-item">Run: <span class="year" id="timeline-run-length">—</span></span>
+        <span id="timeline-year-wrap" class="timeline-item">Year: <span class="year" id="timeline-year">—</span></span>
+        <span id="connection-status" class="timeline-item connection-status disconnected" aria-live="polite">Connecting...</span>
         <span class="district" id="timeline-district"></span>
         <span class="status" id="timeline-status"></span>
     </div>
 
-    <div class="main">
+    <div class="main" id="main-layout">
         <div class="map-panel" id="world-container"></div>
-        <div class="chat-panel">
-            <div class="chat-header">Agent Discussion</div>
-            <div class="chat-messages" id="chat-messages"></div>
-            <div class="typing-indicator" id="typing-indicator"></div>
+        <div class="chat-split" id="chat-split">
+            <div class="chat-resize-handle" id="chat-resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize chat panel"></div>
+            <div class="chat-panel" id="chat-panel">
+                <div class="chat-header">
+                    <span class="chat-header-title">Agent Discussion</span>
+                    <button type="button" class="chat-collapse-btn" id="chat-collapse-btn" title="Collapse chat" aria-expanded="true">‹</button>
+                </div>
+                <div class="chat-messages" id="chat-messages"></div>
+                <div class="typing-indicator" id="typing-indicator"></div>
+            </div>
         </div>
     </div>
+    <button type="button" class="chat-expand-fab" id="chat-expand-fab" hidden title="Show chat">Chat</button>
 
     <div class="tile-detail" id="tile-detail"></div>
 
@@ -83,9 +87,9 @@
 
     <!-- Historical map overlay -->
     <div class="map-overlay" id="map-overlay">
+        <button type="button" class="popup-close-btn" onclick="closeMapOverlay()" aria-label="Close">&times;</button>
         <div class="map-overlay-header">
             <h3>Historical Reference Map</h3>
-            <button class="close-btn" onclick="closeMapOverlay()">&times;</button>
         </div>
         <div class="map-overlay-content" id="map-overlay-content">
             <p>The Cartographus is surveying...</p>
@@ -94,56 +98,71 @@
 
     <!-- Log viewer overlay -->
     <div class="log-overlay" id="log-overlay">
+        <button type="button" class="popup-close-btn" onclick="closeLogOverlay()" aria-label="Close">&times;</button>
         <div class="map-overlay-header">
             <h3>Agent Logs</h3>
-            <button class="close-btn" onclick="closeLogOverlay()">&times;</button>
         </div>
         <div class="log-content" id="log-content"></div>
     </div>
 
-    <!-- Navigation controls -->
-    <div class="nav-controls" id="nav-controls">
-        <div class="nav-section">
-            <div class="nav-label">Move</div>
-            <div class="nav-grid">
-                <button class="nav-btn" data-action="pan" data-x="0" data-z="-1" title="Forward (W)">W</button>
-                <button class="nav-btn" data-action="pan" data-x="-1" data-z="0" title="Left (A)">A</button>
-                <button class="nav-btn" data-action="pan" data-x="0" data-z="1" title="Back (S)">S</button>
-                <button class="nav-btn" data-action="pan" data-x="1" data-z="0" title="Right (D)">D</button>
+    <!-- Draggable tools (map, logs, server) — separate panel from camera -->
+    <div class="floating-hud-panel floating-tools-panel" id="floating-tools-panel">
+        <div class="floating-tools-handle" id="floating-tools-handle" title="Drag to move panel">Tools</div>
+        <div class="floating-tools-body">
+            <div class="floating-tools-section floating-tools-section--actions">
+                <div class="floating-tools-section-title">Map, logs &amp; server</div>
+                <div class="floating-tools-actions">
+                    <button type="button" class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
+                    <button type="button" class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
+                    <button type="button" class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="AI Settings (provider/model per agent)">AI Settings</button>
+                    <button type="button" class="map-btn" id="reload-code-btn" onclick="reloadClientCode()" title="Reload this page (JavaScript/CSS). Does not restart Python or delete saves.">Reload code</button>
+                    <button type="button" class="map-btn" id="restart-server-btn" onclick="restartServerFromUi()" title="Restart the Python process (needs ETERNAL_CITIES_RELOAD=1). Persists the world first; keeps planning caches.">Restart server</button>
+                    <button type="button" class="map-btn" id="reset-timeline-btn" onclick="resetTimelineFromUi()" title="Reset the run clock only. Keeps map, chat, and Cartographus caches.">Reset timeline</button>
+                </div>
             </div>
         </div>
-        <div class="nav-section">
-            <div class="nav-label">Rotate</div>
-            <div class="nav-row">
-                <button class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Rotate left (Q)">Q</button>
-                <button class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Rotate right (E)">E</button>
-            </div>
-        </div>
-        <div class="nav-section">
-            <div class="nav-label">Zoom</div>
-            <div class="nav-row">
-                <button class="nav-btn" data-action="zoom" data-f="0.7" title="Zoom in (R)">+</button>
-                <button class="nav-btn" data-action="zoom" data-f="1.4" title="Zoom out (F)">&minus;</button>
-            </div>
-        </div>
-        <div class="nav-section">
-            <div class="nav-label">Tilt</div>
-            <div class="nav-row">
-                <button class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up">&#9650;</button>
-                <button class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down">&#9660;</button>
+        <div class="floating-tools-resize" id="floating-tools-resize" role="separator" aria-orientation="vertical" aria-label="Resize tools panel width" title="Drag to resize width"></div>
+    </div>
+
+    <div class="floating-hud-panel floating-camera-panel" id="floating-camera-panel">
+        <div class="floating-tools-handle" id="floating-camera-handle" title="Drag to move panel">Camera</div>
+        <div class="floating-tools-body floating-tools-body--camera">
+            <div class="nav-controls" id="nav-controls" role="toolbar" aria-label="Camera">
+                <div class="nav-section">
+                    <div class="nav-label">Move</div>
+                    <div class="nav-grid">
+                        <button type="button" class="nav-btn" data-action="pan" data-x="0" data-z="1" title="Forward (W)">W</button>
+                        <button type="button" class="nav-btn" data-action="pan" data-x="-1" data-z="0" title="Left (A)">A</button>
+                        <button type="button" class="nav-btn" data-action="pan" data-x="0" data-z="-1" title="Back (S)">S</button>
+                        <button type="button" class="nav-btn" data-action="pan" data-x="1" data-z="0" title="Right (D)">D</button>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-label">Rotate</div>
+                    <div class="nav-row">
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Rotate left (Q)">Q</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Rotate right (E)">E</button>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-label">Zoom</div>
+                    <div class="nav-row">
+                        <button type="button" class="nav-btn" data-action="zoom" data-f="0.7" title="Zoom in (R)">+</button>
+                        <button type="button" class="nav-btn" data-action="zoom" data-f="1.4" title="Zoom out (F)">&minus;</button>
+                    </div>
+                </div>
+                <div class="nav-section">
+                    <div class="nav-label">Tilt</div>
+                    <div class="nav-row">
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up">&#9650;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down">&#9660;</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- Buttons -->
-    <div class="bottom-buttons">
-        <button class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
-        <button class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
-        <button class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="AI Settings (provider/model per agent)">AI Settings</button>
-        <button class="map-btn reset-btn" id="reset-btn" onclick="resetWorld()" title="Reset and rebuild from scratch">RESET</button>
-    </div>
     <div id="tooltip"></div>
-    <div class="connection-status" id="connection-status">Connecting...</div>
 
     <!-- City selection overlay — shown on open -->
     <div class="select-overlay" id="select-overlay">
@@ -167,15 +186,19 @@
             </div>
 
             <button class="start-btn" id="start-btn" disabled>BEGIN RECONSTRUCTION</button>
+            <p class="select-reset-wrap">
+                <button type="button" class="select-reset-btn" id="select-reset-btn" onclick="resetWorld()">Clear saved world</button>
+                <span class="select-reset-hint">Full wipe including district/survey caches. To refresh code only, use Reload code or Restart server on the main view.</span>
+            </p>
         </div>
     </div>
 
     <!-- LLM backends (per agent) -->
     <div class="llm-settings-overlay" id="llm-settings-overlay" aria-hidden="true">
         <div class="llm-settings-panel">
+            <button type="button" class="popup-close-btn" onclick="closeLlmSettingsOverlay()" aria-label="Close">&times;</button>
             <div class="llm-settings-header">
                 <h2 class="llm-settings-title">AI Settings</h2>
-                <button type="button" class="close-btn" onclick="closeLlmSettingsOverlay()" aria-label="Close">&times;</button>
             </div>
             <p class="llm-settings-hint"><strong>Current</strong> is what is running now. <strong>New</strong> is what you are about to apply — click Save. Your choices are remembered for the next time you open the app. To keep an existing API key, leave the new key field blank.</p>
             <p class="llm-settings-connection-status" id="llm-settings-connection-status" aria-live="polite"></p>
@@ -183,7 +206,6 @@
             <div class="llm-settings-actions">
                 <button type="button" class="paused-dismiss-btn" id="llm-settings-reconnect-btn" onclick="reconnectAiSettings()">Reconnect</button>
                 <button type="button" class="start-btn" id="llm-settings-save-btn" onclick="saveLlmSettingsFromForm()">Save</button>
-                <button type="button" class="paused-dismiss-btn" onclick="closeLlmSettingsOverlay()">Close</button>
             </div>
         </div>
     </div>
@@ -191,12 +213,12 @@
     <!-- Paused: API limit / error / network -->
     <div class="paused-overlay" id="paused-overlay" aria-hidden="true">
         <div class="paused-content">
+            <button type="button" class="popup-close-btn" onclick="dismissPausedOverlay()" aria-label="Close">&times;</button>
             <h2 class="paused-title" id="paused-title">Build paused</h2>
             <p class="paused-summary" id="paused-body"></p>
             <pre class="paused-detail" id="paused-detail" hidden></pre>
             <div class="paused-actions">
                 <button type="button" class="start-btn" id="paused-retry-btn" onclick="resumeBuildAfterPause()">Try again</button>
-                <button type="button" class="paused-dismiss-btn" onclick="dismissPausedOverlay()">Dismiss</button>
             </div>
         </div>
     </div>

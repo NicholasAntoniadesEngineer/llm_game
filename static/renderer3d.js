@@ -74,6 +74,8 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups = new Set();
+        /** @type {number[][]|null} Elevation samples at grid corners [j][i], 0..height × 0..width */
+        this._cornerHeights = null;
         // Frustum culling (bounding spheres per building tile)
         this._frustum = new THREE.Frustum();
         this._projScreenMatrix = new THREE.Matrix4();
@@ -81,17 +83,19 @@ class WorldRenderer {
         this._cullCenter = new THREE.Vector3();
         this._instDummy = new THREE.Object3D();
 
-        // Scene — Mediterranean sky
+        // Scene — sky / fog set in _setupIblAndBackground() after renderer exists
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0xc8b89a);
-        this.scene.fog = new THREE.FogExp2(0xc8b89a, 0.00025);
 
         // Camera
-        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 5000);
+        this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 20000);
 
         // Renderer — catch WebGL failures
         try {
-            this.renderer3d = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            this.renderer3d = new THREE.WebGLRenderer({
+                antialias: true,
+                powerPreference: "high-performance",
+                logarithmicDepthBuffer: true,
+            });
         } catch (e) {
             container.innerHTML = '<p style="color:#ffd700;padding:40px;text-align:center;">WebGL unavailable. Try closing other browser tabs or restarting your browser.</p>';
             this._failed = true;
@@ -102,7 +106,7 @@ class WorldRenderer {
         this.renderer3d.shadowMap.enabled = true;
         this.renderer3d.shadowMap.type = THREE.PCFSoftShadowMap;
         this.renderer3d.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer3d.toneMappingExposure = 0.9;
+        this.renderer3d.toneMappingExposure = 0.94;
         // Recover from context loss
         this.renderer3d.domElement.addEventListener("webglcontextlost", (e) => {
             e.preventDefault();
@@ -113,25 +117,45 @@ class WorldRenderer {
         });
         container.appendChild(this.renderer3d.domElement);
 
-        // Mediterranean lighting — warm, natural, balanced
-        this.scene.add(new THREE.AmbientLight(0xfff5e6, 0.5));
-        const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
+        this._setupIblAndBackground();
+        const terrainDetail = this._createTerrainDetailMaps();
+        this._terrainRoughnessMap = terrainDetail.roughnessMap;
+        this._terrainNormalMap = terrainDetail.normalMap;
+
+        // Mediterranean lighting — balanced with IBL (scene.environment)
+        this.scene.add(new THREE.AmbientLight(0xfff5e6, 0.36));
+        const sun = new THREE.DirectionalLight(0xfff0d0, 0.92);
         sun.position.set(400, 500, 250);
         sun.castShadow = true;
         // 2048² is a good balance for many buildings; raise if GPU-bound and quality-first
         sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.normalBias = 0.028;
+        sun.shadow.bias = -0.00065;
         const sc = sun.shadow.camera;
-        sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
+        sc.near = 1;
+        sc.far = 8000;
+        sc.left = -1200;
+        sc.right = 1200;
+        sc.top = 1200;
+        sc.bottom = -1200;
         this.scene.add(sun);
-        this.scene.add(new THREE.HemisphereLight(0x8ec4e8, 0x8a7e5a, 0.35));
-        const fillLight = new THREE.DirectionalLight(0xffd4a0, 0.12);
+        this._sunLight = sun;
+        this.scene.add(new THREE.HemisphereLight(0xa8d4f0, 0x7a6e52, 0.42));
+        const fillLight = new THREE.DirectionalLight(0xffd4a0, 0.1);
         fillLight.position.set(-200, 50, -100);
         this.scene.add(fillLight);
+        const rimLight = new THREE.DirectionalLight(0xe8e2f8, 0.13);
+        rimLight.position.set(-380, 120, -420);
+        rimLight.castShadow = false;
+        this.scene.add(rimLight);
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
         this.cameraDistance = 600;
+        /** Set in init() from map diagonal; zoom uses these bounds */
+        this._camDistMin = null;
+        this._camDistMax = null;
         this.cameraTarget = new THREE.Vector3(280, 0, 280);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
@@ -180,7 +204,7 @@ class WorldRenderer {
         el.addEventListener("wheel", e => {
             // Logarithmic zoom — feels even at any distance
             const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
-            this.cameraDistance = Math.max(5, Math.min(1500, this.cameraDistance * zoomFactor));
+            this.cameraDistance = this._clampCameraDistance(this.cameraDistance * zoomFactor);
             this._updateCamera();
             e.preventDefault();
         }, { passive: false });
@@ -199,7 +223,8 @@ class WorldRenderer {
         });
     }
 
-    // Public methods for UI buttons
+    // Public methods for UI buttons (same axes as keyboard WASD in _animate)
+    // dirX: -1 = left, +1 = right (camera right on ground); dirZ: +1 = forward, -1 = back (along view on XZ).
     panCamera(dirX, dirZ) {
         if (this._failed) return;
         const speed = this.cameraDistance * 0.05;
@@ -221,8 +246,22 @@ class WorldRenderer {
 
     zoomCamera(factor) {
         if (this._failed) return;
-        this.cameraDistance = Math.max(5, Math.min(1500, this.cameraDistance * factor));
+        this.cameraDistance = this._clampCameraDistance(this.cameraDistance * factor);
         this._updateCamera();
+    }
+
+    _clampCameraDistance(d) {
+        const lo = (this._camDistMin != null && this._camDistMin > 0) ? this._camDistMin : 1.0;
+        const hi = (this._camDistMax != null && this._camDistMax > 0) ? this._camDistMax : 8000;
+        return Math.max(lo, Math.min(hi, d));
+    }
+
+    _syncPerspectiveFarPlane() {
+        const far = (this._camDistMax != null && this._camDistMax > 0)
+            ? Math.max(12000, this._camDistMax * 2.2)
+            : 20000;
+        this.camera.far = far;
+        this.camera.updateProjectionMatrix();
     }
 
     flyTo(worldX, worldZ) {
@@ -249,6 +288,169 @@ class WorldRenderer {
         this.renderer3d.setSize(w, h);
     }
 
+    /**
+     * Procedural equirect sky + PMREM for scene.environment (IBL on all MeshStandard/Physical materials).
+     */
+    _setupIblAndBackground() {
+        if (!this.renderer3d || this._failed) return;
+        const r = this.renderer3d;
+        if (THREE.sRGBEncoding !== undefined) {
+            r.outputEncoding = THREE.sRGBEncoding;
+        }
+        if (r.physicallyCorrectLights !== undefined) {
+            r.physicallyCorrectLights = true;
+        }
+
+        const skyTex = this._createProceduralSkyTexture();
+        const aniso = r.capabilities && r.capabilities.getMaxAnisotropy
+            ? Math.min(16, r.capabilities.getMaxAnisotropy())
+            : 8;
+        skyTex.anisotropy = aniso;
+        if (THREE.sRGBEncoding !== undefined) {
+            skyTex.encoding = THREE.sRGBEncoding;
+        }
+        skyTex.needsUpdate = true;
+
+        try {
+            if (typeof THREE.PMREMGenerator === "function") {
+                if (this._pmremGenerator) {
+                    try {
+                        this._pmremGenerator.dispose();
+                    } catch (e) {
+                        /* ignore */
+                    }
+                }
+                this._pmremGenerator = new THREE.PMREMGenerator(r);
+                if (typeof this._pmremGenerator.compileEquirectangularShader === "function") {
+                    this._pmremGenerator.compileEquirectangularShader();
+                }
+                const rt = this._pmremGenerator.fromEquirectangular(skyTex);
+                this.scene.environment = rt.texture;
+                this._pmremRenderTarget = rt;
+            }
+        } catch (e) {
+            console.warn("PMREM / IBL failed — continuing without environment map:", e);
+        }
+
+        this.scene.background = skyTex;
+        const fogColor = 0xbeb49a;
+        this.scene.fog = new THREE.FogExp2(fogColor, 0.00018);
+    }
+
+    /** Warm dusty horizon + soft sun for Mediterranean / ancient city mood. */
+    _createProceduralSkyTexture() {
+        const w = 1024;
+        const h = 512;
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        const top = ctx.createLinearGradient(0, 0, 0, h * 0.42);
+        top.addColorStop(0, "#9ec8e8");
+        top.addColorStop(0.45, "#d4c4a8");
+        top.addColorStop(1, "#c4a878");
+        ctx.fillStyle = top;
+        ctx.fillRect(0, 0, w, h * 0.42);
+
+        const low = ctx.createLinearGradient(0, h * 0.38, 0, h);
+        low.addColorStop(0, "#b8a888");
+        low.addColorStop(0.55, "#9a8a6a");
+        low.addColorStop(1, "#6a5a48");
+        ctx.fillStyle = low;
+        ctx.fillRect(0, h * 0.38, w, h * 0.62);
+
+        const sunX = w * 0.62;
+        const sunY = h * 0.2;
+        const sunR = Math.min(w, h) * 0.085;
+        const rg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.8);
+        rg.addColorStop(0, "rgba(255,248,220,0.95)");
+        rg.addColorStop(0.25, "rgba(255,220,160,0.35)");
+        rg.addColorStop(1, "rgba(255,200,120,0)");
+        ctx.fillStyle = rg;
+        ctx.fillRect(0, 0, w, h * 0.45);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        tex.flipY = false;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = true;
+        return tex;
+    }
+
+    /**
+     * Shared height field → roughness + tangent-space normal maps for terrain detail (tileable).
+     * @returns {{ roughnessMap: THREE.DataTexture, normalMap: THREE.DataTexture }}
+     */
+    _createTerrainDetailMaps() {
+        const size = 128;
+        const hArr = new Float32Array(size * size);
+        const sampleH = (x, y) => {
+            const nx = (x / size) * 48;
+            const ny = (y / size) * 48;
+            return (
+                Math.sin(nx * 0.31) * Math.cos(ny * 0.27) * 0.5 +
+                Math.sin(nx * 0.11 + ny * 0.13) * 0.35 +
+                Math.sin(nx * 0.07 + ny * 0.05) * 0.2
+            );
+        };
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                hArr[y * size + x] = sampleH(x, y);
+            }
+        }
+        const at = (x, y) => {
+            const ix = Math.max(0, Math.min(size - 1, x));
+            const iy = Math.max(0, Math.min(size - 1, y));
+            return hArr[iy * size + ix];
+        };
+
+        const roughData = new Uint8Array(size * size * 4);
+        const normData = new Uint8Array(size * size * 4);
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const hi = (y * size + x) * 4;
+                const hh = hArr[y * size + x];
+                const v = Math.max(0, Math.min(255, Math.floor(128 + hh * 95)));
+                roughData[hi] = v;
+                roughData[hi + 1] = v;
+                roughData[hi + 2] = v;
+                roughData[hi + 3] = 255;
+
+                const du = at(x + 1, y) - at(x - 1, y);
+                const dv = at(x, y + 1) - at(x, y - 1);
+                const n = new THREE.Vector3(-du * 1.8, 2, -dv * 1.8).normalize();
+                normData[hi] = Math.floor(n.x * 0.5 * 255 + 127.5);
+                normData[hi + 1] = Math.floor(n.y * 0.5 * 255 + 127.5);
+                normData[hi + 2] = Math.floor(n.z * 0.5 * 255 + 127.5);
+                normData[hi + 3] = 255;
+            }
+        }
+
+        const aniso = this.renderer3d && this.renderer3d.capabilities && this.renderer3d.capabilities.getMaxAnisotropy
+            ? Math.min(8, this.renderer3d.capabilities.getMaxAnisotropy())
+            : 4;
+
+        const roughTex = new THREE.DataTexture(roughData, size, size);
+        roughTex.format = THREE.RGBAFormat;
+        roughTex.wrapS = roughTex.wrapT = THREE.RepeatWrapping;
+        roughTex.repeat.set(48, 48);
+        roughTex.needsUpdate = true;
+        roughTex.anisotropy = aniso;
+
+        const normTex = new THREE.DataTexture(normData, size, size);
+        normTex.format = THREE.RGBAFormat;
+        normTex.wrapS = normTex.wrapT = THREE.RepeatWrapping;
+        normTex.repeat.set(48, 48);
+        normTex.needsUpdate = true;
+        normTex.anisotropy = aniso;
+        if (THREE.LinearEncoding !== undefined) {
+            normTex.encoding = THREE.LinearEncoding;
+        }
+
+        return { roughnessMap: roughTex, normalMap: normTex };
+    }
+
     // ─── Materials (cached for performance) ───
     _mat(color, roughness = 0.7) {
         const key = `${color}:${roughness}`;
@@ -257,7 +459,8 @@ class WorldRenderer {
             const mat = new THREE.MeshStandardMaterial({
                 color: new THREE.Color(color),
                 roughness: Math.max(0.3, Math.min(0.9, roughness)),
-                metalness: 0.01,
+                metalness: 0.02,
+                envMapIntensity: 0.78,
             });
             mat._cached = true;
             this._matCache.set(key, mat);
@@ -288,6 +491,7 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups.clear();
+        this._cornerHeights = null;
     }
 
     _disposeGroupResources(group) {
@@ -306,6 +510,151 @@ class WorldRenderer {
         }));
     }
 
+    /**
+     * Per-corner elevation (0..1) from adjacent tile elevations — smooth heightfield.
+     * Corner (i,j) in world sits at (i*S, j*S); each tile has one nominal elevation.
+     */
+    _computeCornerHeightGrid() {
+        const gw = this.width;
+        const gh = this.height;
+        const H = [];
+        for (let j = 0; j <= gh; j++) {
+            const row = [];
+            for (let i = 0; i <= gw; i++) {
+                let sum = 0;
+                let n = 0;
+                for (const [tx, ty] of [[i - 1, j - 1], [i, j - 1], [i - 1, j], [i, j]]) {
+                    if (tx >= 0 && ty >= 0 && tx < gw && ty < gh) {
+                        const t = this.grid[ty][tx];
+                        const e = t && t.elevation != null ? Number(t.elevation) : 0;
+                        if (Number.isFinite(e)) {
+                            sum += e;
+                            n++;
+                        }
+                    }
+                }
+                row.push(n ? sum / n : 0);
+            }
+            H.push(row);
+        }
+        return H;
+    }
+
+    /**
+     * Bilinear surface Y (world units) matching the terrain mesh at (x,z).
+     */
+    _surfaceYAtWorldXZ(x, z) {
+        const S = TILE_SIZE;
+        const gw = this.width;
+        const gh = this.height;
+        const H = this._cornerHeights;
+        if (!H || !H.length) return 0;
+        const gx = x / S;
+        const gz = z / S;
+        const i0 = Math.min(Math.max(0, Math.floor(gx)), gw);
+        const j0 = Math.min(Math.max(0, Math.floor(gz)), gh);
+        const i1 = Math.min(i0 + 1, gw);
+        const j1 = Math.min(j0 + 1, gh);
+        const u = gx - i0;
+        const v = gz - j0;
+        const h00 = H[j0][i0];
+        const h10 = H[j0][i1];
+        const h01 = H[j1][i0];
+        const h11 = H[j1][i1];
+        const h0 = h00 * (1 - u) + h10 * u;
+        const h1 = h01 * (1 - u) + h11 * u;
+        const h = h0 * (1 - v) + h1 * v;
+        return h * S;
+    }
+
+    _buildTerrainHeightfieldMesh(S, earthColor, minH, maxH) {
+        const gw = this.width;
+        const gh = this.height;
+        const H = this._cornerHeights;
+        const positions = [];
+        const indices = [];
+        const idx = (i, j) => j * (gw + 1) + i;
+        const uvs = [];
+        const colors = [];
+        const baseCol = new THREE.Color(earthColor);
+        const colorLow = baseCol.clone().multiplyScalar(0.78).lerp(new THREE.Color(0x5a7a88), 0.12);
+        const colorHigh = baseCol.clone().multiplyScalar(1.14).lerp(new THREE.Color(0xd8c898), 0.18);
+        const hSpan = maxH > minH ? maxH - minH : 1;
+        const tmpCol = new THREE.Color();
+        for (let j = 0; j <= gh; j++) {
+            for (let i = 0; i <= gw; i++) {
+                const hTile = H[j][i];
+                const y = hTile * S;
+                positions.push(i * S, y, j * S);
+                uvs.push(i / Math.max(1, gw), j / Math.max(1, gh));
+                const t = Math.max(0, Math.min(1, (hTile - minH) / hSpan));
+                tmpCol.copy(colorLow).lerp(colorHigh, t);
+                colors.push(tmpCol.r, tmpCol.g, tmpCol.b);
+            }
+        }
+        for (let j = 0; j < gh; j++) {
+            for (let i = 0; i < gw; i++) {
+                const a = idx(i, j);
+                const b = idx(i + 1, j);
+                const c = idx(i, j + 1);
+                const d = idx(i + 1, j + 1);
+                indices.push(a, b, d, a, d, c);
+            }
+        }
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+        geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geom.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+        geom.setIndex(indices);
+        geom.computeVertexNormals();
+        const matParams = {
+            color: 0xffffff,
+            vertexColors: true,
+            metalness: 0.04,
+            envMapIntensity: 0.62,
+            flatShading: false,
+        };
+        if (this._terrainRoughnessMap) {
+            matParams.roughnessMap = this._terrainRoughnessMap;
+            matParams.roughness = 1;
+        } else {
+            matParams.roughness = 0.9;
+        }
+        if (this._terrainNormalMap) {
+            matParams.normalMap = this._terrainNormalMap;
+            matParams.normalScale = new THREE.Vector2(0.45, 0.45);
+        }
+        const mat = new THREE.MeshStandardMaterial(matParams);
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.receiveShadow = true;
+        mesh.castShadow = false;
+        mesh.userData.isTerrainHeightfield = true;
+        return mesh;
+    }
+
+    /** If Urbanista used Greco-Roman template ids but tradition or name is Mesoamerican, swap to regional massing. */
+    _maybeMesoamericanTemplateId(templateId, spec, tile) {
+        let id = String(templateId);
+        const trad = spec && spec.tradition != null ? String(spec.tradition).toLowerCase() : "";
+        const bn = tile && tile.building_name != null ? String(tile.building_name).toLowerCase() : "";
+        const meso =
+            trad.includes("mesoamerican") ||
+            trad.includes("aztec") ||
+            trad.includes("mexica") ||
+            trad.includes("tenochtitlan") ||
+            trad.includes("nahua") ||
+            trad.includes("templo") ||
+            bn.includes("templo") ||
+            bn.includes("teocalli") ||
+            bn.includes("calpulli") ||
+            bn.includes("tlatoani");
+        if (!meso) return id;
+        if (id === "temple") return "mesoamerican_temple";
+        if (id === "monument") return "mesoamerican_shrine";
+        if (id === "basilica" || id === "market") return "mesoamerican_civic";
+        return id;
+    }
+
     // ─── Init ───
     init(worldState) {
         this._clearScene();
@@ -313,25 +662,82 @@ class WorldRenderer {
         this.height = worldState.height;
         this.grid = worldState.grid;
         const S = TILE_SIZE;
-        this.cameraTarget.set(this.width * S / 2, 0, this.height * S / 2);
+        this._cornerHeights = this._computeCornerHeightGrid();
+
+        let minH = 0;
+        let maxH = 0;
+        for (const row of this._cornerHeights) {
+            for (const v of row) {
+                if (v < minH) minH = v;
+                if (v > maxH) maxH = v;
+            }
+        }
+        const midY = ((minH + maxH) / 2) * S;
+        const mapW = this.width * S;
+        const mapH = this.height * S;
+        const diagonal = Math.hypot(mapW, mapH);
+        this._camDistMin = 0.8;
+        this._camDistMax = Math.max(5200, diagonal * 2.75);
+        this.cameraDistance = this._clampCameraDistance(diagonal * 0.45);
+
+        if (this._sunLight && this._sunLight.shadow) {
+            const sc = this._sunLight.shadow.camera;
+            const half = Math.max(mapW, mapH) * 0.52;
+            sc.left = -half;
+            sc.right = half;
+            sc.top = half;
+            sc.bottom = -half;
+            sc.far = Math.max(6000, diagonal * 3.5);
+            sc.updateProjectionMatrix();
+            const shadowMapSize = diagonal > 1400 ? 4096 : 2048;
+            this._sunLight.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+        }
+
+        this.cameraTarget.set(mapW / 2, midY, mapH / 2);
+        this._syncPerspectiveFarPlane();
         this._updateCamera();
 
-        // Ground
-        const gw = this.width * S + 10, gh = this.height * S + 10;
-        const ground = new THREE.Mesh(
-            new THREE.PlaneGeometry(gw, gh),
-            new THREE.MeshStandardMaterial({ color: 0x8B7D5E, roughness: 0.95 })
-        );
-        ground.rotation.x = -Math.PI / 2;
-        ground.position.set(this.width * S / 2, -0.02, this.height * S / 2);
-        ground.receiveShadow = true;
-        this.scene.add(ground);
+        // Earth tone heightfield — matches _surfaceYAtWorldXZ for building / terrain props
+        const earth = 0x9a7b52;
+        const terrainMesh = this._buildTerrainHeightfieldMesh(S, earth, minH, maxH);
+        this.scene.add(terrainMesh);
 
-        // Grid
+        // Distant water / lake bed (below lowest terrain)
+        const waterY = minH * S - S * 0.35;
+        const gw = this.width * S + 24;
+        const gh = this.height * S + 24;
+        const waterMat =
+            typeof THREE.MeshPhysicalMaterial === "function"
+                ? new THREE.MeshPhysicalMaterial({
+                    color: 0x1a4a68,
+                    roughness: 0.22,
+                    metalness: 0.1,
+                    envMapIntensity: 1.1,
+                    transparent: true,
+                    opacity: 0.9,
+                    clearcoat: 0.45,
+                    clearcoatRoughness: 0.18,
+                })
+                : new THREE.MeshStandardMaterial({
+                    color: 0x2a5f7a,
+                    roughness: 0.55,
+                    metalness: 0.08,
+                    envMapIntensity: 0.95,
+                    transparent: true,
+                    opacity: 0.9,
+                });
+        const water = new THREE.Mesh(new THREE.PlaneGeometry(gw, gh), waterMat);
+        water.rotation.x = -Math.PI / 2;
+        water.position.set(this.width * S / 2, waterY, this.height * S / 2);
+        water.receiveShadow = true;
+        water.userData.isWaterPlane = true;
+        this.scene.add(water);
+
+        // Grid — slightly above lowest ground so it stays visible on slopes
         const gridSize = Math.max(this.width, this.height) * S;
-        const grid = new THREE.GridHelper(gridSize, Math.max(this.width, this.height), 0x9a8e6b, 0x9a8e6b);
-        grid.position.set(this.width * S / 2, 0.005, this.height * S / 2);
-        grid.material.opacity = 0.06;
+        const grid = new THREE.GridHelper(gridSize, Math.max(this.width, this.height), 0x6a5c40, 0x6a5c40);
+        grid.position.set(this.width * S / 2, minH * S + 0.04, this.height * S / 2);
+        grid.material.opacity = 0.07;
         grid.material.transparent = true;
         this.scene.add(grid);
 
@@ -799,8 +1205,9 @@ class WorldRenderer {
                     return { ok: false, error: err, key };
                 }
                 try {
+                    const templateIdResolved = this._maybeMesoamericanTemplateId(String(tmpl.id), spec, tile);
                     resolvedComponents = globalThis.expandParametricTemplate(
-                        String(tmpl.id),
+                        templateIdResolved,
                         tmpl.params && typeof tmpl.params === "object" ? tmpl.params : {},
                         tileW,
                         tileD
@@ -824,12 +1231,7 @@ class WorldRenderer {
             }
         }
 
-        let elev = tile.elevation || 0;
-        if (spec && spec.anchor && this.grid) {
-            const anchorTile = this.grid[spec.anchor.y] && this.grid[spec.anchor.y][spec.anchor.x];
-            if (anchorTile) elev = anchorTile.elevation || 0;
-        }
-        const elevation = elev * S;
+        const elevation = this._surfaceYAtWorldXZ(centerX, centerZ);
 
         const group = new THREE.Group();
         group.position.set(centerX, elevation, centerZ);
@@ -2097,8 +2499,8 @@ class WorldRenderer {
             if (this._keysDown.has("q")) this.cameraAngle += 0.02;
             if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
             // R/F zoom
-            if (this._keysDown.has("r")) this.cameraDistance = Math.max(5, this.cameraDistance * 0.97);
-            if (this._keysDown.has("f")) this.cameraDistance = Math.min(500, this.cameraDistance * 1.03);
+            if (this._keysDown.has("r")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 0.97);
+            if (this._keysDown.has("f")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 1.03);
             this._updateCamera();
         }
         // Animate only groups that are currently dropping in

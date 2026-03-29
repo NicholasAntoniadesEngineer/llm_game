@@ -339,6 +339,118 @@
     }
 
     /**
+     * Talud-tablero–style stepped massing (stacked slabs) for twin-temple / pyramid cores.
+     * Params: tiers, stone_color, tablero_color, base_color, shrine_color, roof_color, podium_steps, windows.
+     */
+    function mesoamericanPyramidSlabs(p, scale, tileW, tileD) {
+        const tiers = clampInt(p.tiers != null ? p.tiers : 5, 3, 12);
+        const stone = hexColor(p.stone_color, "#A85A28");
+        const tablero = hexColor(p.tablero_color, "#E8D4BE");
+        const parts = [];
+        let yCursor = 0;
+        const w = Math.max(0.35, Number(tileW) || 0.9);
+        const d = Math.max(0.35, Number(tileD) || 0.9);
+        for (let t = 0; t < tiers; t++) {
+            const frac = 1 - (t / tiers) * 0.68;
+            const wx = w * 0.46 * frac;
+            const dz = d * 0.46 * frac;
+            const dy = (0.048 + (t % 2) * 0.014) * scale;
+            const col = t % 2 === 0 ? stone : tablero;
+            parts.push({
+                shape: "box",
+                size: [wx, dy, dz],
+                position: [0, yCursor + dy / 2, 0],
+                color: col,
+                roughness: 0.82,
+            });
+            yCursor += dy;
+        }
+        return parts;
+    }
+
+    function mesoamerican_temple(params, tileW, tileD) {
+        const refW = 2.7;
+        const refD = 2.7;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            {
+                type: "podium",
+                steps: clampInt(p.podium_steps != null ? p.podium_steps : 8, 4, 16),
+                height: 0.2,
+                color: hexColor(p.base_color, "#8B4A1A"),
+            },
+            {
+                type: "procedural",
+                stack_role: "structural",
+                stack_priority: 0,
+                parts: mesoamericanPyramidSlabs(p, scale, tileW, tileD),
+            },
+            {
+                type: "block",
+                stack_priority: 1,
+                stories: 1,
+                storyHeight: 0.14,
+                color: hexColor(p.shrine_color, "#D4C4A8"),
+                windows: clampInt(p.windows != null ? p.windows : 2, 0, 6),
+                windowColor: "#2a1810",
+            },
+            { type: "flat_roof", color: hexColor(p.roof_color, "#B84520"), overhang: 0.025 },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    function mesoamerican_shrine(params, tileW, tileD) {
+        const refW = 1.8;
+        const refD = 1.8;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({ tiers: 3 }, params);
+        const base = [
+            {
+                type: "podium",
+                steps: clampInt(p.podium_steps != null ? p.podium_steps : 5, 2, 10),
+                height: 0.12,
+                color: hexColor(p.base_color, "#9A4A18"),
+            },
+            {
+                type: "procedural",
+                stack_role: "structural",
+                stack_priority: 0,
+                parts: mesoamericanPyramidSlabs(p, scale, tileW * 0.85, tileD * 0.85),
+            },
+            {
+                type: "statue",
+                height: 0.22,
+                color: hexColor(p.statue_color, "#5A4A3A"),
+                pedestalColor: hexColor(p.pedestal_color, "#C8B8A0"),
+            },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /** Courtyard house / palace wing — adobe block massing, few openings, flat roof (no Greco-Roman colonnade). */
+    function mesoamerican_civic(params, tileW, tileD) {
+        const refW = 3.6;
+        const refD = 2.7;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            {
+                type: "block",
+                stories: clampInt(p.stories != null ? p.stories : 2, 1, 3),
+                storyHeight: 0.32,
+                color: hexColor(p.adobe_color, "#B8956A"),
+                windows: clampInt(p.windows != null ? p.windows : 5, 1, 16),
+                windowColor: "#1A1008",
+            },
+            { type: "awning", color: hexColor(p.awning_color, "#8B3A2A") },
+            { type: "flat_roof", color: hexColor(p.roof_color, "#A07040"), overhang: 0.04 },
+            { type: "door", width: 0.14, height: 0.24, color: hexColor(p.door_color, "#4A2810") },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /**
      * Generic / culture-agnostic: full component list from the model (Egyptian, Amazonian, any era).
      * params.components — required, non-empty array (same schema as spec.components).
      * params.ref_w, params.ref_d — optional positive numbers; if both set, scale scalars like golden_specs.
@@ -383,6 +495,9 @@
         gate,
         wall,
         aqueduct,
+        mesoamerican_temple,
+        mesoamerican_shrine,
+        mesoamerican_civic,
     };
 
     /**

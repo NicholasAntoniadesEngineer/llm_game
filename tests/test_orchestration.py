@@ -148,7 +148,6 @@ class LlmAgentsConfigTests(unittest.TestCase):
             llm_agents.KEY_CARTOGRAPHUS_SKELETON,
             llm_agents.KEY_CARTOGRAPHUS_REFINE,
             llm_agents.KEY_CARTOGRAPHUS_SURVEY,
-            llm_agents.KEY_HISTORICUS,
             llm_agents.KEY_URBANISTA,
         ):
             spec = llm_agents.get_agent_llm_spec(key)

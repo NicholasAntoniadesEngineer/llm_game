@@ -12,7 +12,6 @@ from llm_agents import (
     KEY_CARTOGRAPHUS_REFINE,
     KEY_CARTOGRAPHUS_SKELETON,
     KEY_CARTOGRAPHUS_SURVEY,
-    KEY_HISTORICUS,
     KEY_URBANISTA,
 )
 from agents.prompts import (
@@ -20,14 +19,12 @@ from agents.prompts import (
     CARTOGRAPHUS_PLAN_REFINE,
     CARTOGRAPHUS_SURVEY,
     URBANISTA,
-    HISTORICUS,
 )
 import config as config_module
 from config import (
     STEP_DELAY,
     GRID_WIDTH,
     GRID_HEIGHT,
-    HISTORICUS_MAX_CONCURRENT,
     URBANISTA_MAX_CONCURRENT,
     SURVEY_MAX_CONCURRENT,
     SURVEY_BUILDINGS_PER_CHUNK,
@@ -39,11 +36,7 @@ from orchestration.validation import (
     validate_urbanista_arch_result,
     UrbanistaValidationError,
 )
-from orchestration.reference_db import (
-    format_reference_for_historicus,
-    format_reference_for_prompt,
-    lookup_architectural_reference,
-)
+from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
 from orchestration.placement import check_functional_placement, log_functional_placement_warnings
 from persistence import save_state, save_districts_cache, load_districts_cache, save_surveys_cache, load_surveys_cache
 
@@ -79,21 +72,22 @@ class BuildEngine:
             CARTOGRAPHUS_SURVEY,
             llm_agent_key=KEY_CARTOGRAPHUS_SURVEY,
         )
-        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, llm_agent_key=KEY_HISTORICUS)
         self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, llm_agent_key=KEY_URBANISTA)
-        self._historicus_semaphore = asyncio.Semaphore(HISTORICUS_MAX_CONCURRENT)
         self._survey_semaphore = asyncio.Semaphore(SURVEY_MAX_CONCURRENT)
         self._urbanista_semaphore = asyncio.Semaphore(URBANISTA_MAX_CONCURRENT)
         self._structures_since_save = 0
         self._survey_task_by_index: dict[int, asyncio.Task] = {}
         self._map_refine_task: asyncio.Task | None = None
+        self._map_refine_pending = False
         self._fused_seed_master_plan: list | None = None
         self._survey_cache_lock = asyncio.Lock()
+        self._run_task: asyncio.Task | None = None
 
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario (sync; cancel tasks from async)."""
         self._survey_task_by_index.clear()
         self._map_refine_task = None
+        self._map_refine_pending = False
         self._fused_seed_master_plan = None
         self._structures_since_save = 0
 
@@ -101,62 +95,132 @@ class BuildEngine:
         """Cancel background survey/refine tasks (e.g. new city selected or reset)."""
         await self._cancel_survey_and_refine_tasks()
 
-    async def run(self):
-        self.running = True
-        logger.info("BuildEngine started — Ave Roma!")
-        await asyncio.sleep(2)
+    async def cancel_run_task_join(self) -> None:
+        """Cancel the asyncio Task driving ``run()``, if any, and wait until it finishes."""
+        task = self._run_task
+        if task is None:
+            return
+        if task.done():
+            self._run_task = None
+            return
+        logger.info("Cancelling build engine run task — waiting for run() to exit")
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Build engine run task ended with an exception", exc_info=True)
+        finally:
+            if self._run_task is task:
+                self._run_task = None
 
-        # ─── PHASE 0: district skeleton (cached or fresh two-phase discovery) ───
-        if not self.districts:
-            discovery_ok = await self._discover_districts()
-            if not discovery_ok:
+    async def schedule_run(self) -> asyncio.Task:
+        """Start ``run()`` as a tracked task; joins any prior run task first (idempotent)."""
+        await self.cancel_run_task_join()
+        new_task = asyncio.create_task(self.run())
+        self._run_task = new_task
+
+        def _on_done(t: asyncio.Task) -> None:
+            if self._run_task is t:
+                self._run_task = None
+
+        new_task.add_done_callback(_on_done)
+        return new_task
+
+    async def graceful_shutdown(self):
+        """Stop the build loop, cancel prefetch/refine, and join the main ``run()`` task."""
+        self.running = False
+        await self._cancel_survey_and_refine_tasks()
+        await self.cancel_run_task_join()
+
+    async def run(self):
+        try:
+            self.running = True
+            logger.info("BuildEngine started — Ave Roma!")
+            await asyncio.sleep(2)
+
+            # ─── PHASE 0: district skeleton (cached or fresh two-phase discovery) ───
+            if not self.districts:
+                discovery_ok = await self._discover_districts()
+                if not discovery_ok:
+                    self.running = False
+                    return
+            else:
+                self._fused_seed_master_plan = None
+
+            # ─── Survey first: only the current district (unblocks buildings ASAP). ───
+            # Previously we prefetched all districts at once; only SURVEY_MAX_CONCURRENT run, so the
+            # active district could wait behind later districts and sit "thinking" with no tiles.
+            self._survey_task_by_index.clear()
+            self._start_survey_tasks_from_index(self.district_index, self.district_index + 1)
+            if len(self.districts) > self.district_index + 1:
+                logger.info(
+                    "Survey priority: district %s/%s first; remaining districts prefetch after this survey completes",
+                    self.district_index + 1,
+                    len(self.districts),
+                )
+
+            build_loop_cancelled = False
+            # ─── Build each district (survey may still be running ahead for later districts) ───
+            try:
+                while self.running and self.district_index < len(self.districts):
+                    district = self.districts[self.district_index]
+                    logger.info(f"=== District: {district['name']} ===")
+
+                    self.world.current_period = district.get("period", "")
+                    self.world.current_year = district.get("year", -44)
+
+                    await self.broadcast({"type": "phase", "district": district["name"], "description": district.get("description", "")})
+                    await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
+
+                    try:
+                        master_plan = await self._await_survey_for_district_index(self.district_index)
+                    except asyncio.CancelledError:
+                        build_loop_cancelled = True
+                        break
+                    except AgentGenerationError as err:
+                        await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
+                        break
+
+                    if self._map_refine_pending and self._map_refine_task is None:
+                        self._map_refine_pending = False
+                        self._map_refine_task = asyncio.create_task(self._refine_map_description_background())
+                        logger.info("Map description refine started after first district survey (non-blocking).")
+
+                    # Prefetch surveys for later districts while Urbanista builds this one.
+                    if self.district_index + 1 < len(self.districts):
+                        n_rest = len(self.districts) - self.district_index - 1
+                        self._start_survey_tasks_from_index(self.district_index + 1, len(self.districts))
+                        if self.district_index == 0:
+                            await self._chat(
+                                "cartographus",
+                                "info",
+                                f"Prefetching {n_rest} other district survey(s) in parallel while the first district is built.",
+                            )
+
+                    district_ok = await self._build_district(district, master_plan)
+                    if not district_ok:
+                        break
+
+                    self.district_index += 1
+                    await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
+                    logger.info(f"=== Completed: {district['name']} ===")
+            finally:
+                await self._await_map_refine_task()
+
+            if build_loop_cancelled:
                 self.running = False
                 return
-        else:
-            self._fused_seed_master_plan = None
 
-        # ─── Prefetch surveys for all not-yet-built districts (parallel) ───
-        self._start_survey_tasks_from_index(self.district_index)
-
-        build_loop_cancelled = False
-        # ─── Build each district (survey may still be running ahead for later districts) ───
-        try:
-            while self.running and self.district_index < len(self.districts):
-                district = self.districts[self.district_index]
-                logger.info(f"=== District: {district['name']} ===")
-
-                self.world.current_period = district.get("period", "")
-                self.world.current_year = district.get("year", -44)
-
-                await self.broadcast({"type": "phase", "district": district["name"], "description": district.get("description", "")})
-                await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
-
-                try:
-                    master_plan = await self._await_survey_for_district_index(self.district_index)
-                except asyncio.CancelledError:
-                    build_loop_cancelled = True
-                    break
-                except AgentGenerationError as err:
-                    await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
-                    break
-
-                district_ok = await self._build_district(district, master_plan)
-                if not district_ok:
-                    break
-
-                self.district_index += 1
-                await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
-                logger.info(f"=== Completed: {district['name']} ===")
-        finally:
-            await self._await_map_refine_task()
-
-        if build_loop_cancelled:
+            if self.running:
+                await self.broadcast({"type": "complete"})
             self.running = False
-            return
 
-        if self.running:
-            await self.broadcast({"type": "complete"})
-        self.running = False
+        except asyncio.CancelledError:
+            self.running = False
+            logger.info("BuildEngine.run cancelled")
+            raise
 
     async def _discover_districts(self) -> bool:
         """Load cached layout, or run phase-1 skeleton planner then background map refine."""
@@ -225,7 +289,9 @@ class BuildEngine:
             self._fused_seed_master_plan = None
 
         save_districts_cache(self.districts, "")
-        self._map_refine_task = asyncio.create_task(self._refine_map_description_background())
+        # Defer long map narrative until after the first district survey completes so it does not
+        # compete with the survey + Urbanista on the Claude CLI (same user log: refine + 3 surveys at once).
+        self._map_refine_pending = True
         asyncio.create_task(self._find_map_image())
         return True
 
@@ -240,30 +306,43 @@ class BuildEngine:
         summaries = {
             "rate_limit": "Build paused: the AI service rate limit was reached. Wait a bit, then try again.",
             "api_error": "Build paused: the AI service reported an error. Check your account, plan, and CLI login, then try again.",
+            "bad_model_output": "Build paused: the model response could not be used (expected JSON). Read the detail below and check the server log for a full preview.",
             "network": "Build paused: a network or connectivity issue occurred. Check your internet connection, then try again.",
             "cli_missing": "Build paused: the Claude CLI was not found. Install it and ensure it is on your PATH.",
             "unknown": "Build paused after an unexpected error. Check logs and try again.",
         }
         summary = summaries.get(pause_reason, summaries["unknown"])
-        logger.warning(f"Paused ({pause_reason}): {(pause_detail[:200] if pause_detail else summary)}")
+        logger.error(
+            "Build paused | reason=%s agent=%s summary=%s | detail=%s",
+            pause_reason,
+            agent_role,
+            summary,
+            pause_detail[:2000] if pause_detail else "(none)",
+        )
         await self.broadcast({
             "type": "paused",
             "reason": pause_reason,
             "summary": summary,
-            "detail": pause_detail[:500] if pause_detail else "",
+            "detail": pause_detail[:1200] if pause_detail else "",
             "agent": agent_role,
         })
-        for agent_name in ("imperator", "cartographus", "urbanista", "historicus", "faber", "civis"):
+        for agent_name in ("imperator", "cartographus", "urbanista", "faber", "civis"):
             await self._set_status(agent_name, "idle")
 
     async def _cancel_survey_and_refine_tasks(self):
-        for _idx, task in list(self._survey_task_by_index.items()):
+        for prefetch_index, task in list(self._survey_task_by_index.items()):
             if not task.done():
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "Survey prefetch task district_index=%s ended with: %s",
+                    prefetch_index,
+                    exc,
+                )
         self._survey_task_by_index.clear()
         rt = self._map_refine_task
         if rt and not rt.done():
@@ -300,9 +379,11 @@ class BuildEngine:
                 f"Year span: {config_module.SCENARIO['year_start']} — {config_module.SCENARIO['year_end']}.\n"
                 f"Ruler context: {config_module.SCENARIO['ruler']}.\n\n"
                 f"FIXED district skeleton (names and regions are authoritative):\n{skeleton_payload}\n\n"
-                f"Write map_description as a detailed archaeologist's overview of the whole city at this time."
+                f"Write map_description as a very long, multi-paragraph archaeologist's overview of the whole city at this time: "
+                f"terrain, hydrology, walls, arteries, landmark sightlines, district character, sensory texture, and what distinguishes "
+                f"this decade from earlier/later phases. Avoid short summaries."
             )
-            result = await self.planner_refine.generate(instruction)
+            result = await self.planner_refine.generate(instruction, allow_prose_fallback="map_refine")
             if not self.running:
                 return
             map_desc = (result.get("map_description") or "").strip()
@@ -321,11 +402,36 @@ class BuildEngine:
         except Exception as e:
             logger.warning("Map refine failed (non-fatal): %s", e)
 
-    def _start_survey_tasks_from_index(self, start_index: int):
-        """Launch parallel survey tasks for districts [start_index .. end)."""
-        self._survey_task_by_index.clear()
-        for i in range(start_index, len(self.districts)):
-            self._survey_task_by_index[i] = asyncio.create_task(self._survey_work_item(i))
+    def _log_survey_prefetch_outcome(self, district_index: int, task: asyncio.Task) -> None:
+        """Call task.exception() so asyncio does not log 'Task exception was never retrieved'."""
+        try:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.debug(
+                    "Prefetch survey task exception retrieved (district_index=%s): %s",
+                    district_index,
+                    exc,
+                )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("[roma.engine] Survey prefetch done-callback error")
+
+    def _start_survey_tasks_from_index(self, start_index: int, end_index: int | None = None):
+        """Launch survey tasks for districts [start_index, end_index). Skips indices already running."""
+        if end_index is None:
+            end_index = len(self.districts)
+        for i in range(start_index, end_index):
+            existing = self._survey_task_by_index.get(i)
+            if existing is not None and not existing.done():
+                continue
+            survey_task = asyncio.create_task(self._survey_work_item(i))
+            survey_task.add_done_callback(
+                lambda t, idx=i: self._log_survey_prefetch_outcome(idx, t)
+            )
+            self._survey_task_by_index[i] = survey_task
 
     async def _await_survey_for_district_index(self, index: int) -> list:
         task = self._survey_task_by_index.get(index)
@@ -472,16 +578,27 @@ class BuildEngine:
             f"3. OPEN SPACES: forum, garden, water as needed.\n"
             f"4. ELEVATION per tile.\n"
             f"5. SPACING: historically accurate.\n\n"
-            f"Include 'description' and 'historical_note' for EVERY structure."
+            f"For EVERY structure, write RICH prose (see system prompt): `description` = long Historian layer "
+            f"(form, orientation, materials, circulation, condition at this date); `historical_note` = long evidence layer "
+            f"(sources, phases, excavations, measurable facts). Thin one-liners are not acceptable."
         )
 
-    async def _historicus_generate_bounded(self, prompt: str) -> dict:
-        async with self._historicus_semaphore:
-            return await self.historicus.generate(prompt)
-
     async def _surveyor_generate_bounded(self, prompt: str) -> dict:
-        async with self._survey_semaphore:
-            return await self.surveyor.generate(prompt)
+        for attempt in range(2):
+            try:
+                async with self._survey_semaphore:
+                    return await self.surveyor.generate(prompt)
+            except AgentGenerationError as err:
+                retriable = err.pause_reason in ("bad_model_output", "api_error", "network")
+                if attempt == 0 and retriable:
+                    logger.warning(
+                        "[roma.engine] Surveyor call failed (%s), retrying once: %s",
+                        err.pause_reason,
+                        err.pause_detail[:200] if err.pause_detail else "",
+                    )
+                    await asyncio.sleep(1.5)
+                    continue
+                raise
 
     async def _urbanista_generate_bounded(self, prompt: str) -> dict:
         async with self._urbanista_semaphore:
@@ -578,14 +695,13 @@ class BuildEngine:
                     sum(t["y"] for t in stiles) / len(stiles),
                 )
 
-        # ─── Batch all Historicus calls in parallel for speed ───
-        hist_prompts = []
+        # ─── Neighbor context per structure; physical brief from Cartographus survey only (no Historicus LLM) ───
+        structure_contexts: list[dict] = []
         buildable = []
         for struct_idx, structure in enumerate(master_plan):
             name = structure.get("name", "Structure")
             btype = structure.get("building_type", "building")
             tiles = structure.get("tiles", [])
-            desc = structure.get("description", "")
             if not tiles:
                 continue
             first_tile = tiles[0]
@@ -617,51 +733,12 @@ class BuildEngine:
                 for n in nearest
             )
 
-            ref_hist_entry = lookup_architectural_reference(btype, city_loc, district_ref_year_i)
-            ref_hist_block = format_reference_for_historicus(ref_hist_entry)
-            ref_hist_section = f"{ref_hist_block}\n\n" if ref_hist_block else ""
-
-            hist_prompts.append({
-                "structure": structure,
+            structure_contexts.append({
                 "neighbor_desc": neighbor_desc,
                 "nearest": nearest,
-                "prompt": (
-                    f"Describe and fact-check: {name} ({btype})\n"
-                    f"In {district['name']}, year {district.get('year', '')} ({district.get('period', '')})\n"
-                    f"City context: {city_loc}, {scenario.get('period', '')}\n"
-                    f"Context: {desc}\n"
-                    f"NEARBY STRUCTURES (distances are real-world meters):\n{neighbor_desc}\n\n"
-                    f"{ref_hist_section}"
-                    f"Include detailed physical appearance for the Architect. "
-                    f"Give explicit dimensions in meters and material colors where sources allow. "
-                    f"Mention how this building relates spatially to its neighbors."
-                ),
             })
 
-        # Fire all Historicus calls in parallel
-        hist_results = []
-        if hist_prompts:
-            await self._set_status("historicus", "thinking")
-            await self._chat(
-                "historicus",
-                "info",
-                f"Researching {len(hist_prompts)} structures (max {HISTORICUS_MAX_CONCURRENT} concurrent)...",
-            )
-            hist_tasks = [self._historicus_generate_bounded(hp["prompt"]) for hp in hist_prompts]
-            hist_results = await asyncio.gather(*hist_tasks, return_exceptions=True)
-            await self._set_status("historicus", "idle")
-            for hist_result in hist_results:
-                if isinstance(hist_result, AgentGenerationError):
-                    await self._pause_for_api_issue(
-                        hist_result.pause_reason,
-                        hist_result.pause_detail,
-                        "historicus",
-                    )
-                    return False
-                if isinstance(hist_result, BaseException):
-                    raise hist_result
-
-        # ─── Narrative pass, then bounded-parallel Urbanista, then ordered placement ───
+        # ─── Bounded-parallel Urbanista, then ordered placement ───
         urban_jobs: list[dict] = []
         for idx, structure in enumerate(buildable):
             if not self.running:
@@ -670,21 +747,24 @@ class BuildEngine:
             name = structure.get("name", "Structure")
             btype = structure.get("building_type", "building")
             tiles = structure.get("tiles", [])
-            desc = structure.get("description", "")
-            hist_note = structure.get("historical_note", "")
-            hp = hist_prompts[idx]
-            hist_result = hist_results[idx]
-            neighbor_desc = hp["neighbor_desc"]
-            nearest = hp["nearest"]
+            desc = (structure.get("description") or "").strip()
+            hist_note = (structure.get("historical_note") or "").strip()
+            ctx = structure_contexts[idx]
+            neighbor_desc = ctx["neighbor_desc"]
+            nearest = ctx["nearest"]
 
             await self._chat("cartographus", "info",
                 f"Building: {name} ({btype}, {len(tiles)} tiles). "
                 + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""))
 
-            hist_desc = hist_result.get("commentary", "")
-            await self._set_status("historicus", "speaking")
-            await self._chat("historicus", "fact_check", hist_desc)
-            await self._set_status("historicus", "idle")
+            hist_result = {
+                "commentary": desc or f"{name} ({btype}) in {district.get('name', 'this district')}.",
+                "historical_note": hist_note,
+            }
+            physical_desc = hist_result["commentary"]
+            hist_detail = hist_result.get("historical_note", "")
+            if hist_detail:
+                physical_desc += f"\n\nSurveyor detail: {hist_detail}"
 
             xs = [t["x"] for t in tiles]
             ys = [t["y"] for t in tiles]
@@ -693,11 +773,6 @@ class BuildEngine:
             footprint_w = round(tile_w * 0.9, 2)
             footprint_d = round(tile_d * 0.9, 2)
             anchor_x, anchor_y = min(xs), min(ys)
-
-            physical_desc = hist_desc
-            hist_detail = hist_result.get("historical_note", "")
-            if hist_detail:
-                physical_desc += f"\n\nArchaeological detail: {hist_detail}"
 
             tile_elevations = [t.get("elevation", district.get("elevation", 0.0)) for t in tiles]
             avg_elevation = round(sum(tile_elevations) / len(tile_elevations), 2) if tile_elevations else 0.0
@@ -714,7 +789,7 @@ class BuildEngine:
             if ref_db_block:
                 ref_db_section = (
                     f"MEASURED REFERENCE (curated database — numeric ranges for proportion_rules / sanity checks; "
-                    f"Historian overrides when sources conflict):\n{ref_db_block}\n\n"
+                    f"use when they align with the site brief):\n{ref_db_block}\n\n"
                 )
 
             prompt = (
@@ -727,11 +802,10 @@ class BuildEngine:
                 f"{ref_db_section}"
                 f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
                 f"Use it as a REFERENCE for sensible heights, radii, and stack order. You MUST still emit your own full "
-                f"spec.components list derived from the Historian's description — do not paste this block verbatim. "
+                f"spec.components list derived from the site brief below — do not paste this block verbatim. "
                 f"Adapt, add, remove, or replace parts (including type procedural) for {city_loc}. "
                 f"Only use spec.template if you deliberately choose id \"open\" or a shortcut; the default output is always top-level spec.components.\n\n"
-                f"HISTORIAN'S PHYSICAL DESCRIPTION (match this closely):\n{physical_desc}\n\n"
-                f"Surveyor context: {desc}\n\n"
+                f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n\n"
                 f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
                 f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
                 f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"

@@ -51,6 +51,14 @@ class ClaudeCliProvider:
         user_text: str,
         model: str,
     ) -> str:
+        logger.info(
+            "[%s] Claude CLI start | model=%s | %s | system=%s user=%s chars",
+            role,
+            model,
+            self.binary,
+            len(system_prompt),
+            len(user_text),
+        )
         proc = await asyncio.create_subprocess_exec(
             self.binary,
             "--print",
@@ -70,15 +78,30 @@ class ClaudeCliProvider:
             from agents.base import AgentGenerationError, classify_agent_failure
 
             pause_reason, pause_detail = classify_agent_failure(stderr_text, None)
-            logger.error(f"[{role}] CLI error: {stderr_text[:200]}")
+            logger.error(
+                "[%s] Claude CLI exit=%s model=%s | stderr (first 2000 chars):\n%s",
+                role,
+                proc.returncode,
+                model,
+                (stderr_text[:2000] + "\n...") if len(stderr_text) > 2000 else stderr_text,
+            )
             raise AgentGenerationError(pause_reason, pause_detail)
         out = stdout.decode().strip()
         if not out:
             from agents.base import AgentGenerationError
 
+            stderr_preview = (stderr_text[:1200] + "\n...") if len(stderr_text) > 1200 else stderr_text
+            logger.error(
+                "[%s] Claude CLI returned empty stdout (exit 0). Model=%s. stderr:\n%s",
+                role,
+                model,
+                stderr_preview or "(empty stderr)",
+            )
             raise AgentGenerationError(
-                "api_error",
-                "CLI returned empty stdout with exit code 0.",
+                "bad_model_output",
+                "The Claude CLI produced no text on stdout (exit code 0). "
+                "Check the server log for stderr from the CLI (login, model, or quota). "
+                "Try `claude login`, confirm `claude --version`, and verify the model name in AI Settings.",
             )
         return out
 
@@ -169,6 +192,16 @@ class OpenAICompatibleProvider:
         if self.default_model:
             use_model = self.default_model
 
+        base_log = self.base_url if len(self.base_url) <= 96 else self.base_url[:93] + "..."
+        logger.info(
+            "[%s] OpenAI-compatible POST /chat/completions | base=%s | model=%s | system=%s user=%s chars",
+            role,
+            base_log,
+            use_model,
+            len(system_prompt),
+            len(user_text),
+        )
+
         status, body, err = await asyncio.to_thread(
             _openai_compatible_request_sync,
             self.base_url,
@@ -179,14 +212,45 @@ class OpenAICompatibleProvider:
         )
         if status != 200:
             detail = (err or body)[:800]
+            raw_preview = (err or body or "")[:2000]
+            logger.error(
+                "[%s] openai_compatible HTTP %s model=%s | detail=%s | raw_preview=%r",
+                role,
+                status,
+                use_model,
+                detail,
+                raw_preview,
+            )
             raise AgentGenerationError(
                 "api_error",
                 f"openai_compatible HTTP {status}: {detail}",
             )
+        body_stripped = (body or "").strip()
+        if not body_stripped:
+            logger.error(
+                "[%s] openai_compatible: empty response body (HTTP 200) model=%s",
+                role,
+                use_model,
+            )
+            raise AgentGenerationError(
+                "bad_model_output",
+                "The API returned an empty body (HTTP 200). Check base URL, model id, and proxy settings in AI Settings.",
+            )
         try:
-            data = json.loads(body)
+            data = json.loads(body_stripped)
         except json.JSONDecodeError as e:
-            raise AgentGenerationError("api_error", f"Invalid JSON from API: {e}") from e
+            logger.error(
+                "[%s] openai_compatible: response body is not JSON (model=%s): %s | body_preview=%r",
+                role,
+                use_model,
+                e,
+                body[:2000],
+            )
+            raise AgentGenerationError(
+                "bad_model_output",
+                f"OpenAI-compatible response was not valid JSON: {e}. "
+                "Confirm the base URL points to /v1 chat/completions (not an HTML page).",
+            ) from e
         # Best-effort usage reporting (OpenAI-compatible servers often include usage.*).
         try:
             self.last_usage = data.get("usage") if isinstance(data, dict) else None
@@ -206,7 +270,19 @@ class OpenAICompatibleProvider:
         else:
             text = str(content).strip()
         if not text:
-            raise AgentGenerationError("api_error", "API returned empty content.")
+            body_preview = (body[:900] + "\n...") if len(body) > 900 else body
+            logger.error(
+                "[%s] openai_compatible: empty assistant content (model=%s). Response body preview:\n%s",
+                role,
+                use_model,
+                body_preview,
+            )
+            raise AgentGenerationError(
+                "bad_model_output",
+                "The API returned an empty assistant message. "
+                "Check the server log for the raw HTTP response preview. "
+                "Verify model id, context length, and API key in AI Settings.",
+            )
         return text
 
 

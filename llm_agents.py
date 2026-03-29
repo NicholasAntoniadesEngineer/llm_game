@@ -30,11 +30,21 @@ class AgentLlmSpec(TypedDict, total=False):
     openai_api_key: str | None
 
 
+# Short names / aliases accepted by `claude --model` (Claude Code CLI). Exposed to the web UI as a dropdown.
+# Users can still pick "Other…" and type any id the CLI accepts.
+CLAUDE_CLI_MODEL_CHOICES: tuple[str, ...] = (
+    "haiku",
+    "sonnet",
+    "opus",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-opus-20240229",
+)
+
 # Logical agent keys (do not rename without updating orchestration/engine.py).
 KEY_CARTOGRAPHUS_SKELETON = "cartographus_skeleton"
 KEY_CARTOGRAPHUS_REFINE = "cartographus_refine"
 KEY_CARTOGRAPHUS_SURVEY = "cartographus_survey"
-KEY_HISTORICUS = "historicus"
 KEY_URBANISTA = "urbanista"
 
 AGENT_LLM: dict[str, AgentLlmSpec] = {
@@ -50,10 +60,6 @@ AGENT_LLM: dict[str, AgentLlmSpec] = {
         "provider": "claude_cli",
         "model": "haiku",
     },
-    KEY_HISTORICUS: {
-        "provider": "claude_cli",
-        "model": "haiku",
-    },
     KEY_URBANISTA: {
         "provider": "claude_cli",
         "model": "haiku",
@@ -65,7 +71,6 @@ AGENT_LLM_LABELS: dict[str, str] = {
     KEY_CARTOGRAPHUS_SKELETON: "Cartographus — district skeleton",
     KEY_CARTOGRAPHUS_REFINE: "Cartographus — map refine",
     KEY_CARTOGRAPHUS_SURVEY: "Cartographus — survey",
-    KEY_HISTORICUS: "Historicus",
     KEY_URBANISTA: "Urbanista",
 }
 

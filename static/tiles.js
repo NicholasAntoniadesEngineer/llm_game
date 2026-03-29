@@ -56,7 +56,6 @@ const AGENT_COLORS = {
     imperator: "#ffd700",
     cartographus: "#e67e22",
     urbanista: "#4a9eff",
-    historicus: "#2ecc71",
     faber: "#ff8c00",
     civis: "#e056a0",
 };
@@ -65,7 +64,6 @@ const AGENT_NAMES = {
     imperator: "Imperator (Director)",
     cartographus: "Cartographus (Surveyor)",
     urbanista: "Urbanista (Architect)",
-    historicus: "Historicus (Fact Check)",
     faber: "Faber (Builder)",
     civis: "Civis (Culture)",
 };

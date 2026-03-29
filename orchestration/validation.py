@@ -64,6 +64,9 @@ PARAMETRIC_TEMPLATE_IDS = frozenset({
     "gate",
     "wall",
     "aqueduct",
+    "mesoamerican_temple",
+    "mesoamerican_shrine",
+    "mesoamerican_civic",
 })
 
 
@@ -315,10 +318,17 @@ def validate_master_plan(
 
     seen: set[tuple[int, int]] = set()
     cleaned: list[dict] = []
+    dup_dropped = 0
+    oob_dropped = 0
+    dup_first: tuple[int, int] | None = None
+    dup_first_structure_name: str | None = None
+    oob_first: tuple[int, int] | None = None
 
     for struct in master_plan:
         if not isinstance(struct, dict):
             continue
+        structure_label = struct.get("name")
+        structure_name_str = structure_label if isinstance(structure_label, str) else None
         raw_tiles = struct.get("tiles")
         if not isinstance(raw_tiles, list):
             continue
@@ -334,16 +344,16 @@ def validate_master_plan(
             except (TypeError, ValueError):
                 continue
             if not (0 <= xi < grid_width and 0 <= yi < grid_height):
-                logger.warning("Master plan: dropped OOB tile (%s,%s)", xi, yi)
+                oob_dropped += 1
+                if oob_first is None:
+                    oob_first = (xi, yi)
                 continue
             key = (xi, yi)
             if key in seen:
-                logger.warning(
-                    "Master plan: dropped duplicate tile (%s,%s) in %s",
-                    xi,
-                    yi,
-                    struct.get("name", "?"),
-                )
+                dup_dropped += 1
+                if dup_first is None:
+                    dup_first = key
+                    dup_first_structure_name = structure_name_str
                 continue
             seen.add(key)
             normalized = dict(t)
@@ -355,6 +365,23 @@ def validate_master_plan(
             out = dict(struct)
             out["tiles"] = new_tiles
             cleaned.append(out)
+
+    if dup_dropped:
+        logger.warning(
+            "Master plan: dropped %s duplicate tile assignments (first structure wins per tile); "
+            "first duplicate at %s in %s",
+            dup_dropped,
+            dup_first,
+            dup_first_structure_name or "?",
+        )
+    if oob_dropped:
+        logger.warning(
+            "Master plan: dropped %s out-of-bounds tiles (grid %s×%s; first at %s)",
+            oob_dropped,
+            grid_width,
+            grid_height,
+            oob_first,
+        )
 
     return cleaned
 
@@ -368,6 +395,8 @@ def validate_urbanista_tiles(
     if not tiles:
         return []
     out: list[dict] = []
+    oob_dropped = 0
+    oob_first: tuple[int, int] | None = None
     for td in tiles:
         if not isinstance(td, dict):
             continue
@@ -379,10 +408,20 @@ def validate_urbanista_tiles(
         except (TypeError, ValueError):
             continue
         if not (0 <= xi < grid_width and 0 <= yi < grid_height):
-            logger.warning("Urbanista: dropped OOB tile (%s,%s)", xi, yi)
+            oob_dropped += 1
+            if oob_first is None:
+                oob_first = (xi, yi)
             continue
         normalized = dict(td)
         normalized["x"] = xi
         normalized["y"] = yi
         out.append(normalized)
+    if oob_dropped:
+        logger.warning(
+            "Urbanista: dropped %s out-of-bounds tiles (grid %s×%s; first at %s)",
+            oob_dropped,
+            grid_width,
+            grid_height,
+            oob_first,
+        )
     return out

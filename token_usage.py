@@ -91,6 +91,39 @@ class TokenUsageStore:
 STORE = TokenUsageStore()
 
 
+def aggregate_for_ui() -> dict[str, dict[str, int]]:
+    """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
+    from llm_agents import (
+        KEY_CARTOGRAPHUS_REFINE,
+        KEY_CARTOGRAPHUS_SKELETON,
+        KEY_CARTOGRAPHUS_SURVEY,
+        KEY_URBANISTA,
+    )
+
+    detail = STORE.to_payload()
+    groups: dict[str, list[str]] = {
+        "cartographus": [
+            KEY_CARTOGRAPHUS_SKELETON,
+            KEY_CARTOGRAPHUS_REFINE,
+            KEY_CARTOGRAPHUS_SURVEY,
+        ],
+        "urbanista": [KEY_URBANISTA],
+    }
+    out: dict[str, dict[str, int]] = {}
+    for ui, keys in groups.items():
+        pt = ct = tt = 0
+        for k in keys:
+            row = detail.get(k)
+            if not row:
+                continue
+            t = row.get("total") or {}
+            pt += int(t.get("prompt_tokens", 0))
+            ct += int(t.get("completion_tokens", 0))
+            tt += int(t.get("total_tokens", 0))
+        out[ui] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}
+    return out
+
+
 def estimate_tokens_from_text(text: str) -> int:
     """Very rough heuristic (~4 chars/token for English-ish text)."""
     if not text:

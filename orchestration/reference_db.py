@@ -98,27 +98,6 @@ def lookup_architectural_reference(
     return best
 
 
-def format_reference_for_historicus(entry: dict[str, Any] | None) -> str:
-    """Shorter block for Historicus — ask for explicit numbers in commentary when DB aligns."""
-    if not entry:
-        return ""
-    lines: list[str] = [
-        "MEASUREMENT REFERENCE (curated database — cite concrete meters and counts in your commentary when they fit the sources):",
-    ]
-    if entry.get("title"):
-        lines.append(str(entry["title"]))
-    if entry.get("measurements_meters_typical"):
-        lines.append(json.dumps(entry["measurements_meters_typical"], indent=2))
-    if entry.get("proportion_rules_hints"):
-        lines.append("Proportion bands (for Urbanista proportion_rules later):")
-        lines.append(json.dumps(entry["proportion_rules_hints"], indent=2))
-    if entry.get("notes"):
-        lines.append(str(entry["notes"]))
-    if entry.get("citation"):
-        lines.append(f"Source note: {entry['citation']}")
-    return "\n".join(lines).strip()
-
-
 def format_reference_for_prompt(entry: dict[str, Any] | None) -> str:
     """Compact text block for LLM injection (not full raw JSON)."""
     if not entry:
@@ -131,7 +110,7 @@ def format_reference_for_prompt(entry: dict[str, Any] | None) -> str:
     if entry.get("notes"):
         lines.append(str(entry["notes"]))
     if entry.get("proportion_rules_hints"):
-        lines.append("proportion_rules_hints (merge into spec.proportion_rules when Historian agrees):")
+        lines.append("proportion_rules_hints (merge into spec.proportion_rules when they fit the brief):")
         lines.append(json.dumps(entry["proportion_rules_hints"], indent=2))
     if entry.get("measurements_meters_typical"):
         lines.append("typical_meter_ranges (sanity-check against Historian):")
