@@ -211,7 +211,7 @@ class WorldRenderer {
         el.addEventListener("click", e => this._onClick(e));
         el.addEventListener("contextmenu", e => e.preventDefault());
 
-        // WASD pan, arrows = tilt (matches ▲/▼ buttons), +/− = zoom (matches +/− buttons), Q/E orbit, R/F zoom alt
+        // WASD pan; arrows = orbit yaw + pitch; Q/E = yaw (orbit); +/− zoom; R/F zoom alt
         // Space = raise view target; C = lower
         this._keysDown = new Set();
         const _normKey = (e) => {
@@ -247,6 +247,7 @@ class WorldRenderer {
         this._updateCamera();
     }
 
+    /** Orbit yaw (dAngle) + pitch (dPitch) — Rotate Q/E, tilt row, arrow keys */
     orbitCamera(dAngle, dPitch) {
         if (this._failed) return;
         this.cameraAngle += dAngle;
@@ -2754,7 +2755,7 @@ class WorldRenderer {
         requestAnimationFrame(() => this._animate());
         const now = Date.now();
 
-        // Keyboard: WASD pan; ArrowLeft/Right = orbit (horizontal tilt, same as ◀/▶); ArrowUp/Down = pitch (same as ▲/▼); Q/E orbit; +/− zoom; R/F fine zoom
+        // Keyboard: WASD pan; arrows + Q/E = orbit yaw + pitch; +/− zoom; R/F fine zoom
         if (this._keysDown && this._keysDown.size > 0) {
             const panSpeed = this.cameraDistance * 0.008;
             const rightX = Math.sin(this.cameraAngle);
@@ -2767,10 +2768,10 @@ class WorldRenderer {
             if (this._keysDown.has("a")) { rx -= rightX; rz -= rightZ; }
             if (this._keysDown.has("d")) { rx += rightX; rz += rightZ; }
             if (rx || rz) { this.cameraTarget.x += rx * panSpeed; this.cameraTarget.z += rz * panSpeed; }
-            // Q/E rotate orbit (same as Q/E buttons)
+            // Q/E: yaw orbit (same as Rotate buttons and ◀ / ▶)
             if (this._keysDown.has("q")) this.cameraAngle += 0.02;
             if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
-            // ArrowLeft/Right = yaw around target (same step as ArrowUp/Down pitch, same as ◀ / ▶)
+            // ArrowLeft/Right = orbit yaw
             if (this._keysDown.has("arrowleft")) this.cameraAngle += 0.02;
             if (this._keysDown.has("arrowright")) this.cameraAngle -= 0.02;
             // ArrowUp/Down = pitch (same as floating Camera ▲ / ▼)

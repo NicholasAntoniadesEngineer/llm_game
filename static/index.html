@@ -118,6 +118,7 @@
                     <button type="button" class="map-btn" id="reload-code-btn" onclick="reloadClientCode()" title="Reload this page (JavaScript/CSS). Does not restart Python or delete saves.">Reload code</button>
                     <button type="button" class="map-btn" id="restart-server-btn" onclick="restartServerFromUi()" title="Restart the Python process (needs ETERNAL_CITIES_RELOAD=1). Persists the world first; keeps planning caches.">Restart server</button>
                     <button type="button" class="map-btn" id="reset-timeline-btn" onclick="resetTimelineFromUi()" title="Reset the run clock only. Keeps map, chat, and Cartographus caches.">Reset timeline</button>
+                    <button type="button" class="map-btn map-btn--full-reset" id="full-reset-btn" onclick="resetWorld()" title="Full wipe: saved world, district &amp; survey caches — returns to city selection. Same as Clear saved world on the picker.">Full reset</button>
                 </div>
             </div>
         </div>
@@ -138,10 +139,10 @@
                     </div>
                 </div>
                 <div class="nav-section">
-                    <div class="nav-label">Rotate</div>
+                    <div class="nav-label">Yaw</div>
                     <div class="nav-row">
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Rotate left (Q)">Q</button>
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Rotate right (E)">E</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Yaw left — orbit around target (Q)">Q</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Yaw right — orbit around target (E)">E</button>
                     </div>
                 </div>
                 <div class="nav-section">
@@ -160,10 +161,10 @@
                 <div class="nav-section">
                     <div class="nav-label">Tilt &amp; height</div>
                     <div class="nav-row nav-row--tilt">
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Tilt left (Arrow Left)">&#9664;</button>
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up (Arrow Up)">&#9650;</button>
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down (Arrow Down)">&#9660;</button>
-                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Tilt right (Arrow Right)">&#9654;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0.15" data-p="0" title="Orbit left — yaw around target (Arrow Left)">&#9664;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="0.15" title="Tilt up — pitch (Arrow Up)">&#9650;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="0" data-p="-0.15" title="Tilt down — pitch (Arrow Down)">&#9660;</button>
+                        <button type="button" class="nav-btn" data-action="orbit" data-a="-0.15" data-p="0" title="Yaw right — orbit around target (Arrow Right)">&#9654;</button>
                         <button type="button" class="nav-btn" data-action="lift" data-dir="1" title="Raise view (Space)">Sp</button>
                         <button type="button" class="nav-btn" data-action="lift" data-dir="-1" title="Lower view (C)">C</button>
                     </div>

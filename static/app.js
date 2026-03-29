@@ -43,12 +43,34 @@ let autoResumeOnceThisPageAttempted = false;
 let reconnectDelay = 1000;
 /** Single scheduled reconnect from ws.onclose — cleared on manual connect() or AI reconnect. */
 let wsReconnectTimer = null;
+/** While the user must pick Continue vs new city, do not auto-reconnect (no socket yet). */
+const WS_PERIODIC_RECONNECT_MS = 15000;
+let wsPeriodicReconnectIntervalId = null;
 
 function clearWebSocketReconnectTimer() {
     if (wsReconnectTimer != null) {
         clearTimeout(wsReconnectTimer);
         wsReconnectTimer = null;
     }
+}
+
+/** Belt-and-suspenders: if onclose/backoff misses a dead socket, retry periodically. */
+function ensureWebSocketPeriodicReconnect() {
+    if (wsPeriodicReconnectIntervalId != null) return;
+    wsPeriodicReconnectIntervalId = setInterval(() => {
+        try {
+            if (awaitingSessionChoice) return;
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+            if (ws && ws.readyState === WebSocket.CONNECTING) return;
+            if (ws && ws.readyState === WebSocket.CLOSING) return;
+            console.log("Periodic WebSocket reconnect…");
+            reconnectDelay = 1000;
+            clearWebSocketReconnectTimer();
+            connect();
+        } catch (e) {
+            console.warn("Periodic WebSocket reconnect failed:", e);
+        }
+    }, WS_PERIODIC_RECONNECT_MS);
 }
 
 /** If true, open WebSocket only after "Continue" or after BEGIN / reset (saved session on reload). */
@@ -2194,6 +2216,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     void initEternalCitiesSession();
+    ensureWebSocketPeriodicReconnect();
 
     // BFCache restore (back/forward): WebSocket is dead; reconnect once without stacking timers.
     window.addEventListener("pageshow", (ev) => {
