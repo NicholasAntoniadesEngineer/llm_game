@@ -312,7 +312,7 @@ STACKING (override defaults when needed):
   cone: \"radius\", \"height\"; optional radialSegments
   torus: \"radius\" (major), \"tube\" (minor); optional radialSegments, tubularSegments
   plane: horizontal slab in XZ — \"width\", \"height\" as X and Z extents
-- relates_to (optional on any component): [{\"relation\": string, \"target_id\": string}] — declare logical links (supports, aligns_with, crowns, etc.). Renderer does not resolve graph edges yet; IDs must match another component's component_id for future tooling and for your own consistency.
+- relates_to (optional on any component): [{{\"relation\": string, \"target_id\": string}}] — declare logical links (supports, aligns_with, crowns, etc.). Renderer does not resolve graph edges yet; IDs must match another component's component_id for future tooling and for your own consistency.
 
 NAMED component types must be exactly those listed below OR type procedural. Unknown type strings cause pipeline failure (no stripping).
 
