@@ -8,6 +8,13 @@ from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
 from agents.base import AgentGenerationError, BaseAgent
 from agents.golden_specs import get_golden_example
+from llm_agents import (
+    KEY_CARTOGRAPHUS_REFINE,
+    KEY_CARTOGRAPHUS_SKELETON,
+    KEY_CARTOGRAPHUS_SURVEY,
+    KEY_HISTORICUS,
+    KEY_URBANISTA,
+)
 from agents.prompts import (
     CARTOGRAPHUS_PLAN_SKELETON,
     CARTOGRAPHUS_PLAN_REFINE,
@@ -18,7 +25,6 @@ from agents.prompts import (
 import config as config_module
 from config import (
     STEP_DELAY,
-    CLAUDE_MODEL,
     GRID_WIDTH,
     GRID_HEIGHT,
     HISTORICUS_MAX_CONCURRENT,
@@ -56,14 +62,25 @@ class BuildEngine:
 
         # Phase-1 skeleton planner starts builds early; phase-2 refine adds map prose in background.
         self.planner_skeleton = BaseAgent(
-            "cartographus", "Cartographus", CARTOGRAPHUS_PLAN_SKELETON, CLAUDE_MODEL
+            "cartographus",
+            "Cartographus",
+            CARTOGRAPHUS_PLAN_SKELETON,
+            llm_agent_key=KEY_CARTOGRAPHUS_SKELETON,
         )
         self.planner_refine = BaseAgent(
-            "cartographus", "Cartographus", CARTOGRAPHUS_PLAN_REFINE, CLAUDE_MODEL
+            "cartographus",
+            "Cartographus",
+            CARTOGRAPHUS_PLAN_REFINE,
+            llm_agent_key=KEY_CARTOGRAPHUS_REFINE,
         )
-        self.surveyor = BaseAgent("cartographus", "Cartographus", CARTOGRAPHUS_SURVEY, CLAUDE_MODEL)
-        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, CLAUDE_MODEL)
-        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, CLAUDE_MODEL)
+        self.surveyor = BaseAgent(
+            "cartographus",
+            "Cartographus",
+            CARTOGRAPHUS_SURVEY,
+            llm_agent_key=KEY_CARTOGRAPHUS_SURVEY,
+        )
+        self.historicus = BaseAgent("historicus", "Historicus", HISTORICUS, llm_agent_key=KEY_HISTORICUS)
+        self.urbanista = BaseAgent("urbanista", "Urbanista", URBANISTA, llm_agent_key=KEY_URBANISTA)
         self._historicus_semaphore = asyncio.Semaphore(HISTORICUS_MAX_CONCURRENT)
         self._survey_semaphore = asyncio.Semaphore(SURVEY_MAX_CONCURRENT)
         self._urbanista_semaphore = asyncio.Semaphore(URBANISTA_MAX_CONCURRENT)

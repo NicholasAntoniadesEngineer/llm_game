@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 roma_districts_cache.json
 roma_save.json
+roma_llm_settings.json

@@ -6,7 +6,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +34,7 @@ chat_history: list[dict] = []
 reset_callback = None
 start_callback = None  # Called with (city_name, year) when user clicks Start
 resume_callback = None  # Resume build after API/network pause
+llm_settings_callback = None  # async (overrides: dict) — persist + apply LLM routing from UI
 
 app = FastAPI(title="Roma Aeterna")
 
@@ -61,6 +62,43 @@ async def get_cities():
         }
         for c in CITIES
     ]
+
+
+def _build_llm_settings_payload() -> dict:
+    """Same shape as WebSocket message type llm_settings (for UI)."""
+    import llm_agents
+
+    agents_payload = {}
+    for key in llm_agents.AGENT_LLM:
+        spec = llm_agents.get_agent_llm_spec(key)
+        row = {}
+        for k, v in spec.items():
+            if k == "openai_api_key":
+                row["has_openai_api_key"] = bool(v)
+            else:
+                row[k] = v
+        agents_payload[key] = row
+    return {
+        "type": "llm_settings",
+        "agents": agents_payload,
+        "labels": llm_agents.AGENT_LLM_LABELS,
+    }
+
+
+@app.get("/api/llm-settings")
+async def api_get_llm_settings():
+    """Load AI routing for the Configure AI panel (HTTP so it always works without WebSocket timing)."""
+    return _build_llm_settings_payload()
+
+
+@app.post("/api/llm-settings")
+async def api_post_llm_settings(request: Request):
+    """Save AI routing from the Configure AI panel."""
+    body = await request.json()
+    overrides = body.get("overrides", {})
+    if isinstance(overrides, dict) and llm_settings_callback:
+        await llm_settings_callback(overrides)
+    return {"ok": True}
 
 
 @app.websocket("/ws")
@@ -109,6 +147,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info("Resume requested by client after pause")
                 if resume_callback:
                     await resume_callback()
+            elif data.get("type") == "get_llm_settings":
+                await websocket.send_json(_build_llm_settings_payload())
+            elif data.get("type") == "save_llm_settings":
+                overrides = data.get("overrides")
+                if isinstance(overrides, dict) and llm_settings_callback:
+                    await llm_settings_callback(overrides)
+                    await websocket.send_json({"type": "llm_settings_saved", "ok": True})
     except WebSocketDisconnect:
         if websocket in ws_connections:
             ws_connections.remove(websocket)

@@ -9,11 +9,14 @@ from world.state import WorldState
 
 import config
 
+import llm_agents
+
 logger = logging.getLogger("roma.persistence")
 
 SAVE_FILE = Path(__file__).parent / "roma_save.json"
 DISTRICTS_CACHE = Path(__file__).parent / "roma_districts_cache.json"
 SURVEYS_CACHE = Path(__file__).parent / "roma_surveys_cache.json"
+LLM_SETTINGS_FILE = Path(__file__).parent / "roma_llm_settings.json"
 
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
@@ -100,3 +103,60 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
     except Exception as e:
         logger.error(f"Failed to load save: {e}")
         return None
+
+
+def merge_llm_overrides_from_save(
+    current: dict[str, dict[str, Any]], incoming: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Apply UI save per agent; blank API key field keeps the previously saved key (OpenAI only)."""
+    out: dict[str, dict[str, Any]] = {k: dict(v) for k, v in current.items()}
+    for agent_key, patch in incoming.items():
+        if agent_key not in llm_agents.AGENT_LLM or not isinstance(patch, dict):
+            continue
+        prev = out.get(agent_key, {})
+        merged: dict[str, Any] = {}
+        for k, v in patch.items():
+            if v is None:
+                continue
+            if k == "openai_api_key" and isinstance(v, str) and not v.strip():
+                continue
+            merged[k] = v
+        prov = str(merged.get("provider", "")).lower()
+        if prov in ("openai_compatible", "openai", "chatgpt"):
+            if not merged.get("openai_api_key") and prev.get("openai_api_key"):
+                merged["openai_api_key"] = prev["openai_api_key"]
+        if prov in ("claude", "claude_cli"):
+            merged.pop("openai_base_url", None)
+            merged.pop("openai_api_key", None)
+        out[agent_key] = merged
+    return out
+
+
+def load_llm_settings() -> dict[str, dict[str, Any]]:
+    """Load roma_llm_settings.json and apply to llm_agents. Returns applied overrides."""
+    if not LLM_SETTINGS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(LLM_SETTINGS_FILE.read_text(encoding="utf-8"))
+        overrides = data.get("overrides", data)
+        if not isinstance(overrides, dict):
+            logger.warning("LLM settings file: invalid format, ignoring")
+            return {}
+        # Only known agent keys
+        cleaned: dict[str, dict[str, Any]] = {}
+        for k, v in overrides.items():
+            if k in llm_agents.AGENT_LLM and isinstance(v, dict):
+                cleaned[k] = {a: b for a, b in v.items() if b is not None}
+        llm_agents.set_runtime_overrides(cleaned)
+        logger.info("Loaded LLM settings for %d agent(s) from %s", len(cleaned), LLM_SETTINGS_FILE.name)
+        return cleaned
+    except Exception as e:
+        logger.error("Failed to load LLM settings: %s", e)
+        return {}
+
+
+def save_llm_settings(overrides: dict[str, dict[str, Any]]) -> None:
+    """Persist runtime LLM overrides (may contain API keys — file should stay private)."""
+    payload = {"overrides": overrides}
+    LLM_SETTINGS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logger.info("Saved LLM settings to %s", LLM_SETTINGS_FILE.name)

@@ -1,5 +1,38 @@
 // Roma Aeterna — WebSocket client and UI controller
 
+/** Base URL for REST API (same host as page, or http://127.0.0.1:8000 when page is file://). Override: localStorage eternal_cities_api_base */
+function eternalCitiesApiBase() {
+    try {
+        const custom = localStorage.getItem("eternal_cities_api_base");
+        if (custom && String(custom).trim()) {
+            return String(custom).trim().replace(/\/$/, "");
+        }
+    } catch (e) {
+        /* ignore */
+    }
+    const proto = window.location.protocol;
+    if (proto === "http:" || proto === "https:") {
+        return window.location.origin;
+    }
+    return "http://127.0.0.1:8000";
+}
+
+function apiUrl(path) {
+    const p = path.startsWith("/") ? path : `/${path}`;
+    return eternalCitiesApiBase() + p;
+}
+
+function eternalCitiesWsUrl() {
+    try {
+        const base = eternalCitiesApiBase();
+        const u = new URL(base.includes("://") ? base : `http://${base}`);
+        const wsProto = u.protocol === "https:" ? "wss:" : "ws:";
+        return `${wsProto}//${u.host}/ws`;
+    } catch (e) {
+        return "ws://127.0.0.1:8000/ws";
+    }
+}
+
 let ws = null;
 let renderer = null;
 let reconnectDelay = 1000;
@@ -7,8 +40,7 @@ let totalStructures = 0;
 let builtStructures = 0;
 
 function connect() {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${protocol}//${location.host}/ws`);
+    ws = new WebSocket(eternalCitiesWsUrl());
 
     ws.onopen = () => {
         console.log("Connected to Roma Aeterna");
@@ -125,6 +157,208 @@ function handleMessage(msg) {
             showPausedOverlay(msg);
             resetAllAgentStatus();
             break;
+
+        case "llm_settings":
+            renderLlmSettings(msg);
+            break;
+
+        case "llm_settings_saved":
+            appendSystemMessage("AI backend settings saved for next run.");
+            closeLlmSettingsOverlay();
+            break;
+    }
+}
+
+function escapeHtml(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML;
+}
+
+async function requestLlmSettingsFromServer() {
+    const rows = document.getElementById("llm-settings-rows");
+    const fileHint =
+        window.location.protocol === "file:"
+            ? " Open the app at <strong>http://127.0.0.1:8000</strong> after starting the server (<code>python main.py</code>), or set <code>localStorage.eternal_cities_api_base</code> to your server URL."
+            : "";
+    try {
+        const r = await fetch(apiUrl("/api/llm-settings"));
+        const text = await r.text();
+        if (!r.ok) {
+            const staleHint =
+                r.status === 404
+                    ? " Restart the server (python main.py) so it loads the latest API routes."
+                    : "";
+            throw new Error(`HTTP ${r.status}: ${text.slice(0, 120)}${staleHint}`);
+        }
+        let msg;
+        try {
+            msg = JSON.parse(text);
+        } catch (parseErr) {
+            throw new Error("Server did not return JSON (is this the Eternal Cities server?)");
+        }
+        renderLlmSettings(msg);
+    } catch (e) {
+        console.error("LLM settings load failed:", e);
+        if (rows) {
+            const detail = e && e.message ? escapeHtml(e.message) : "Unknown error";
+            rows.innerHTML = `<p class="llm-settings-error">Could not load AI settings: ${detail}${fileHint ? `. ${fileHint}` : ""}</p>`;
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "get_llm_settings" }));
+        }
+    }
+}
+
+function toggleLlmSettingsOverlay() {
+    const el = document.getElementById("llm-settings-overlay");
+    if (!el) return;
+    const open = el.classList.toggle("visible");
+    el.setAttribute("aria-hidden", open ? "false" : "true");
+    if (open) {
+        const rows = document.getElementById("llm-settings-rows");
+        if (rows) {
+            rows.innerHTML =
+                '<p class="llm-settings-loading">Loading AI settings from the server…</p>';
+        }
+        void requestLlmSettingsFromServer();
+    }
+}
+
+function closeLlmSettingsOverlay() {
+    const el = document.getElementById("llm-settings-overlay");
+    if (!el) return;
+    el.classList.remove("visible");
+    el.setAttribute("aria-hidden", "true");
+}
+
+function llmProviderDisplayName(providerRaw) {
+    const p = (providerRaw || "claude_cli").toLowerCase();
+    return p === "openai_compatible" || p === "openai" || p === "chatgpt"
+        ? "OpenAI-compatible API"
+        : "Claude CLI";
+}
+
+function renderLlmSettings(msg) {
+    const container = document.getElementById("llm-settings-rows");
+    if (!container) return;
+    if (!msg.agents || Object.keys(msg.agents).length === 0) {
+        container.innerHTML =
+            '<p class="llm-settings-error">Could not load AI settings. Check the server connection and try again.</p>';
+        return;
+    }
+    const labels = msg.labels || {};
+    container.innerHTML = "";
+    for (const [key, spec] of Object.entries(msg.agents)) {
+        const label = labels[key] || key;
+        const prov = spec.provider || "claude_cli";
+        const provSelect = prov === "openai_compatible" ? "openai_compatible" : "claude_cli";
+        const model = spec.model || "";
+        const baseUrl = spec.openai_base_url || "";
+        const hasKey = !!spec.has_openai_api_key;
+        const currentBaseDisplay = baseUrl.trim() ? escapeHtml(baseUrl) : "—";
+        const currentKeyDisplay = hasKey ? "Saved on server (hidden)" : "Not set";
+        const showCurrentOpenAi = provSelect === "openai_compatible";
+        const fieldset = document.createElement("fieldset");
+        fieldset.className = "llm-agent-row";
+        fieldset.dataset.agentKey = key;
+        fieldset.innerHTML = `
+            <legend class="llm-legend">${escapeHtml(label)}</legend>
+            <div class="llm-two-col">
+                <div class="llm-current-block">
+                    <div class="llm-col-title">Current</div>
+                    <dl class="llm-current-dl">
+                        <dt>Provider</dt><dd class="llm-current-provider">${escapeHtml(llmProviderDisplayName(prov))}</dd>
+                        <dt>Model</dt><dd class="llm-current-model">${escapeHtml(model || "—")}</dd>
+                        <dt class="llm-current-openai-only">API base URL</dt>
+                        <dd class="llm-current-openai-only">${currentBaseDisplay}</dd>
+                        <dt class="llm-current-openai-only">API key</dt>
+                        <dd class="llm-current-openai-only">${escapeHtml(currentKeyDisplay)}</dd>
+                    </dl>
+                </div>
+                <div class="llm-new-block">
+                    <div class="llm-col-title">New</div>
+                    <div class="llm-field-grid">
+                        <label class="llm-label">
+                            <span class="llm-label-text">Provider</span>
+                            <select class="llm-provider">
+                                <option value="claude_cli">Claude CLI</option>
+                                <option value="openai_compatible">OpenAI-compatible API</option>
+                            </select>
+                        </label>
+                        <label class="llm-label">
+                            <span class="llm-label-text">Model id</span>
+                            <input type="text" class="llm-model" placeholder="e.g. haiku or gpt-4o-mini" />
+                        </label>
+                        <div class="llm-openai-fields">
+                            <label class="llm-label">
+                                <span class="llm-label-text">Base URL (optional)</span>
+                                <input type="text" class="llm-openai-base" placeholder="https://api.openai.com/v1" />
+                            </label>
+                            <label class="llm-label">
+                                <span class="llm-label-text">API key (blank = keep current)</span>
+                                <input type="password" class="llm-openai-key" autocomplete="off" placeholder="${hasKey ? "Leave blank to keep saved key" : ""}" />
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        container.appendChild(fieldset);
+        const newBlock = fieldset.querySelector(".llm-new-block");
+        const sel = newBlock.querySelector(".llm-provider");
+        sel.value = provSelect;
+        newBlock.querySelector(".llm-model").value = model;
+        newBlock.querySelector(".llm-openai-base").value = baseUrl;
+        sel.addEventListener("change", () => updateLlmRowOpenAiVisibility(fieldset));
+        updateLlmRowOpenAiVisibility(fieldset);
+        fieldset.querySelectorAll(".llm-current-openai-only").forEach((el) => {
+            el.style.display = showCurrentOpenAi ? "" : "none";
+        });
+    }
+}
+
+function updateLlmRowOpenAiVisibility(fieldset) {
+    const newBlock = fieldset.querySelector(".llm-new-block");
+    if (!newBlock) return;
+    const prov = newBlock.querySelector(".llm-provider").value;
+    const wrap = newBlock.querySelector(".llm-openai-fields");
+    if (wrap) wrap.style.display = prov === "openai_compatible" ? "block" : "none";
+}
+
+async function saveLlmSettingsFromForm() {
+    const overrides = {};
+    document.querySelectorAll(".llm-agent-row").forEach((row) => {
+        const key = row.dataset.agentKey;
+        if (!key) return;
+        const newBlock = row.querySelector(".llm-new-block");
+        if (!newBlock) return;
+        const provider = newBlock.querySelector(".llm-provider").value;
+        const model = newBlock.querySelector(".llm-model").value.trim();
+        const patch = { provider, model };
+        if (provider === "openai_compatible") {
+            const base = newBlock.querySelector(".llm-openai-base").value.trim();
+            const apiKey = newBlock.querySelector(".llm-openai-key").value;
+            if (base) patch.openai_base_url = base;
+            if (apiKey) patch.openai_api_key = apiKey;
+        }
+        overrides[key] = patch;
+    });
+    try {
+        const r = await fetch(apiUrl("/api/llm-settings"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ overrides }),
+        });
+        if (r.ok) {
+            appendSystemMessage("AI backend settings saved for next run.");
+            closeLlmSettingsOverlay();
+            return;
+        }
+    } catch (e) {
+        console.error("LLM settings save failed:", e);
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "save_llm_settings", overrides }));
     }
 }
 
@@ -178,6 +412,14 @@ function resumeBuildAfterPause() {
 
 const agentTimers = {};
 
+function formatThinkingDuration(elapsedMs) {
+    const s = elapsedMs / 1000;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}m ${sec}s`;
+}
+
 function setAgentStatus(agent, status) {
     const el = document.getElementById(`status-${agent}`);
     if (!el) return;
@@ -193,15 +435,18 @@ function setAgentStatus(agent, status) {
 
     const timerEl = el.querySelector(".agent-timer");
     if (status === "thinking") {
-        // Start timer
-        agentTimers[agent] = { start: Date.now(), interval: null };
-        if (timerEl) timerEl.textContent = "0s";
-        agentTimers[agent].interval = setInterval(() => {
-            const elapsed = Math.floor((Date.now() - agentTimers[agent].start) / 1000);
-            if (timerEl) timerEl.textContent = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m${elapsed % 60}s`;
-        }, 1000);
+        if (agentTimers[agent]) {
+            clearInterval(agentTimers[agent].interval);
+        }
+        const start = Date.now();
+        agentTimers[agent] = { start, interval: null };
+        const tick = () => {
+            if (!timerEl || !agentTimers[agent]) return;
+            timerEl.textContent = formatThinkingDuration(Date.now() - agentTimers[agent].start);
+        };
+        tick();
+        agentTimers[agent].interval = setInterval(tick, 100);
     } else {
-        // Stop timer
         if (agentTimers[agent]) {
             clearInterval(agentTimers[agent].interval);
             delete agentTimers[agent];
@@ -673,7 +918,7 @@ let selectedCity = null;
 let selectedYear = null;
 
 async function loadCities() {
-    const res = await fetch("/api/cities");
+    const res = await fetch(apiUrl("/api/cities"));
     cities = await res.json();
     renderCityGrid();
 }

@@ -2,6 +2,8 @@
 
 import unittest
 
+import llm_agents
+from agents.provider import ClaudeCliProvider, build_provider_from_spec
 from orchestration import reference_db
 from orchestration.placement import check_functional_placement
 from orchestration.validation import (
@@ -138,6 +140,26 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["x"], 1)
         self.assertEqual(out[0]["y"], 2)
+
+
+class LlmAgentsConfigTests(unittest.TestCase):
+    def test_each_engine_agent_key_has_spec(self):
+        for key in (
+            llm_agents.KEY_CARTOGRAPHUS_SKELETON,
+            llm_agents.KEY_CARTOGRAPHUS_REFINE,
+            llm_agents.KEY_CARTOGRAPHUS_SURVEY,
+            llm_agents.KEY_HISTORICUS,
+            llm_agents.KEY_URBANISTA,
+        ):
+            spec = llm_agents.get_agent_llm_spec(key)
+            self.assertIn("provider", spec)
+            self.assertIn("model", spec)
+
+    def test_default_specs_resolve_to_claude_cli(self):
+        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        self.assertEqual(spec.get("provider"), "claude_cli")
+        p = build_provider_from_spec(spec)
+        self.assertIsInstance(p, ClaudeCliProvider)
 
 
 if __name__ == "__main__":

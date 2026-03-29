@@ -4,10 +4,17 @@
 GRID_WIDTH = 40
 GRID_HEIGHT = 40
 
-# Agent execution
+# Legacy names — prefer per-agent settings in llm_agents.py at repo root.
 CLAUDE_MODEL = "haiku"
 CLAUDE_MODEL_FAST = "haiku"
 STEP_DELAY = 0.3
+
+# Defaults for claude_cli and openai_compatible when llm_agents.py does not set per-agent overrides.
+CLAUDE_CLI_BINARY = "claude"
+OPENAI_COMPATIBLE_BASE_URL = ""
+OPENAI_COMPATIBLE_API_KEY = ""
+# Optional global override for openai_compatible model (prefer setting model in llm_agents.py per agent).
+OPENAI_COMPATIBLE_MODEL = ""
 
 # Max concurrent Historicus CLI calls (limits rate spikes; still parallel).
 HISTORICUS_MAX_CONCURRENT = 2

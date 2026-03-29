@@ -1,8 +1,11 @@
-"""Base agent — runs claude CLI via subprocess."""
+"""Base agent — LLM completion via pluggable provider (see llm_agents.py + agents/provider.py)."""
 
 import asyncio
 import json
 import logging
+
+import llm_agents
+from agents.provider import LlmProvider, build_provider_from_spec
 
 logger = logging.getLogger("roma.agents")
 
@@ -23,7 +26,7 @@ def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple
 
     if exc is not None:
         if isinstance(exc, FileNotFoundError):
-            return ("cli_missing", "Claude CLI not found on PATH.")
+            return ("cli_missing", "LLM backend executable not found on PATH (e.g. claude CLI).")
         if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
             return ("network", str(exc) or type(exc).__name__)
         if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionRefusedError, ConnectionAbortedError)):
@@ -50,45 +53,45 @@ def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple
 
 
 class BaseAgent:
-    def __init__(self, role: str, display_name: str, system_prompt: str, model: str = "sonnet"):
+    def __init__(
+        self,
+        role: str,
+        display_name: str,
+        system_prompt: str,
+        *,
+        llm_agent_key: str,
+        provider: LlmProvider | None = None,
+    ):
         self.role = role
         self.display_name = display_name
         self.system_prompt = system_prompt
-        self.model = model
+        self.llm_agent_key = llm_agent_key
+        spec = llm_agents.get_agent_llm_spec(llm_agent_key)
+        self.model = spec["model"]
+        self._provider_override = provider
 
     async def generate(self, instruction: str) -> dict:
-        """Call claude CLI once and return parsed JSON. Raises AgentGenerationError on any failure."""
+        """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure."""
         return await self._single_generate(instruction)
 
     async def _single_generate(self, instruction: str) -> dict:
-        """Call claude CLI once. Raises AgentGenerationError if the process or JSON output is invalid."""
+        """Call LLM once. Raises AgentGenerationError if the process or JSON output is invalid."""
         prompt = instruction + "\n\nRespond with ONLY valid JSON. No markdown, no code fences, no extra text."
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "claude",
-                "--print",
-                "--system-prompt", self.system_prompt,
-                "--output-format", "text",
-                "--model", self.model,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
+            model = spec["model"]
+            provider = (
+                self._provider_override
+                if self._provider_override is not None
+                else build_provider_from_spec(spec)
             )
-            stdout, stderr = await proc.communicate(input=prompt.encode())
-            stderr_text = stderr.decode(errors="replace")
-
-            if proc.returncode != 0:
-                logger.error(f"[{self.role}] CLI error: {stderr_text[:200]}")
-                pause_reason, pause_detail = classify_agent_failure(stderr_text, None)
-                raise AgentGenerationError(pause_reason, pause_detail)
-
-            raw = stdout.decode().strip()
-            if not raw:
-                raise AgentGenerationError(
-                    "api_error",
-                    "CLI returned empty stdout with exit code 0.",
-                )
+            raw = await provider.complete(
+                role=self.role,
+                system_prompt=self.system_prompt,
+                user_text=prompt,
+                model=model,
+            )
             logger.info(f"[{self.role}] response ({len(raw)} chars)")
             result = self._parse_json(raw)
             logger.info(f"[{self.role}] parsed: {list(result.keys())}")
@@ -97,7 +100,7 @@ class BaseAgent:
         except AgentGenerationError:
             raise
         except FileNotFoundError as e:
-            logger.error("claude CLI not found. Is it installed?")
+            logger.error("LLM backend executable not found. Is it installed and on PATH?")
             pr, pd = classify_agent_failure("", e)
             raise AgentGenerationError(pr, pd) from e
         except Exception as e:

@@ -17,44 +17,44 @@
             <div class="agent-status" id="status-imperator" data-agent="imperator">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Imperator</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Director)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
             <div class="agent-status" id="status-cartographus" data-agent="cartographus">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Cartographus</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Surveyor)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
             <div class="agent-status" id="status-urbanista" data-agent="urbanista">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Urbanista</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Architect)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
             <div class="agent-status" id="status-historicus" data-agent="historicus">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Historicus</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Fact Check)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
             <div class="agent-status" id="status-faber" data-agent="faber">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Faber</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Builder)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
             <div class="agent-status" id="status-civis" data-agent="civis">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Civis</span>
+                <span class="agent-timer" aria-live="polite"></span>
                 <span class="agent-purpose">(Culture)</span>
                 <span class="agent-state">idle</span>
-                <span class="agent-timer"></span>
             </div>
         </div>
     </div>
@@ -138,6 +138,7 @@
     <div class="bottom-buttons">
         <button class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
         <button class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
+        <button class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="Configure which model each agent uses (same as Configure AI on the start screen)">Configure AI</button>
         <button class="map-btn reset-btn" id="reset-btn" onclick="resetWorld()" title="Reset and rebuild from scratch">RESET</button>
     </div>
     <div id="tooltip"></div>
@@ -148,6 +149,8 @@
         <div class="select-content">
             <h1 class="select-title">ETERNAL CITIES</h1>
             <p class="select-subtitle">Choose a city and year to reconstruct</p>
+            <p class="select-ai-note">Set which model each agent uses here in the app — no config files to edit.</p>
+            <button type="button" class="select-ai-btn" id="select-ai-btn" onclick="toggleLlmSettingsOverlay()">Configure AI</button>
 
             <div class="city-grid" id="city-grid"></div>
 
@@ -163,6 +166,22 @@
             </div>
 
             <button class="start-btn" id="start-btn" disabled>BEGIN RECONSTRUCTION</button>
+        </div>
+    </div>
+
+    <!-- LLM backends (per agent) -->
+    <div class="llm-settings-overlay" id="llm-settings-overlay" aria-hidden="true">
+        <div class="llm-settings-panel">
+            <div class="llm-settings-header">
+                <h2 class="llm-settings-title">AI backends</h2>
+                <button type="button" class="close-btn" onclick="closeLlmSettingsOverlay()" aria-label="Close">&times;</button>
+            </div>
+            <p class="llm-settings-hint"><strong>Current</strong> is what is running now. <strong>New</strong> is what you are about to apply — click Save. Your choices are remembered for the next time you open the app. To keep an existing API key, leave the new key field blank.</p>
+            <div class="llm-settings-rows" id="llm-settings-rows"></div>
+            <div class="llm-settings-actions">
+                <button type="button" class="start-btn" id="llm-settings-save-btn" onclick="saveLlmSettingsFromForm()">Save</button>
+                <button type="button" class="paused-dismiss-btn" onclick="closeLlmSettingsOverlay()">Close</button>
+            </div>
         </div>
     </div>
 

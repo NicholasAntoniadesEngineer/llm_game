@@ -8,8 +8,17 @@ from pathlib import Path
 import config
 import server.app as server_module
 from server.app import app, world, bus, broadcast, chat_history
+import llm_agents
 from orchestration.engine import BuildEngine
-from persistence import load_state, SAVE_FILE, DISTRICTS_CACHE, SURVEYS_CACHE
+from persistence import (
+    DISTRICTS_CACHE,
+    SAVE_FILE,
+    SURVEYS_CACHE,
+    load_llm_settings,
+    load_state,
+    merge_llm_overrides_from_save,
+    save_llm_settings,
+)
 from config import GRID_WIDTH, GRID_HEIGHT, create_scenario
 
 logging.basicConfig(
@@ -33,6 +42,8 @@ BANNER = """
 ║                                                  ║
 ╚══════════════════════════════════════════════════╝
 """
+
+load_llm_settings()
 
 engine = BuildEngine(world, bus, broadcast, chat_history)
 
@@ -143,9 +154,20 @@ async def handle_resume():
     asyncio.create_task(engine.run())
 
 
+async def handle_llm_settings_save(overrides: dict):
+    """Persist per-agent LLM routing from UI; merges empty API key fields with existing."""
+    if not isinstance(overrides, dict):
+        return
+    current = llm_agents.get_runtime_overrides()
+    merged = merge_llm_overrides_from_save(current, overrides)
+    llm_agents.set_runtime_overrides(merged)
+    await asyncio.to_thread(save_llm_settings, merged)
+
+
 server_module.reset_callback = handle_reset
 server_module.start_callback = handle_start
 server_module.resume_callback = handle_resume
+server_module.llm_settings_callback = handle_llm_settings_save
 
 
 @app.on_event("startup")
