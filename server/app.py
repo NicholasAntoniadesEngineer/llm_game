@@ -80,6 +80,22 @@ def build_app(lifespan=None):
             for c in CITIES
         ]
 
+    @app.get("/api/session")
+    async def api_session():
+        """Whether a saved scenario exists (for Continue vs new city on reload)."""
+        import config as config_module
+
+        scen = getattr(config_module, "SCENARIO", None)
+        if not scen or not isinstance(scen, dict):
+            return {"has_active_scenario": False}
+        return {
+            "has_active_scenario": True,
+            "city": scen.get("location"),
+            "period": scen.get("period"),
+            "year": scen.get("focus_year"),
+            "started_at_s": scen.get("started_at_s"),
+        }
+
     @app.get("/api/llm-settings")
     async def api_get_llm_settings():
         """Load AI routing for the Configure AI panel (HTTP so it always works without WebSocket timing)."""

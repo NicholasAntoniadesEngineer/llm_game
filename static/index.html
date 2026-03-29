@@ -172,6 +172,12 @@
             <p class="select-ai-note">Set which model each agent uses here in the app — no config files to edit.</p>
             <button type="button" class="select-ai-btn" id="select-ai-btn" onclick="toggleLlmSettingsOverlay()">AI Settings</button>
 
+            <div class="select-continue-section" id="select-continue-section" hidden>
+                <p class="select-continue-lead" id="select-continue-lead">You have a saved session in progress.</p>
+                <button type="button" class="start-btn select-continue-btn" id="select-continue-btn">Continue current session</button>
+                <p class="select-or-new">Or pick a new city and year below.</p>
+            </div>
+
             <div class="city-grid" id="city-grid"></div>
 
             <div class="year-control" id="year-control">

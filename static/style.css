@@ -1150,7 +1150,8 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    animation: fadeIn 0.5s ease;
+    /* Stable on reload — no enter animation. */
+    animation: none;
 }
 
 .select-overlay.hidden {
@@ -1304,6 +1305,33 @@ body {
 .select-ai-btn:hover {
     border-color: #e8c547;
     background: rgba(45, 42, 62, 0.98);
+}
+
+.select-continue-section {
+    margin: 0 auto 24px;
+    padding: 18px 20px 20px;
+    max-width: 520px;
+    border: 1px solid #c9a84c44;
+    border-radius: 12px;
+    background: rgba(12, 10, 22, 0.85);
+}
+
+.select-continue-lead {
+    font-size: 0.92rem;
+    color: #c4bdb0;
+    line-height: 1.5;
+    margin: 0 0 14px;
+}
+
+.select-continue-btn {
+    margin-bottom: 12px;
+}
+
+.select-or-new {
+    font-size: 0.78rem;
+    color: #6a6258;
+    margin: 0;
+    letter-spacing: 0.04em;
 }
 
 .select-reset-wrap {

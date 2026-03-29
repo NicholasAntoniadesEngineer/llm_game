@@ -275,10 +275,8 @@ server_module.engine_is_running = lambda: engine.running
 @asynccontextmanager
 async def _app_lifespan(_app):
     print(BANNER)
-    # Fresh session: wait for city selection + Start. Restored session: continue the build automatically.
-    if saved is not None and getattr(config, "SCENARIO", None) and not engine.running:
-        logging.info("Auto-resuming build loop (saved state after restart — same as WebSocket resume)")
-        await engine.schedule_run()
+    # Restored world/scenario may exist on disk, but the build does not start until the user clicks
+    # "Continue current session" in the UI (WebSocket `resume`) or starts a new city.
     yield
     await engine.graceful_shutdown()
     logging.info("Build engine stopped (server shutdown or reload)")

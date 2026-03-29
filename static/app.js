@@ -51,6 +51,13 @@ function clearWebSocketReconnectTimer() {
     }
 }
 
+/** If true, open WebSocket only after "Continue" or after BEGIN / reset (saved session on reload). */
+let pendingResumeOnOpen = false;
+let pendingStartOnOpen = null;
+let pendingResetOnOpen = false;
+/** True while the city overlay shows "Continue current session" and the user has not chosen yet. */
+let awaitingSessionChoice = false;
+
 let totalStructures = 0;
 let builtStructures = 0;
 let runStartedAtMs = null;
@@ -161,23 +168,26 @@ async function reconnectAiSettings() {
 
     reconnectDelay = 1000;
     clearWebSocketReconnectTimer();
+    const continueSection = document.getElementById("select-continue-section");
+    const skipWsForSessionChoice = continueSection && continueSection.hidden === false;
     try {
-        if (!ws || ws.readyState === WebSocket.CLOSED) {
-            connect();
-        } else {
-            // Force a clean reconnect without waiting for backoff.
-            try {
-                ws.onclose = null;
-            } catch (e) {
-                /* ignore */
+        if (!skipWsForSessionChoice) {
+            if (!ws || ws.readyState === WebSocket.CLOSED) {
+                connect();
+            } else {
+                try {
+                    ws.onclose = null;
+                } catch (e) {
+                    /* ignore */
+                }
+                try {
+                    ws.close();
+                } catch (e) {
+                    /* ignore */
+                }
+                setConnectionStatus(false);
+                setTimeout(() => connect(), 50);
             }
-            try {
-                ws.close();
-            } catch (e) {
-                /* ignore */
-            }
-            setConnectionStatus(false);
-            setTimeout(() => connect(), 50);
         }
     } catch (e) {
         console.error("Reconnect failed:", e);
@@ -233,6 +243,35 @@ function connect() {
         setConnectionStatus(true);
         reconnectDelay = 1000;
         updateAiSettingsConnectionStatus();
+        if (pendingResetOnOpen) {
+            pendingResetOnOpen = false;
+            try {
+                ws.send(JSON.stringify({ type: "reset" }));
+            } catch (e) {
+                console.error("reset send failed:", e);
+            }
+        } else if (pendingStartOnOpen) {
+            const p = pendingStartOnOpen;
+            pendingStartOnOpen = null;
+            try {
+                ws.send(JSON.stringify({
+                    type: "start",
+                    city: p.city,
+                    year: p.year,
+                }));
+            } catch (e) {
+                console.error("start send failed:", e);
+            }
+            document.getElementById("select-overlay").classList.add("hidden");
+        } else if (pendingResumeOnOpen) {
+            pendingResumeOnOpen = false;
+            try {
+                ws.send(JSON.stringify({ type: "resume" }));
+            } catch (e) {
+                console.error("resume send failed:", e);
+            }
+            document.getElementById("select-overlay").classList.add("hidden");
+        }
     };
 
     ws.onclose = () => {
@@ -273,8 +312,9 @@ function handleMessage(msg) {
             applyRunStartFromScenario(msg);
             startRunLengthTicker();
             updateTimeline(msg.period, msg.year);
-            // Hide selection overlay (reconnecting to active session)
-            document.getElementById("select-overlay").classList.add("hidden");
+            if (!awaitingSessionChoice) {
+                document.getElementById("select-overlay").classList.add("hidden");
+            }
             break;
 
         case "token_usage":
@@ -1263,6 +1303,9 @@ function resetWorld() {
     }
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "reset" }));
+    } else {
+        pendingResetOnOpen = true;
+        connect();
     }
     autoResumeOnceThisPageAttempted = false;
     // Clear local state
@@ -1295,6 +1338,8 @@ function resetWorld() {
     document.querySelectorAll(".city-card").forEach(c => c.classList.remove("selected"));
     document.getElementById("year-control").classList.remove("active");
     document.getElementById("start-btn").disabled = true;
+    const contSec = document.getElementById("select-continue-section");
+    if (contSec) contSec.hidden = true;
     document.getElementById("select-overlay").classList.remove("hidden");
 }
 
@@ -1706,7 +1751,12 @@ function updateYearDisplay(year) {
 
 function startReconstruction() {
     if (!selectedCity || selectedYear === null) return;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    awaitingSessionChoice = false;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        pendingStartOnOpen = { city: selectedCity.name, year: selectedYear };
+        connect();
+        return;
+    }
 
     ws.send(JSON.stringify({
         type: "start",
@@ -1714,8 +1764,37 @@ function startReconstruction() {
         year: selectedYear,
     }));
 
-    // Hide selection overlay
     document.getElementById("select-overlay").classList.add("hidden");
+}
+
+function continueCurrentSession() {
+    awaitingSessionChoice = false;
+    document.getElementById("select-continue-section").hidden = true;
+    pendingResumeOnOpen = true;
+    connect();
+}
+
+async function initEternalCitiesSession() {
+    awaitingSessionChoice = false;
+    await loadCities();
+    try {
+        const snap = await fetchJsonWithTimeout(apiUrl("/api/session"), 6000);
+        if (snap && snap.has_active_scenario) {
+            awaitingSessionChoice = true;
+            const lead = document.getElementById("select-continue-lead");
+            if (lead) {
+                const y = typeof snap.year === "number" ? formatYear(snap.year) : "—";
+                const loc = snap.city || "saved city";
+                const per = snap.period ? ` · ${snap.period}` : "";
+                lead.textContent = `Continue your saved session: ${loc}${per} (year ${y}).`;
+            }
+            document.getElementById("select-continue-section").hidden = false;
+            return;
+        }
+    } catch (e) {
+        console.warn("GET /api/session failed:", e);
+    }
+    connect();
 }
 
 // --- Init ---
@@ -1753,6 +1832,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Start button
     document.getElementById("start-btn").addEventListener("click", startReconstruction);
+
+    const continueBtn = document.getElementById("select-continue-btn");
+    if (continueBtn) continueBtn.addEventListener("click", continueCurrentSession);
 
     const FLOATING_TOOLS_POS_KEY = "eternal_cities_floating_tools_pos";
     const FLOATING_CAMERA_POS_KEY = "eternal_cities_floating_camera_pos";
@@ -1987,9 +2069,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
 
-    // Load cities for selection screen, then connect
-    loadCities();
-    connect();
+    void initEternalCitiesSession();
 
     // BFCache restore (back/forward): WebSocket is dead; reconnect once without stacking timers.
     window.addEventListener("pageshow", (ev) => {
