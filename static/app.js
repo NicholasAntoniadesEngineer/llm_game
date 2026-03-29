@@ -3,6 +3,8 @@
 let ws = null;
 let renderer = null;
 let reconnectDelay = 1000;
+let totalStructures = 0;
+let builtStructures = 0;
 
 function connect() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -41,6 +43,14 @@ function handleMessage(msg) {
         case "tile_update":
             renderer.updateTiles(msg.tiles);
             if (msg.period) updateTimeline(msg.period, msg.year);
+            builtStructures++;
+            updateProgressBar();
+            // Auto-fly camera to new building
+            if (msg.tiles && msg.tiles.length > 0 && renderer.flyTo) {
+                const t = msg.tiles[0];
+                const S = 10; // TILE_SIZE from renderer
+                renderer.flyTo((t.x + 0.5) * S, (t.y + 0.5) * S);
+            }
             hideLoading();
             break;
 
@@ -78,6 +88,8 @@ function handleMessage(msg) {
 
         case "master_plan":
             updateMasterPlan(msg.plan);
+            totalStructures += msg.plan.length;
+            updateProgressBar();
             break;
 
         case "map_description":
@@ -227,6 +239,27 @@ function updateStatus(status) {
 function formatYear(year) {
     if (year < 0) return `${Math.abs(year)} BC`;
     return `${year} AD`;
+}
+
+function updateProgressBar() {
+    let bar = document.getElementById("progress-bar");
+    if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "progress-bar";
+        bar.style.cssText = "position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,#c9a84c,#ffd700);z-index:999;transition:width 0.5s ease;";
+        document.body.appendChild(bar);
+    }
+    const pct = totalStructures > 0 ? (builtStructures / totalStructures * 100) : 0;
+    bar.style.width = pct + "%";
+
+    let label = document.getElementById("progress-label");
+    if (!label) {
+        label = document.createElement("div");
+        label.id = "progress-label";
+        label.style.cssText = "position:fixed;top:4px;left:50%;transform:translateX(-50%);color:#c9a84c;font-size:0.7rem;z-index:999;font-family:inherit;letter-spacing:1px;";
+        document.body.appendChild(label);
+    }
+    label.textContent = totalStructures > 0 ? `${builtStructures} / ${totalStructures} structures` : "";
 }
 
 // --- Tile detail popup ---

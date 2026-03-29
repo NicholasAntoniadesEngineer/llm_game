@@ -20,8 +20,8 @@ class WorldRenderer {
 
         // Scene — Mediterranean sky
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x7EC8E3);
-        this.scene.fog = new THREE.Fog(0x7EC8E3, 1500, 4000);
+        this.scene.background = new THREE.Color(0xc8b89a);
+        this.scene.fog = new THREE.FogExp2(0xc8b89a, 0.00025);
 
         // Camera
         this.camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.5, 5000);
@@ -60,6 +60,9 @@ class WorldRenderer {
         sc.near = 1; sc.far = 1500; sc.left = -600; sc.right = 600; sc.top = 600; sc.bottom = -600;
         this.scene.add(sun);
         this.scene.add(new THREE.HemisphereLight(0x8ec4e8, 0x8a7e5a, 0.35));
+        const fillLight = new THREE.DirectionalLight(0xffd4a0, 0.12);
+        fillLight.position.set(-200, 50, -100);
+        this.scene.add(fillLight);
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
@@ -156,6 +159,13 @@ class WorldRenderer {
         if (this._failed) return;
         this.cameraDistance = Math.max(5, Math.min(1500, this.cameraDistance * factor));
         this._updateCamera();
+    }
+
+    flyTo(worldX, worldZ) {
+        if (this._failed) return;
+        this._flyTarget = { x: worldX, z: worldZ };
+        this._flyStart = Date.now();
+        this._flyFrom = { x: this.cameraTarget.x, z: this.cameraTarget.z };
     }
 
     _updateCamera() {
@@ -348,10 +358,10 @@ class WorldRenderer {
         });
 
         if (animate) {
-            group.userData.animStartY = 5 * S;
+            group.userData.animStartY = -2 * S;
             group.userData.animTargetY = 0;
             group.userData.animStart = Date.now();
-            group.position.y = 5 * S;
+            group.position.y = -2 * S;
             this._animatingGroups.add(group);
         }
 
@@ -1106,7 +1116,10 @@ class WorldRenderer {
                     });
                 }
                 if (tooltip) {
-                    tooltip.textContent = tile.building_name || tile.terrain;
+                    const name = tile.building_name || tile.terrain;
+                    const type = tile.building_type ? ` (${tile.building_type})` : '';
+                    const desc = tile.description ? `\n${tile.description.substring(0, 80)}...` : '';
+                    tooltip.innerHTML = `<strong>${name}</strong>${type}${desc}`;
                     tooltip.style.display = "block";
                     tooltip.style.left = (e.clientX + 12) + "px";
                     tooltip.style.top = (e.clientY + 12) + "px";
@@ -1165,6 +1178,14 @@ class WorldRenderer {
         for (const c of this._waterMeshes) {
             const gp = c.parent; // group is the direct or indirect parent
             c.position.y = -0.03 + Math.sin(now * 0.002 + gp.position.x * 2 + gp.position.z * 3) * 0.012;
+        }
+        if (this._flyTarget) {
+            const t = Math.min(1, (now - this._flyStart) / 1500);
+            const ease = 1 - Math.pow(1 - t, 3);
+            this.cameraTarget.x = this._flyFrom.x + (this._flyTarget.x - this._flyFrom.x) * ease;
+            this.cameraTarget.z = this._flyFrom.z + (this._flyTarget.z - this._flyFrom.z) * ease;
+            this._updateCamera();
+            if (t >= 1) this._flyTarget = null;
         }
         this.renderer3d.render(this.scene, this.camera);
     }

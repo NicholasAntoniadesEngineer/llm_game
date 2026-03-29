@@ -14,8 +14,18 @@ class BaseAgent:
         self.system_prompt = system_prompt
         self.model = model
 
-    async def generate(self, instruction: str) -> dict:
-        """Call claude CLI and return parsed JSON response."""
+    async def generate(self, instruction: str, max_retries: int = 2) -> dict:
+        """Call claude CLI and return parsed JSON response. Retries on failure."""
+        for attempt in range(max_retries + 1):
+            result = await self._single_generate(instruction)
+            if not result.get("error"):
+                return result
+            if attempt < max_retries:
+                logger.warning(f"[{self.role}] attempt {attempt+1} failed, retrying...")
+        return result
+
+    async def _single_generate(self, instruction: str) -> dict:
+        """Call claude CLI once and return parsed JSON response."""
         prompt = instruction + "\n\nRespond with ONLY valid JSON. No markdown, no code fences, no extra text."
 
         try:

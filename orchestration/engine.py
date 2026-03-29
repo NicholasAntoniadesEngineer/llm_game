@@ -7,6 +7,7 @@ import logging
 from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
 from agents.base import BaseAgent
+from agents.golden_specs import get_golden_example
 from agents.prompts import (
     CARTOGRAPHUS_PLAN, CARTOGRAPHUS_SURVEY,
     URBANISTA, HISTORICUS,
@@ -178,6 +179,15 @@ class BuildEngine:
         if not master_plan:
             return
 
+        # Validate no overlapping tiles
+        all_tiles = {}
+        for struct in master_plan:
+            for t in struct.get("tiles", []):
+                key = (t["x"], t["y"])
+                if key in all_tiles:
+                    logger.warning(f"Tile overlap: {struct['name']} and {all_tiles[key]} at {key}")
+                all_tiles[key] = struct.get("name", "?")
+
         logger.info(f"Master plan: {len(master_plan)} structures")
         await self.broadcast({"type": "master_plan", "plan": master_plan})
 
@@ -191,29 +201,24 @@ class BuildEngine:
                     sum(t["y"] for t in stiles) / len(stiles),
                 )
 
-        # ─── Build each structure — maximum parallelism ───
+        # ─── Batch all Historicus calls in parallel for speed ───
+        hist_prompts = []
+        buildable = []
         for structure in master_plan:
-            if not self.running:
-                break
-
             name = structure.get("name", "Structure")
             btype = structure.get("building_type", "building")
             tiles = structure.get("tiles", [])
             desc = structure.get("description", "")
-            hist_note = structure.get("historical_note", "")
-
             if not tiles:
                 continue
-
-            # Skip buildings already placed on the grid
             first_tile = tiles[0]
             existing_tile = self.world.get_tile(first_tile["x"], first_tile["y"])
             if existing_tile and existing_tile.terrain != "empty":
                 logger.info(f"Skipping {name} — already built")
                 await self._chat("cartographus", "info", f"Skipping {name} — already built.")
                 continue
+            buildable.append(structure)
 
-            # Calculate distances to nearby structures using precomputed centers
             my_center = centers.get(name, (0, 0))
             neighbors = []
             for other in master_plan:
@@ -228,31 +233,58 @@ class BuildEngine:
                 neighbors.append({"name": other_name, "type": other.get("building_type"), "distance_tiles": dist_tiles, "distance_m": dist_meters})
             neighbors.sort(key=lambda n: n["distance_tiles"])
             nearest = neighbors[:5]
-
             neighbor_desc = "\n".join(
                 f"  - {n['name']} ({n['type']}): {n['distance_tiles']} tiles away ({n['distance_m']}m)"
                 for n in nearest
             )
 
-            # Announce what we're building
+            hist_prompts.append({
+                "structure": structure,
+                "neighbor_desc": neighbor_desc,
+                "nearest": nearest,
+                "prompt": (
+                    f"Describe and fact-check: {name} ({btype})\n"
+                    f"In {district['name']}, year {district.get('year', '')} ({district.get('period', '')})\n"
+                    f"Context: {desc}\n"
+                    f"NEARBY STRUCTURES (distances are real-world meters):\n{neighbor_desc}\n\n"
+                    f"Include detailed physical appearance for the Architect. "
+                    f"Mention how this building relates spatially to its neighbors."
+                ),
+            })
+
+        # Fire all Historicus calls in parallel
+        hist_results = []
+        if hist_prompts:
+            await self._set_status("historicus", "thinking")
+            await self._chat("historicus", "info", f"Researching {len(hist_prompts)} structures in parallel...")
+            hist_tasks = [self.historicus.generate(hp["prompt"]) for hp in hist_prompts]
+            hist_results = await asyncio.gather(*hist_tasks)
+            await self._set_status("historicus", "idle")
+
+        # ─── Build each structure using pre-computed Historicus results ───
+        for idx, structure in enumerate(buildable):
+            if not self.running:
+                break
+
+            name = structure.get("name", "Structure")
+            btype = structure.get("building_type", "building")
+            tiles = structure.get("tiles", [])
+            desc = structure.get("description", "")
+            hist_note = structure.get("historical_note", "")
+            hp = hist_prompts[idx]
+            hist_result = hist_results[idx]
+            neighbor_desc = hp["neighbor_desc"]
+            nearest = hp["nearest"]
+
+            # Announce
             await self._chat("cartographus", "info",
                 f"Building: {name} ({btype}, {len(tiles)} tiles). "
-                f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else f"Building: {name} ({btype}, {len(tiles)} tiles)")
+                + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""))
 
-            # ─── STEP 1: Historicus describes the building ───
-            await self._set_status("historicus", "thinking")
-            hist_result = await self.historicus.generate(
-                f"Describe and fact-check: {name} ({btype})\n"
-                f"In {district['name']}, year {district.get('year', '')} ({district.get('period', '')})\n"
-                f"Context: {desc}\n"
-                f"NEARBY STRUCTURES (distances are real-world meters):\n{neighbor_desc}\n\n"
-                f"Include detailed physical appearance for the Architect. "
-                f"Mention how this building relates spatially to its neighbors."
-            )
-
+            # Show Historicus result
             hist_desc = hist_result.get("commentary", "")
             await self._set_status("historicus", "speaking")
-            await self._chat("historicus", "fact_check", hist_desc, approved=hist_result.get("approved", True))
+            await self._chat("historicus", "fact_check", hist_desc)
             await self._set_status("historicus", "idle")
 
             # ─── WAVE 2: Urbanista sculpts using historian's description ───
@@ -278,6 +310,8 @@ class BuildEngine:
                 f"Anchor tile: ({anchor_x}, {anchor_y})\n"
                 f"All tiles: {json.dumps(tiles)}\n\n"
                 f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
+                f"REFERENCE EXAMPLE for a {btype} at this footprint:\n{get_golden_example(btype, footprint_w, footprint_d)}\n"
+                f"Use similar proportions but modify materials, details, and style based on the Historian's description.\n\n"
                 f"HISTORIAN'S PHYSICAL DESCRIPTION (match this closely):\n{physical_desc}\n\n"
                 f"Surveyor context: {desc}\n\n"
                 f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
