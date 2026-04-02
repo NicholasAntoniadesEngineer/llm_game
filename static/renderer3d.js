@@ -388,10 +388,10 @@ class WorldRenderer {
         }
 
         this.scene.background = skyTex;
-        this.scene.fog = null;
+        // Fog is set in init() after scene scale is known
     }
 
-    /** Warm dusty horizon + soft sun for Mediterranean / ancient city mood. */
+    /** Warm dusty horizon + soft sun + wispy clouds for ancient city atmosphere. */
     _createProceduralSkyTexture() {
         const w = 1024;
         const h = 512;
@@ -399,13 +399,17 @@ class WorldRenderer {
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext("2d");
+
+        // Upper sky gradient — deep blue to warm horizon
         const top = ctx.createLinearGradient(0, 0, 0, h * 0.42);
-        top.addColorStop(0, "#9ec8e8");
-        top.addColorStop(0.45, "#d4c4a8");
+        top.addColorStop(0, "#7eb8e0");
+        top.addColorStop(0.3, "#a8c8d8");
+        top.addColorStop(0.6, "#d4c4a8");
         top.addColorStop(1, "#c4a878");
         ctx.fillStyle = top;
         ctx.fillRect(0, 0, w, h * 0.42);
 
+        // Lower sky (horizon + below)
         const low = ctx.createLinearGradient(0, h * 0.38, 0, h);
         low.addColorStop(0, "#b8a888");
         low.addColorStop(0.55, "#9a8a6a");
@@ -413,12 +417,55 @@ class WorldRenderer {
         ctx.fillStyle = low;
         ctx.fillRect(0, h * 0.38, w, h * 0.62);
 
+        // Procedural cloud wisps — layered noise for natural cirrus patterns
+        const cloudData = ctx.getImageData(0, 0, w, h);
+        const data = cloudData.data;
+        // Simple multi-octave noise for cloud density
+        const noise = (px, py, freq) => {
+            const x = px * freq, y = py * freq;
+            return (Math.sin(x * 1.3 + y * 0.7) * 0.5
+                + Math.sin(x * 0.4 - y * 1.1) * 0.3
+                + Math.sin(x * 2.1 + y * 1.9) * 0.2)
+                * Math.sin(x * 0.07 + y * 0.05);
+        };
+        for (let py = 0; py < h * 0.38; py++) {
+            const skyFrac = py / (h * 0.38); // 0 at top, 1 at horizon
+            // Clouds concentrated in mid-sky band (20-60% height)
+            const bandWeight = Math.max(0, 1 - Math.pow((skyFrac - 0.35) / 0.25, 2));
+            if (bandWeight < 0.01) continue;
+            for (let px = 0; px < w; px++) {
+                const n = noise(px / w, py / h, 12) * 0.4
+                    + noise(px / w + 3.7, py / h + 1.2, 24) * 0.3
+                    + noise(px / w + 7.1, py / h + 5.3, 48) * 0.2;
+                const density = Math.max(0, n * bandWeight);
+                if (density > 0.05) {
+                    const idx = (py * w + px) * 4;
+                    const alpha = Math.min(0.45, density * 0.8);
+                    // Blend white cloud over existing sky
+                    data[idx] = Math.min(255, data[idx] + 255 * alpha);
+                    data[idx + 1] = Math.min(255, data[idx + 1] + 248 * alpha);
+                    data[idx + 2] = Math.min(255, data[idx + 2] + 235 * alpha);
+                }
+            }
+        }
+        ctx.putImageData(cloudData, 0, 0);
+
+        // Sun glow — warm directional light source
         const sunX = w * 0.62;
-        const sunY = h * 0.2;
+        const sunY = h * 0.18;
         const sunR = Math.min(w, h) * 0.085;
+        // Outer halo
+        const halo = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 4.5);
+        halo.addColorStop(0, "rgba(255,240,200,0.15)");
+        halo.addColorStop(0.5, "rgba(255,220,160,0.06)");
+        halo.addColorStop(1, "rgba(255,200,120,0)");
+        ctx.fillStyle = halo;
+        ctx.fillRect(0, 0, w, h * 0.45);
+        // Core glow
         const rg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR * 2.8);
-        rg.addColorStop(0, "rgba(255,248,220,0.95)");
-        rg.addColorStop(0.25, "rgba(255,220,160,0.35)");
+        rg.addColorStop(0, "rgba(255,252,235,0.95)");
+        rg.addColorStop(0.15, "rgba(255,240,200,0.6)");
+        rg.addColorStop(0.4, "rgba(255,220,160,0.2)");
         rg.addColorStop(1, "rgba(255,200,120,0)");
         ctx.fillStyle = rg;
         ctx.fillRect(0, 0, w, h * 0.45);
@@ -979,6 +1026,11 @@ class WorldRenderer {
         }
 
         this._resetCameraPoseToMapCenter(midY, mapW, mapH);
+
+        // Atmospheric fog — fades distant buildings into a warm haze
+        // Density tuned to scene scale: objects at ~60% of diagonal start fading
+        const fogDensity = 0.00025 / Math.max(1, diagonal / 4000);
+        this.scene.fog = new THREE.FogExp2(0xc4b498, fogDensity);
 
         // Earth tone heightfield — matches _surfaceYAtWorldXZ for building / terrain props
         const earth = 0x9a7b52;
