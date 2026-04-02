@@ -1122,13 +1122,26 @@ class BuildEngine:
             if btype in OPEN_TERRAIN_TYPES:
                 golden_example_str = "[]"
                 ref_db_section = ""
+                # For large open terrain (>40 tiles), use bounding box + sample tiles
+                if len(tiles) > 40:
+                    sample_tiles = tiles[:5] + tiles[-5:] if len(tiles) > 10 else tiles[:5]
+                    terrain_tiles_str = (
+                        f"Bounding box: ({anchor_x},{anchor_y}) to ({max(xs)},{max(ys)}) — "
+                        f"{len(tiles)} tiles total.\n"
+                        f"Sample tiles: {json.dumps(sample_tiles)}\n"
+                        f"Output a SINGLE representative tile with color/scenery, plus `commentary`. "
+                        f"The engine replicates it to all {len(tiles)} coordinates."
+                    )
+                else:
+                    terrain_tiles_str = f"Survey tile list (coordinates and elevations): {json.dumps(tiles)}"
+
                 prompt = (
                     f"OPEN SPACE / SCENERY (not a building): {name}\n"
                     f"Surface type: {btype}\n"
                     f"City: {city_loc}, {scenario.get('period', '')}\n"
                     f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
                     f"Reference corner tile: ({anchor_x}, {anchor_y}), mean elevation: {avg_elevation}\n"
-                    f"Survey tile list (coordinates and elevations): {json.dumps(tiles)}\n\n"
+                    f"{terrain_tiles_str}\n\n"
                     f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
                 )
                 if env_note:
@@ -1161,12 +1174,24 @@ class BuildEngine:
                         f"use when they align with the site brief):\n{ref_db_block}\n\n"
                     )
 
+                # For large buildings (>30 tiles), simplify tile list to bounding box
+                # to reduce prompt size. The model only needs to output the anchor tile's
+                # spec — the engine populates secondary tiles from the anchor.
+                if len(tiles) > 30:
+                    tiles_str = (
+                        f"Bounding box: ({anchor_x},{anchor_y}) to ({max(xs)},{max(ys)}) — "
+                        f"{len(tiles)} tiles total. Output ONLY the anchor tile ({anchor_x},{anchor_y}) "
+                        f"with full spec.components. The engine auto-fills secondary tiles."
+                    )
+                else:
+                    tiles_str = f"All tiles: {json.dumps(tiles)}"
+
                 prompt = (
                     f"Design: {name}\nType: {btype}\n"
                     f"City: {city_loc}, {scenario.get('period', '')}\n"
                     f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
                     f"Anchor tile: ({anchor_x}, {anchor_y}), elevation: {avg_elevation}\n"
-                    f"All tiles: {json.dumps(tiles)}\n\n"
+                    f"{tiles_str}\n\n"
                     f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
                     f"{ref_db_section}"
                     f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
@@ -1331,6 +1356,48 @@ class BuildEngine:
                     logger.warning("Urbanista returned no in-bounds tiles for %s — skipping", name)
                     await self._chat("urbanista", "info", f"Skipped {name} — no valid tiles. Continuing.")
                     continue
+
+                # Auto-fill: if Urbanista returned fewer tiles than the survey
+                # (because we told large buildings to output only the anchor), fill the rest
+                survey_coords = {(t["x"], t["y"]) for t in tiles}
+                returned_coords = {(td.get("x"), td.get("y")) for td in final_tiles}
+                missing_coords = survey_coords - returned_coords
+                if missing_coords and len(final_tiles) >= 1:
+                    template_td = final_tiles[0]
+                    for td in final_tiles:
+                        if td.get("x") == anchor_x and td.get("y") == anchor_y:
+                            template_td = td
+                            break
+                    is_terrain = job["btype"] in OPEN_TERRAIN_TYPES
+                    for (mx, my) in missing_coords:
+                        if is_terrain:
+                            sec_tile = {
+                                "x": mx, "y": my,
+                                "terrain": job["btype"],
+                                "building_name": template_td.get("building_name", name),
+                                "building_type": job["btype"],
+                                "description": f"Part of {name}",
+                                "elevation": avg_elevation,
+                            }
+                            # Copy scenery spec from template if present
+                            t_spec = template_td.get("spec")
+                            if t_spec and isinstance(t_spec, dict):
+                                sec_tile["spec"] = {k: v for k, v in t_spec.items() if k != "anchor"}
+                            # Copy color from template
+                            if template_td.get("color"):
+                                sec_tile["color"] = template_td["color"]
+                        else:
+                            sec_tile = {
+                                "x": mx, "y": my,
+                                "terrain": "building",
+                                "building_name": template_td.get("building_name", name),
+                                "building_type": template_td.get("building_type", job["btype"]),
+                                "description": f"Part of {name}",
+                                "elevation": avg_elevation,
+                                "spec": {"anchor": {"x": anchor_x, "y": anchor_y}},
+                            }
+                        final_tiles.append(sec_tile)
+                    logger.info("Auto-filled %d secondary tiles for %s (%s)", len(missing_coords), name, job["btype"])
 
                 # Inject anchors for multi-tile buildings if AI didn't set them (not for procedural terrain)
                 if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
