@@ -1354,29 +1354,29 @@ class BuildEngine:
                     fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * 0.9, 2)
                     collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
                     if collisions:
-                        collision_report = "\n".join(collisions)
-                        logger.warning("Geometry collisions for %s:\n%s", name, collision_report)
+                        collision_report = "\n".join(collisions[:6])  # Cap at 6 to keep prompt short
+                        logger.warning("Geometry collisions for %s: %d issues", name, len(collisions))
                         await self._chat("urbanista", "info",
                             f"Geometry issues in {name}: {len(collisions)} collision(s). Requesting fix...")
-                        # One-shot fix: ask Urbanista to regenerate with collision feedback
+                        # Quick fix attempt (5 min max, no retry) — if it fails, use original
                         fix_prompt = (
-                            f"Your previous design for {name} has GEOMETRY COLLISIONS that cause "
-                            f"walls, pillars, and floors to clip through each other in 3D:\n\n"
+                            f"GEOMETRY FIX for {name} ({fp_w}x{fp_d} footprint):\n"
                             f"{collision_report}\n\n"
-                            f"FIX THESE ISSUES by adjusting component dimensions and positions:\n"
-                            f"- Components at the same stack level must not overlap horizontally\n"
-                            f"- A colonnade inside a block must be SMALLER than the block\n"
-                            f"- Walls must not extend beyond the footprint ({fp_w}x{fp_d})\n"
-                            f"- Use stack_role correctly: foundation→structural→infill→roof→decorative\n"
-                            f"- Structural components stack ABOVE foundation, roof ABOVE structural\n\n"
-                            f"Return the COMPLETE corrected JSON (same format as before). "
-                            f"Keep the same overall design but fix the geometry."
+                            f"RULES:\n"
+                            f"- foundation (podium) is the base — structural sits ABOVE it\n"
+                            f"- Do NOT put colonnade + walls + block all as structural — they overlap!\n"
+                            f"- colonnade wraps the EXTERIOR; walls/cella are INSIDE (use infill role)\n"
+                            f"- Roof sits above the highest structural component\n"
+                            f"- decorative (doors, pilasters) go on the facade, NOT filling the volume\n\n"
+                            f"Return the CORRECTED JSON. Same format, same design, fixed geometry."
                         )
                         try:
-                            fixed = await self._urbanista_generate_bounded(fix_prompt)
+                            fixed = await asyncio.wait_for(
+                                self.urbanista.generate(fix_prompt),
+                                timeout=300,  # 5 min max for geometry fix
+                            )
                             fixed = sanitize_urbanista_output(fixed)
                             validate_urbanista_arch_result(fixed)
-                            # Check if fix actually resolved collisions
                             fixed_anchor = None
                             for td in fixed.get("tiles", []):
                                 if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
@@ -1390,9 +1390,11 @@ class BuildEngine:
                                     await self._chat("urbanista", "info",
                                         f"Fixed {name}: {len(collisions)}→{len(new_collisions)} collision(s)")
                                 else:
-                                    logger.info("Geometry fix for %s did not improve — using original", name)
+                                    logger.info("Geometry fix for %s did not improve (%d→%d) — using original", name, len(collisions), len(new_collisions))
                             else:
                                 arch_result = fixed
+                        except asyncio.TimeoutError:
+                            logger.warning("Geometry fix for %s timed out (5min) — using original", name)
                         except Exception as fix_err:
                             logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
 
