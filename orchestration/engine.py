@@ -51,6 +51,7 @@ from orchestration.validation import (
     validate_urbanista_tiles,
     validate_urbanista_arch_result,
     sanitize_urbanista_output,
+    check_component_collisions,
     UrbanistaValidationError,
 )
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
@@ -1341,6 +1342,59 @@ class BuildEngine:
                     logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
                     await self._chat("urbanista", "info", f"Skipped {name} — validation error. Continuing.")
                     continue
+
+                # ── Geometry collision check — detect and fix overlapping components ──
+                anchor_tile = None
+                for td in arch_result.get("tiles", []):
+                    if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
+                        anchor_tile = td
+                        break
+                if anchor_tile and job["btype"] not in OPEN_TERRAIN_TYPES:
+                    fp_w = round((max(t["x"] for t in tiles) - min(t["x"] for t in tiles) + 1) * 0.9, 2)
+                    fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * 0.9, 2)
+                    collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
+                    if collisions:
+                        collision_report = "\n".join(collisions)
+                        logger.warning("Geometry collisions for %s:\n%s", name, collision_report)
+                        await self._chat("urbanista", "info",
+                            f"Geometry issues in {name}: {len(collisions)} collision(s). Requesting fix...")
+                        # One-shot fix: ask Urbanista to regenerate with collision feedback
+                        fix_prompt = (
+                            f"Your previous design for {name} has GEOMETRY COLLISIONS that cause "
+                            f"walls, pillars, and floors to clip through each other in 3D:\n\n"
+                            f"{collision_report}\n\n"
+                            f"FIX THESE ISSUES by adjusting component dimensions and positions:\n"
+                            f"- Components at the same stack level must not overlap horizontally\n"
+                            f"- A colonnade inside a block must be SMALLER than the block\n"
+                            f"- Walls must not extend beyond the footprint ({fp_w}x{fp_d})\n"
+                            f"- Use stack_role correctly: foundation→structural→infill→roof→decorative\n"
+                            f"- Structural components stack ABOVE foundation, roof ABOVE structural\n\n"
+                            f"Return the COMPLETE corrected JSON (same format as before). "
+                            f"Keep the same overall design but fix the geometry."
+                        )
+                        try:
+                            fixed = await self._urbanista_generate_bounded(fix_prompt)
+                            fixed = sanitize_urbanista_output(fixed)
+                            validate_urbanista_arch_result(fixed)
+                            # Check if fix actually resolved collisions
+                            fixed_anchor = None
+                            for td in fixed.get("tiles", []):
+                                if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
+                                    fixed_anchor = td
+                                    break
+                            if fixed_anchor:
+                                new_collisions = check_component_collisions(fixed_anchor["spec"], fp_w, fp_d)
+                                if len(new_collisions) < len(collisions):
+                                    arch_result = fixed
+                                    logger.info("Geometry fix for %s: %d→%d collisions", name, len(collisions), len(new_collisions))
+                                    await self._chat("urbanista", "info",
+                                        f"Fixed {name}: {len(collisions)}→{len(new_collisions)} collision(s)")
+                                else:
+                                    logger.info("Geometry fix for %s did not improve — using original", name)
+                            else:
+                                arch_result = fixed
+                        except Exception as fix_err:
+                            logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
 
                 await self._set_status("urbanista", "speaking")
                 commentary = arch_result.get("commentary", "Design ready.")
