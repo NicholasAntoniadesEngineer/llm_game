@@ -15,7 +15,11 @@ RENDERER_COMPONENT_TYPES = frozenset({
     "procedural",
 })
 
-PROCEDURAL_SHAPES = frozenset({"box", "cylinder", "sphere", "cone", "torus", "plane"})
+PROCEDURAL_SHAPES = frozenset({
+    "box", "cylinder", "sphere", "cone", "torus", "plane",
+    # Compound shapes (renderer expands into multiple meshes)
+    "stacked_tower", "tiered_pyramid", "colonnade_ring", "water_channel", "arch",
+})
 
 STACK_ROLES = frozenset({
     "foundation", "structural", "infill", "roof", "decorative", "freestanding",
@@ -276,6 +280,69 @@ def _validate_component(comp: dict, ctx: str) -> None:
                 raise UrbanistaValidationError(f"{ctx} relates_to[{j}]: relation must be string")
 
     _validate_optional_pbr(comp, ctx)
+
+
+_NAMED_COLOR_MAP = {
+    "white": "#F0F0F0", "black": "#1A1008", "red": "#CC3333", "blue": "#2E86AB",
+    "green": "#3A7D44", "gold": "#FFD700", "bronze": "#8B6914", "silver": "#C0C0C0",
+    "grey": "#808080", "gray": "#808080", "brown": "#6B4226", "orange": "#CC5533",
+    "yellow": "#DAA520", "cream": "#F5E6C8", "tan": "#C8B070", "beige": "#F0EAD6",
+    "terracotta": "#C45A3C", "sandstone": "#C8B070", "marble": "#F0F0F0",
+    "limestone": "#F5E6C8", "granite": "#808080", "obsidian": "#2A2A2A",
+    "jade": "#3A7D44", "ivory": "#FFFFF0", "copper": "#8B6914",
+}
+
+
+def sanitize_urbanista_output(arch_result: dict) -> dict:
+    """Auto-correct common Urbanista errors before validation. Returns a cleaned copy."""
+    if not isinstance(arch_result, dict):
+        return arch_result
+    fixes = 0
+    tiles = arch_result.get("tiles")
+    if not isinstance(tiles, list):
+        return arch_result
+    for td in tiles:
+        if not isinstance(td, dict):
+            continue
+        spec = td.get("spec")
+        if not isinstance(spec, dict):
+            continue
+        # Fix color names → hex in components
+        for comp in spec.get("components", []):
+            if not isinstance(comp, dict):
+                continue
+            c = comp.get("color")
+            if isinstance(c, str) and not c.startswith("#"):
+                mapped = _NAMED_COLOR_MAP.get(c.lower().strip())
+                if mapped:
+                    comp["color"] = mapped
+                    fixes += 1
+            # Fix procedural with missing parts
+            if comp.get("type") == "procedural" and not comp.get("parts"):
+                comp["parts"] = [{"shape": "box", "width": 0.2, "height": 0.2, "depth": 0.2, "color": comp.get("color", "#808080"), "position": [0, 0, 0]}]
+                if not comp.get("stack_role"):
+                    comp["stack_role"] = "structural"
+                fixes += 1
+            # Fix missing stack_role on procedural
+            if comp.get("type") == "procedural" and not comp.get("stack_role"):
+                comp["stack_role"] = "structural"
+                fixes += 1
+        # Fix color names in procedural parts
+        for comp in spec.get("components", []):
+            if not isinstance(comp, dict):
+                continue
+            for part in comp.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                c = part.get("color")
+                if isinstance(c, str) and not c.startswith("#"):
+                    mapped = _NAMED_COLOR_MAP.get(c.lower().strip())
+                    if mapped:
+                        part["color"] = mapped
+                        fixes += 1
+    if fixes:
+        logger.info("Sanitized Urbanista output: %d auto-corrections applied", fixes)
+    return arch_result
 
 
 def validate_urbanista_arch_result(arch_result: dict) -> dict:

@@ -10,6 +10,7 @@ from typing import Any
 logger = logging.getLogger("roma.reference_db")
 
 _CACHE: list[dict[str, Any]] | None = None
+_LOOKUP_CACHE: dict[tuple[str, str, int], dict[str, Any] | None] = {}
 
 
 def _data_path() -> Path:
@@ -17,9 +18,10 @@ def _data_path() -> Path:
 
 
 def load_architectural_entries() -> list[dict[str, Any]]:
-    global _CACHE
+    global _CACHE, _LOOKUP_CACHE
     if _CACHE is not None:
         return _CACHE
+    _LOOKUP_CACHE.clear()
     path = _data_path()
     if not path.is_file():
         logger.warning("No architectural_reference.json at %s", path)
@@ -50,6 +52,10 @@ def lookup_architectural_reference(
         yi = int(year)
     except (TypeError, ValueError):
         yi = 0
+
+    cache_key = (btype, city_l, yi)
+    if cache_key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[cache_key]
 
     best: dict[str, Any] | None = None
     best_score = -1
@@ -95,6 +101,7 @@ def lookup_architectural_reference(
             best_score = score
             best = e
 
+    _LOOKUP_CACHE[cache_key] = best
     return best
 
 

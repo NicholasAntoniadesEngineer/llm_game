@@ -15,13 +15,6 @@
             <div class="subtitle" id="subtitle">AI agents reconstruct a historical city — in real time</div>
         </div>
         <div class="agent-status-bar" id="agent-status-bar">
-            <div class="agent-status" id="status-imperator" data-agent="imperator">
-                <span class="agent-dot"></span>
-                <span class="agent-label">Imperator</span>
-                <span class="agent-timer" aria-live="polite"></span>
-                <span class="agent-purpose">(Director)</span>
-                <span class="agent-state">idle</span>
-            </div>
             <div class="agent-status" id="status-cartographus" data-agent="cartographus">
                 <span class="agent-dot"></span>
                 <span class="agent-label">Cartographus</span>
@@ -38,20 +31,6 @@
                 <span class="agent-state">idle</span>
                 <span class="agent-tokens" id="agent-tokens-urbanista" title="Session tokens (Urbanista)"></span>
             </div>
-            <div class="agent-status" id="status-faber" data-agent="faber">
-                <span class="agent-dot"></span>
-                <span class="agent-label">Faber</span>
-                <span class="agent-timer" aria-live="polite"></span>
-                <span class="agent-purpose">(Builder)</span>
-                <span class="agent-state">idle</span>
-            </div>
-            <div class="agent-status" id="status-civis" data-agent="civis">
-                <span class="agent-dot"></span>
-                <span class="agent-label">Civis</span>
-                <span class="agent-timer" aria-live="polite"></span>
-                <span class="agent-purpose">(Culture)</span>
-                <span class="agent-state">idle</span>
-            </div>
         </div>
     </div>
 
@@ -59,9 +38,12 @@
         <span id="timeline-period-wrap" class="timeline-item">Period: <span class="period" id="timeline-period">—</span></span>
         <span id="timeline-run-wrap" class="timeline-item">Run: <span class="year" id="timeline-run-length">—</span></span>
         <span id="timeline-year-wrap" class="timeline-item">Year: <span class="year" id="timeline-year">—</span></span>
+        <span id="token-usage-wrap" class="timeline-item" title="Live token usage (session totals)">Tokens: <span class="year" id="token-usage-summary">—</span></span>
         <span id="connection-status" class="timeline-item connection-status disconnected" aria-live="polite">Connecting...</span>
         <span class="district" id="timeline-district"></span>
         <span class="status" id="timeline-status"></span>
+        <button type="button" class="pause-btn hidden" id="pause-btn" title="Pause/Resume build">Pause</button>
+        <button type="button" class="run-log-btn" id="run-log-btn" title="Download run log (.txt)">Log</button>
     </div>
 
     <div class="main" id="main-layout">
@@ -94,6 +76,7 @@
         <div class="map-overlay-content" id="map-overlay-content">
             <p>The Cartographus is surveying...</p>
         </div>
+        <button type="button" class="popup-bottom-close" onclick="closeMapOverlay()">Close</button>
     </div>
 
     <!-- Log viewer overlay -->
@@ -103,6 +86,7 @@
             <h3>Agent Logs</h3>
         </div>
         <div class="log-content" id="log-content"></div>
+        <button type="button" class="popup-bottom-close" onclick="closeLogOverlay()">Close</button>
     </div>
 
     <!-- Draggable tools (map, logs, server) — separate panel from camera -->
@@ -224,6 +208,7 @@
             <div class="llm-settings-actions">
                 <button type="button" class="paused-dismiss-btn" id="llm-settings-reconnect-btn" onclick="reconnectAiSettings()">Reconnect</button>
                 <button type="button" class="start-btn" id="llm-settings-save-btn" onclick="saveLlmSettingsFromForm()">Save</button>
+                <button type="button" class="popup-bottom-close" onclick="closeLlmSettingsOverlay()">Close</button>
             </div>
         </div>
     </div>

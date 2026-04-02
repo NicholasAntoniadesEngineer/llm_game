@@ -44,6 +44,9 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+from run_log import init_run_log
+init_run_log()
+
 # Touched by POST /api/restart-server when ETERNAL_CITIES_RELOAD=1 so uvicorn --reload picks up a restart request.
 RELOAD_SENTINEL = Path(__file__).resolve().parent / "reload_trigger.txt"
 
@@ -84,8 +87,16 @@ else:
     logging.info("Starting fresh — awaiting user selection")
 
 
+_engine_action_lock = asyncio.Lock()
+
+
 async def handle_start(city_name, year):
     """User selected a city and year — create scenario and start engine."""
+    async with _engine_action_lock:
+        await _handle_start_inner(city_name, year)
+
+
+async def _handle_start_inner(city_name, year):
     was_running = engine.running
     if was_running:
         engine.running = False
@@ -97,6 +108,8 @@ async def handle_start(city_name, year):
 
     await engine.abort_pipeline_tasks()
     engine.reset_pipeline_for_new_run()
+    server_module.agent_status_by_agent.clear()
+    await engine.broadcast_all_agents_idle()
 
     # Create and set the scenario
     config.SCENARIO = create_scenario(city_name, year)
@@ -140,6 +153,11 @@ async def handle_start(city_name, year):
 
 async def handle_reset():
     """Reset world, clear save, restart engine."""
+    async with _engine_action_lock:
+        await _handle_reset_inner()
+
+
+async def _handle_reset_inner():
     engine.running = False
     await engine.cancel_run_task_join()
     await engine.abort_pipeline_tasks()
@@ -159,6 +177,8 @@ async def handle_reset():
     chat_history.clear()
     engine.districts = []
     engine.district_index = 0
+    server_module.agent_status_by_agent.clear()
+    await engine.broadcast_all_agents_idle()
 
     if SAVE_FILE.exists():
         SAVE_FILE.unlink()
@@ -172,15 +192,52 @@ async def handle_reset():
     await broadcast(world.to_dict())
 
 
+async def handle_pause():
+    """User-initiated pause: stop the engine, kill all agent subprocesses, save state."""
+    async with _engine_action_lock:
+        await _handle_pause_inner()
+
+
+async def _handle_pause_inner():
+    if not config.SCENARIO:
+        logging.warning("Pause ignored: no active scenario")
+        return
+    if not engine.running:
+        logging.warning("Pause ignored: engine not running")
+        return
+    engine.running = False
+    # Cancel the main run task and all pipeline sub-tasks
+    await engine.cancel_run_task_join()
+    await engine.abort_pipeline_tasks()
+    # Kill any Claude CLI subprocesses still running
+    import subprocess
+    subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+    await engine.broadcast_all_agents_idle()
+    await asyncio.to_thread(
+        save_state,
+        world,
+        chat_history,
+        engine.district_index,
+        engine.districts,
+    )
+    await broadcast({
+        "type": "paused",
+        "reason": "user_pause",
+        "summary": "Build paused by user. All agent queries stopped.",
+    })
+    logging.info("Build paused by user — engine + CLI agents killed")
+
+
 async def handle_resume():
     """Continue build after API rate limit / error / network pause."""
-    if not config.SCENARIO:
-        logging.warning("Resume ignored: no active scenario")
-        return
-    if engine.running:
-        logging.warning("Resume ignored: engine already running")
-        return
-    await engine.schedule_run()
+    async with _engine_action_lock:
+        if not config.SCENARIO:
+            logging.warning("Resume ignored: no active scenario")
+            return
+        if engine.running:
+            logging.warning("Resume ignored: engine already running")
+            return
+        await engine.schedule_run()
 
 
 async def handle_llm_settings_save(overrides: dict):
@@ -211,6 +268,16 @@ async def handle_restart_server() -> dict:
             "error": "ETERNAL_CITIES_RELOAD is not enabled",
             "hint": "Start with: ETERNAL_CITIES_RELOAD=1 python main.py",
         }
+    # Fully stop the engine (cancel run task + pipeline) to prevent orphaned coroutines
+    # and token spend after the process restarts.
+    async with _engine_action_lock:
+        was_running = engine.running
+        if was_running:
+            engine.running = False
+        await engine.cancel_run_task_join()
+        await engine.abort_pipeline_tasks()
+    import subprocess as _sp
+    _sp.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
     if getattr(config, "SCENARIO", None):
         await asyncio.to_thread(
             save_state,
@@ -234,21 +301,22 @@ async def handle_restart_server() -> dict:
 
 async def handle_reset_timeline() -> dict:
     """New run clock (started_at_s) only; keeps tiles, chat, districts, and caches on disk."""
-    scen = getattr(config, "SCENARIO", None)
-    if not scen or not isinstance(scen, dict):
-        return {"ok": False, "error": "No active scenario"}
+    async with _engine_action_lock:
+        scen = getattr(config, "SCENARIO", None)
+        if not scen or not isinstance(scen, dict):
+            return {"ok": False, "error": "No active scenario"}
 
-    t = time.time()
-    merged = dict(scen)
-    merged["started_at_s"] = t
-    config.SCENARIO = merged
-    await asyncio.to_thread(
-        save_state,
-        world,
-        chat_history,
-        engine.district_index,
-        engine.districts,
-    )
+        t = time.time()
+        merged = dict(scen)
+        merged["started_at_s"] = t
+        config.SCENARIO = merged
+        await asyncio.to_thread(
+            save_state,
+            world,
+            chat_history,
+            engine.district_index,
+            engine.districts,
+        )
     await broadcast(
         {
             "type": "scenario",
@@ -266,6 +334,7 @@ async def handle_reset_timeline() -> dict:
 server_module.reset_callback = handle_reset
 server_module.start_callback = handle_start
 server_module.resume_callback = handle_resume
+server_module.pause_callback = handle_pause
 server_module.llm_settings_callback = handle_llm_settings_save
 server_module.restart_server_callback = handle_restart_server
 server_module.reset_timeline_callback = handle_reset_timeline

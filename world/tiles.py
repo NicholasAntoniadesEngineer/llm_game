@@ -1,10 +1,13 @@
 """Tile data model and building/terrain catalogs."""
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 
+# Fields always included in serialized output (even when default/None).
+_ALWAYS_SERIALIZE = ("x", "y", "terrain", "elevation", "color", "icon", "turn")
 
-@dataclass
+
+@dataclass(slots=True)
 class Tile:
     x: int
     y: int
@@ -23,9 +26,10 @@ class Tile:
     spec: Optional[dict] = None  # AI-generated building spec (dimensions, features, colors)
 
     def to_dict(self) -> dict:
-        d = {}
-        for k, v in self.__dict__.items():
-            if v is not None or k in ("x", "y", "terrain", "elevation", "color", "icon", "turn"):
+        d: dict = {}
+        for k in self.__slots__:
+            v = getattr(self, k)
+            if v is not None or k in _ALWAYS_SERIALIZE:
                 d[k] = v
         return d
 

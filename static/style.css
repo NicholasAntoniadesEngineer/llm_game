@@ -232,25 +232,13 @@ body {
 }
 
 /* Per-agent colors for dots */
-.agent-status[data-agent="imperator"] .agent-dot { background: #ffd700; }
 .agent-status[data-agent="cartographus"] .agent-dot { background: #e67e22; }
 .agent-status[data-agent="urbanista"] .agent-dot { background: #4a9eff; }
-.agent-status[data-agent="historicus"] .agent-dot { background: #2ecc71; }
-.agent-status[data-agent="faber"] .agent-dot { background: #ff8c00; }
-.agent-status[data-agent="civis"] .agent-dot { background: #e056a0; }
 
-.agent-status[data-agent="imperator"].thinking .agent-dot,
-.agent-status[data-agent="imperator"].speaking .agent-dot { color: #ffd700; }
 .agent-status[data-agent="cartographus"].thinking .agent-dot,
 .agent-status[data-agent="cartographus"].speaking .agent-dot { color: #e67e22; }
 .agent-status[data-agent="urbanista"].thinking .agent-dot,
 .agent-status[data-agent="urbanista"].speaking .agent-dot { color: #4a9eff; }
-.agent-status[data-agent="historicus"].thinking .agent-dot,
-.agent-status[data-agent="historicus"].speaking .agent-dot { color: #2ecc71; }
-.agent-status[data-agent="faber"].thinking .agent-dot,
-.agent-status[data-agent="faber"].speaking .agent-dot { color: #ff8c00; }
-.agent-status[data-agent="civis"].thinking .agent-dot,
-.agent-status[data-agent="civis"].speaking .agent-dot { color: #e056a0; }
 
 @keyframes pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
@@ -267,6 +255,58 @@ body {
     flex-wrap: wrap;
     gap: 16px;
     font-size: 0.85rem;
+}
+
+.run-log-btn {
+    margin-left: auto;
+    background: #1e1e3a;
+    color: #8a8aa0;
+    border: 1px solid #333358;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: 0.03em;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.run-log-btn:hover {
+    background: #2a2a52;
+    color: #c8c8e0;
+    border-color: #4a4a7a;
+}
+
+/* Pause / Resume button in timeline bar */
+.pause-btn {
+    margin-left: auto;
+    background: #3d2e00;
+    color: #f0b429;
+    border: 1px solid #b8860b;
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: 0.03em;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.pause-btn:hover {
+    background: #5a4400;
+    color: #ffd866;
+    border-color: #daa520;
+}
+.pause-btn.paused {
+    background: #0d3d1a;
+    color: #4ade80;
+    border: 1px solid #22c55e;
+}
+.pause-btn.paused:hover {
+    background: #145a28;
+    color: #6ee7a0;
+    border-color: #34d671;
+}
+.pause-btn.hidden {
+    display: none;
 }
 
 .timeline .period {
@@ -361,10 +401,15 @@ body {
     cursor: col-resize;
     background: linear-gradient(90deg, transparent 0%, #2a2a4a 35%, #3a3a5a 50%, #2a2a4a 65%, transparent 100%);
     align-self: stretch;
+    transition: background-color 0.15s;
 }
 
 .chat-resize-handle:hover {
     background: linear-gradient(90deg, transparent 0%, #c9a84c66 40%, #c9a84c99 50%, #c9a84c66 60%, transparent 100%);
+}
+
+.chat-resize-handle:active {
+    background: rgba(255, 255, 255, 0.12);
 }
 
 /* Chat panel */
@@ -481,8 +526,6 @@ body {
 }
 
 /* Agent-specific colors */
-.chat-msg.imperator { border-left-color: #ffd700; }
-.chat-msg.imperator .sender { color: #ffd700; }
 
 .chat-msg.cartographus { border-left-color: #e67e22; }
 .chat-msg.cartographus .sender { color: #e67e22; }
@@ -490,14 +533,6 @@ body {
 .chat-msg.urbanista { border-left-color: #4a9eff; }
 .chat-msg.urbanista .sender { color: #4a9eff; }
 
-.chat-msg.historicus { border-left-color: #2ecc71; }
-.chat-msg.historicus .sender { color: #2ecc71; }
-
-.chat-msg.faber { border-left-color: #ff8c00; }
-.chat-msg.faber .sender { color: #ff8c00; }
-
-.chat-msg.civis { border-left-color: #e056a0; }
-.chat-msg.civis .sender { color: #e056a0; }
 
 /* Special message types */
 .chat-msg.fact-check {
@@ -1859,4 +1894,53 @@ body {
     justify-content: flex-end;
     padding: 12px 20px 18px;
     border-top: 1px solid #2a2635;
+}
+
+/* Bottom close button on popups */
+.popup-bottom-close {
+    display: block;
+    margin: 8px auto 4px;
+    padding: 6px 24px;
+    background: #2a2a3a;
+    color: #999;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    font-family: inherit;
+}
+.popup-bottom-close:hover {
+    background: #3a3a52;
+    color: #ddd;
+    border-color: #5a5a7a;
+}
+
+/* Z-index layering */
+.floating-hud-panel,
+.floating-camera-panel { z-index: 100; }
+.floating-hud-panel:focus-within,
+.floating-camera-panel:focus-within { z-index: 110; }
+.tile-detail { z-index: 120; }
+.map-overlay, .log-overlay { z-index: 130; }
+.select-overlay { z-index: 200; }
+.paused-overlay { z-index: 200; }
+.llm-settings-overlay { z-index: 210; }
+.loading-overlay { z-index: 300; }
+
+@media (max-width: 900px) {
+    :root {
+        --chat-sidebar-width: 280px;
+    }
+}
+
+@media (max-width: 600px) {
+    .header h1 { font-size: 1rem; }
+    .subtitle { font-size: 0.7rem; }
+    .timeline { padding: 4px 12px; gap: 8px; font-size: 0.75rem; }
+    .agent-status-bar { gap: 8px; }
+    .agent-status .agent-purpose { display: none; }
+    .floating-hud-panel, .floating-camera-panel {
+        max-width: calc(100vw - 16px);
+    }
+    .run-log-btn, .pause-btn { font-size: 0.65rem; padding: 2px 6px; }
 }

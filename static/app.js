@@ -54,6 +54,23 @@ function clearWebSocketReconnectTimer() {
     }
 }
 
+/** Connection log buffer — kept in memory, appended to run log download. */
+const _wsLogBuffer = [];
+const _WS_LOG_MAX = 200;
+
+function wsLog(seq, msg) {
+    const ts = new Date().toISOString().slice(11, 23);
+    const line = `[ws#${seq}] ${ts} ${msg}`;
+    console.log(line);
+    _wsLogBuffer.push(line);
+    if (_wsLogBuffer.length > _WS_LOG_MAX) _wsLogBuffer.shift();
+}
+
+/** Get connection log as text (for diagnostics / log download). */
+function getWsLogText() {
+    return _wsLogBuffer.join("\n");
+}
+
 /** Belt-and-suspenders: if onclose/backoff misses a dead socket, retry periodically. */
 function ensureWebSocketPeriodicReconnect() {
     if (wsPeriodicReconnectIntervalId != null) return;
@@ -63,7 +80,7 @@ function ensureWebSocketPeriodicReconnect() {
             if (ws && ws.readyState === WebSocket.OPEN) return;
             if (ws && ws.readyState === WebSocket.CONNECTING) return;
             if (ws && ws.readyState === WebSocket.CLOSING) return;
-            console.log("Periodic WebSocket reconnect…");
+            wsLog(0, `periodic reconnect fired (readyState=${ws ? ws.readyState : "null"})`);
             reconnectDelay = 1000;
             clearWebSocketReconnectTimer();
             connect();
@@ -82,8 +99,14 @@ let awaitingSessionChoice = false;
 
 let totalStructures = 0;
 let builtStructures = 0;
+let totalTilesPlaced = 0;
+let lastBuildProgressAt = null;
+let buildProgressTimes = [];
 let runStartedAtMs = null;
 let runLengthInterval = null;
+let isPaused = false;
+/** Track last manual camera interaction — flyTo respects user control. */
+let lastManualCameraMs = 0;
 
 /** Stable run start for UI clock across refresh if server omits started_at_s (localStorage; cleared on reset). */
 const RUN_START_LOCAL_KEY = "eternal_cities_run_started_ms";
@@ -194,22 +217,10 @@ async function reconnectAiSettings() {
     const skipWsForSessionChoice = continueSection && continueSection.hidden === false;
     try {
         if (!skipWsForSessionChoice) {
-            if (!ws || ws.readyState === WebSocket.CLOSED) {
-                connect();
-            } else {
-                try {
-                    ws.onclose = null;
-                } catch (e) {
-                    /* ignore */
-                }
-                try {
-                    ws.close();
-                } catch (e) {
-                    /* ignore */
-                }
-                setConnectionStatus(false);
-                setTimeout(() => connect(), 50);
-            }
+            // connect() already handles closing the previous socket cleanly;
+            // calling it directly avoids a 50ms window where ws.onmessage is null
+            // and incoming messages (tile updates, chat) are silently dropped.
+            connect();
         }
     } catch (e) {
         console.error("Reconnect failed:", e);
@@ -244,11 +255,21 @@ async function reconnectAiSettings() {
     }
 }
 
+/** Connection sequence counter for log correlation. */
+let wsConnectSeq = 0;
+
 function connect() {
     clearWebSocketReconnectTimer();
+    const seq = ++wsConnectSeq;
+    const url = eternalCitiesWsUrl();
+    wsLog(seq, `connect() called — url=${url}`);
+
     if (ws && ws.readyState !== WebSocket.CLOSED) {
+        wsLog(seq, `closing previous socket (readyState=${ws.readyState})`);
         try {
+            ws.onmessage = null;
             ws.onclose = null;
+            ws.onerror = null;
         } catch (e) {
             /* ignore */
         }
@@ -258,15 +279,18 @@ function connect() {
             /* ignore */
         }
     }
-    ws = new WebSocket(eternalCitiesWsUrl());
+    ws = new WebSocket(url);
 
     ws.onopen = () => {
-        console.log("Connected to Roma Aeterna");
+        wsLog(seq, "OPEN — connected");
         setConnectionStatus(true);
         reconnectDelay = 1000;
         updateAiSettingsConnectionStatus();
+        // Only send pending actions on the FIRST connect (not on auto-reconnects).
+        // Pending flags are one-shot: cleared after sending.
         if (pendingResetOnOpen) {
             pendingResetOnOpen = false;
+            wsLog(seq, "sending pending reset (one-shot)");
             try {
                 ws.send(JSON.stringify({ type: "reset" }));
             } catch (e) {
@@ -275,6 +299,7 @@ function connect() {
         } else if (pendingStartOnOpen) {
             const p = pendingStartOnOpen;
             pendingStartOnOpen = null;
+            wsLog(seq, `sending pending start city=${p.city} year=${p.year} (one-shot)`);
             try {
                 ws.send(JSON.stringify({
                     type: "start",
@@ -287,35 +312,53 @@ function connect() {
             document.getElementById("select-overlay").classList.add("hidden");
         } else if (pendingResumeOnOpen) {
             pendingResumeOnOpen = false;
+            wsLog(seq, "sending pending resume (one-shot)");
             try {
                 ws.send(JSON.stringify({ type: "resume" }));
             } catch (e) {
                 console.error("resume send failed:", e);
             }
             document.getElementById("select-overlay").classList.add("hidden");
+        } else {
+            wsLog(seq, "reconnect — no pending actions (state-sync only)");
         }
     };
 
-    ws.onclose = () => {
-        console.log("Disconnected, reconnecting...");
+    ws.onclose = (ev) => {
+        wsLog(seq, `CLOSE — code=${ev.code} reason=${ev.reason || "(none)"} wasClean=${ev.wasClean} nextDelay=${reconnectDelay}ms`);
         setConnectionStatus(false);
         updateAiSettingsConnectionStatus();
         clearWebSocketReconnectTimer();
         wsReconnectTimer = setTimeout(() => {
             wsReconnectTimer = null;
+            wsLog(seq, `backoff timer fired — reconnecting (was ${reconnectDelay}ms)`);
             connect();
         }, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, 10000);
     };
 
     ws.onerror = (err) => {
-        console.error("WebSocket error:", err);
+        wsLog(seq, `ERROR — ${err.type || err}`);
     };
 
     ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        handleMessage(msg);
+        try {
+            const msg = JSON.parse(event.data);
+            handleMessage(msg);
+        } catch (e) {
+            console.error("Failed to parse WebSocket message:", e, "raw:", String(event.data).slice(0, 200));
+        }
     };
+
+    // Keepalive ping every 30s to prevent browser/proxy idle disconnect
+    if (window._wsKeepalive) clearInterval(window._wsKeepalive);
+    window._wsKeepalive = setInterval(() => {
+        try {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "ping" }));
+            }
+        } catch (e) { /* ignore */ }
+    }, 30000);
 }
 
 function handleMessage(msg) {
@@ -323,7 +366,14 @@ function handleMessage(msg) {
         case "world_state":
             if (typeof msg.width === "number" && msg.width > 0) worldGridWidth = msg.width;
             if (typeof msg.height === "number" && msg.height > 0) worldGridHeight = msg.height;
+            // Don't clear chat — dedup in appendChat() handles replay duplicates.
+            // Chat is only cleared on explicit reset (see "reset" send path).
             renderer.init(msg);
+            // Populate minimap from initial world state tiles
+            miniMapClear();
+            if (Array.isArray(msg.tiles)) {
+                miniMapAddTiles(msg.tiles);
+            }
             updateTimeline(msg.period, msg.year);
             break;
 
@@ -337,24 +387,42 @@ function handleMessage(msg) {
             if (!awaitingSessionChoice) {
                 document.getElementById("select-overlay").classList.add("hidden");
             }
+            updatePauseButton(false);
+            showPauseButton();
             break;
 
         case "token_usage":
             applyTokenUsageToHeader(msg.by_ui_agent);
+            applyTokenUsageSummary(msg.by_ui_agent);
             break;
 
         case "tile_update":
+            if (!Array.isArray(msg.tiles)) break;
             renderer.updateTiles(msg.tiles);
+            miniMapAddTiles(msg.tiles);
+            drawMiniMap();
             if (msg.period) updateTimeline(msg.period, msg.year);
             builtStructures++;
+            totalTilesPlaced += msg.tiles.length;
             updateProgressBar();
-            // Auto-fly camera to new building
+            if (msg.tiles[0] && msg.tiles[0].building_name) {
+                const statusEl = document.getElementById("timeline-status");
+                if (statusEl) statusEl.textContent = `Placed: ${msg.tiles[0].building_name} (${msg.tiles.length} tiles, ${totalTilesPlaced} total)`;
+            }
+            // Auto-fly camera to new building (skip if user is manually controlling)
             if (msg.tiles && msg.tiles.length > 0 && renderer.flyTo) {
-                const t = msg.tiles[0];
-                const S = 14; // TILE_SIZE (must match renderer3d.js)
-                renderer.flyTo((t.x + 0.5) * S, (t.y + 0.5) * S);
+                if (Date.now() - lastManualCameraMs > 8000) {
+                    const t = msg.tiles[0];
+                    renderer.flyTo((t.x + 0.5) * TILE_SIZE, (t.y + 0.5) * TILE_SIZE);
+                }
             }
             hideLoading();
+            updatePauseButton(false);
+            break;
+
+        case "build_progress":
+            if (!msg.done || !msg.total) break;
+            updateBuildProgress(msg);
             break;
 
         case "chat":
@@ -367,7 +435,13 @@ function handleMessage(msg) {
 
         case "phase":
             appendPhaseAnnouncement(msg);
-            updateDistrict(msg.district);
+            if (msg.wave && msg.index && msg.total_districts) {
+                updateDistrict(`${msg.wave}: ${msg.district} (${msg.index}/${msg.total_districts})`);
+            } else if (msg.index && msg.total_districts) {
+                updateDistrict(`${msg.district} (${msg.index}/${msg.total_districts})`);
+            } else {
+                updateDistrict(msg.district);
+            }
             hideLoading();
             break;
 
@@ -380,7 +454,7 @@ function handleMessage(msg) {
             break;
 
         case "agent_status":
-            setAgentStatus(msg.agent, msg.status);
+            setAgentStatus(msg.agent, msg.status, msg.thinking_started_at_s);
             if (msg.status !== "thinking") hideLoading();
             break;
 
@@ -389,19 +463,30 @@ function handleMessage(msg) {
             setAgentStatus(msg.agent, "thinking");
             break;
 
-        case "master_plan":
+        case "master_plan": {
+            if (!Array.isArray(msg.plan)) break;
+            // Dedup: on reconnect replay, master_plan is re-sent; avoid inflating totalStructures.
+            const mpHash = `master_plan|${msg.district || ""}|${msg.plan.length}`;
+            if (!_chatSeenHashes.has(mpHash)) {
+                _chatSeenHashes.add(mpHash);
+                totalStructures += msg.plan.length;
+            }
             updateMasterPlan(msg.plan);
-            totalStructures += msg.plan.length;
             updateProgressBar();
             break;
+        }
 
-        case "placement_warnings":
+        case "placement_warnings": {
             if (msg.warnings && msg.warnings.length) {
                 const district = msg.district || "district";
+                const pwHash = `pw|${district}|${msg.count || msg.warnings.length}`;
+                if (_chatSeenHashes.has(pwHash)) break;
+                _chatSeenHashes.add(pwHash);
                 const preview = msg.warnings.slice(0, 6).join(" · ");
                 appendSystemMessage(`Placement check (${district}, ${msg.count || msg.warnings.length}): ${preview}`);
             }
             break;
+        }
 
         case "map_description":
             setMapDescription(msg.description);
@@ -412,13 +497,29 @@ function handleMessage(msg) {
             break;
 
         case "complete":
-            appendSystemMessage("Roma Aeterna is complete. Glory to the Empire!");
             resetAllAgentStatus();
+            hidePauseButton();
+            // Dedup: "complete" is stored in chat_history and replayed on reconnect.
+            if (!_chatSeenHashes.has("complete")) {
+                _chatSeenHashes.add("complete");
+                appendSystemMessage("Build complete! The city stands in its glory.");
+                // Browser notification (if permitted) — useful since builds take minutes
+                try {
+                    if (Notification.permission === "granted") {
+                        new Notification("Eternal Cities", { body: "City build complete!", icon: "/static/favicon.svg" });
+                    } else if (Notification.permission !== "denied") {
+                        Notification.requestPermission();
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            // Update page title to signal completion
+            document.title = "Done! — Eternal Cities";
             break;
 
         case "paused":
             showPausedOverlay(msg);
             resetAllAgentStatus();
+            updatePauseButton(true);
             if (msg.suggest_auto_resume === true && !autoResumeOnceThisPageAttempted) {
                 autoResumeOnceThisPageAttempted = true;
                 setTimeout(() => {
@@ -438,6 +539,43 @@ function handleMessage(msg) {
             closeLlmSettingsOverlay();
             break;
     }
+}
+
+function updateBuildProgress(msg) {
+    const now = performance.now();
+    if (lastBuildProgressAt !== null) {
+        buildProgressTimes.push(now - lastBuildProgressAt);
+    }
+    lastBuildProgressAt = now;
+
+    const done = msg.done;
+    const total = msg.total;
+    const name = msg.structure || "structure";
+    const btype = msg.building_type || "";
+    const typeEmoji = {
+        temple: "\u26ea", basilica: "\ud83c\udfdb\ufe0f", insula: "\ud83c\udfe0", domus: "\ud83c\udfe1",
+        thermae: "\u2668\ufe0f", amphitheater: "\ud83c\udfdf\ufe0f", market: "\ud83c\udfea", gate: "\u26e9\ufe0f",
+        monument: "\ud83d\uddff", wall: "\ud83e\uddf1", road: "\ud83d\udee3\ufe0f", water: "\ud83c\udf0a",
+        garden: "\ud83c\udf3f", forum: "\u2696\ufe0f", bridge: "\ud83c\udf09", warehouse: "\ud83d\udce6",
+    }[btype] || "";
+    let text = `${typeEmoji} ${done}/${total}: ${name}`;
+
+    if (buildProgressTimes.length >= 1 && done < total) {
+        const avgMs = buildProgressTimes.reduce((a, b) => a + b, 0) / buildProgressTimes.length;
+        const remaining = total - done;
+        const etaMs = avgMs * remaining;
+        const etaSec = Math.round(etaMs / 1000);
+        let etaStr;
+        if (etaSec < 60) {
+            etaStr = `${etaSec}s`;
+        } else {
+            etaStr = `${Math.round(etaSec / 60)}m`;
+        }
+        text += ` (~${etaStr} left)`;
+    }
+
+    const el = document.getElementById("timeline-status");
+    if (el) el.textContent = text;
 }
 
 function escapeHtml(s) {
@@ -790,14 +928,14 @@ function resumeBuildAfterPause() {
 const agentTimers = {};
 
 function formatThinkingDuration(elapsedMs) {
-    const s = elapsedMs / 1000;
+    const s = Math.max(0, elapsedMs) / 1000;
     if (s < 60) return `${s.toFixed(1)}s`;
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
     return `${m}m ${sec}s`;
 }
 
-function setAgentStatus(agent, status) {
+function setAgentStatus(agent, status, thinkingStartedAtS) {
     const el = document.getElementById(`status-${agent}`);
     if (!el) return;
 
@@ -815,7 +953,10 @@ function setAgentStatus(agent, status) {
         if (agentTimers[agent]) {
             clearInterval(agentTimers[agent].interval);
         }
-        const start = Date.now();
+        const start =
+            typeof thinkingStartedAtS === "number" && Number.isFinite(thinkingStartedAtS)
+                ? thinkingStartedAtS * 1000
+                : Date.now();
         agentTimers[agent] = { start, interval: null };
         const tick = () => {
             if (!timerEl || !agentTimers[agent]) return;
@@ -833,14 +974,71 @@ function setAgentStatus(agent, status) {
 }
 
 function resetAllAgentStatus() {
-    for (const agent of ["imperator", "cartographus", "urbanista", "faber", "civis"]) {
+    for (const agent of ["cartographus", "urbanista"]) {
         setAgentStatus(agent, "idle");
     }
 }
 
-// --- Chat ---
+// --- Pause / Resume button ---
+
+function updatePauseButton(paused) {
+    isPaused = paused;
+    const btn = document.getElementById("pause-btn");
+    if (!btn) return;
+    if (paused) {
+        btn.textContent = "Resume";
+        btn.classList.add("paused");
+        btn.title = "Resume build";
+    } else {
+        btn.textContent = "Pause";
+        btn.classList.remove("paused");
+        btn.title = "Pause build";
+    }
+}
+
+function showPauseButton() {
+    const btn = document.getElementById("pause-btn");
+    if (btn) btn.classList.remove("hidden");
+}
+
+function hidePauseButton() {
+    const btn = document.getElementById("pause-btn");
+    if (btn) btn.classList.add("hidden");
+}
+
+// --- Chat (dedup across reconnect replays) ---
+
+/** Set of content hashes for messages already in the DOM — prevents replay duplication. */
+const _chatSeenHashes = new Set();
+const _CHAT_SEEN_MAX = 600;
+
+function _chatHash(msg) {
+    const c = msg.content || "";
+    // Use first 80 + last 40 chars + length to minimize collisions on long similar messages
+    const snippet = c.length <= 120 ? c : c.slice(0, 80) + c.slice(-40);
+    return `${msg.sender}|${msg.msg_type || ""}|${snippet}|${c.length}`;
+}
+
+function clearChatDedup() {
+    _chatSeenHashes.clear();
+}
 
 function appendChat(msg) {
+    const h = _chatHash(msg);
+    if (_chatSeenHashes.has(h)) return;  // Already displayed — skip
+    _chatSeenHashes.add(h);
+    if (_chatSeenHashes.size > _CHAT_SEEN_MAX) {
+        // Evict oldest 100 entries to keep the set bounded.
+        const it = _chatSeenHashes.values();
+        const toDelete = [];
+        for (let i = 0; i < 100; i++) {
+            const r = it.next();
+            if (r.done) break;
+            toDelete.push(r.value);
+        }
+        for (const k of toDelete) _chatSeenHashes.delete(k);
+    }
+
     const container = document.getElementById("chat-messages");
     const div = document.createElement("div");
     div.className = `chat-msg ${msg.sender}`;
@@ -867,12 +1065,20 @@ function appendChat(msg) {
 }
 
 function appendPhaseAnnouncement(msg) {
+    const h = `phase|${msg.district || ""}`;
+    if (_chatSeenHashes.has(h)) return;
+    _chatSeenHashes.add(h);
+
     const container = document.getElementById("chat-messages");
     const div = document.createElement("div");
     div.className = "chat-msg phase-announce";
-    div.innerHTML = `
-        <div class="content">--- Building ${escapeHtml(msg.district)} ---<br>${escapeHtml(msg.description || "")}</div>
-    `;
+    const progress = msg.index && msg.total_districts ? ` (${msg.index}/${msg.total_districts})` : "";
+    let html = `<div class="content">--- Building ${escapeHtml(msg.district)}${progress} ---<br>${escapeHtml(msg.description || "")}`;
+    if (msg.scenery_summary) {
+        html += `<br><em style="color:#8a8a6b;font-size:0.85em">${escapeHtml(msg.scenery_summary)}</em>`;
+    }
+    html += `</div>`;
+    div.innerHTML = html;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
 }
@@ -968,16 +1174,45 @@ function formatTokShort(n) {
     return String(Math.round(x));
 }
 
+function _readTokenRow(byUi, key) {
+    const row = byUi && byUi[key] ? byUi[key] : null;
+    if (!row) return { prompt: 0, completion: 0, total: 0 };
+    const prompt = typeof row.prompt_tokens === "number" ? row.prompt_tokens : 0;
+    const completion = typeof row.completion_tokens === "number" ? row.completion_tokens : 0;
+    const total = typeof row.total_tokens === "number" ? row.total_tokens : 0;
+    return { prompt, completion, total };
+}
+
+function applyTokenUsageSummary(byUi) {
+    const el = document.getElementById("token-usage-summary");
+    const wrap = document.getElementById("token-usage-wrap");
+    if (!el || !wrap) return;
+    const c = _readTokenRow(byUi, "cartographus");
+    const u = _readTokenRow(byUi, "urbanista");
+    const total = c.total + u.total;
+    const s = formatTokShort(total);
+    el.textContent = s ? `${s} tok` : "—";
+    const detail = [
+        `Total: ${total}`,
+        `Cartographus: ${c.total} (p${c.prompt} + c${c.completion})`,
+        `Urbanista: ${u.total} (p${u.prompt} + c${u.completion})`,
+    ].join(" | ");
+    wrap.title = detail;
+}
+
 function applyTokenUsageToHeader(byUi) {
     const data = byUi || {};
     const ids = ["cartographus", "urbanista"];
     for (const id of ids) {
         const el = document.getElementById(`agent-tokens-${id}`);
         if (!el) continue;
-        const row = data[id];
-        const tot = row && row.total_tokens != null ? row.total_tokens : 0;
+        const row = _readTokenRow(data, id);
+        const tot = row.total;
         const s = formatTokShort(tot);
         el.textContent = s ? `${s} tok` : "";
+        el.title = tot
+            ? `Session: ${tot} (p${row.prompt} + c${row.completion})`
+            : "Session tokens";
     }
 }
 
@@ -1330,14 +1565,17 @@ function resetWorld() {
         connect();
     }
     autoResumeOnceThisPageAttempted = false;
-    // Clear local state
+    // Clear local state + dedup
     document.getElementById("chat-messages").innerHTML = "";
+    clearChatDedup();
+    miniMapClear();
     currentMasterPlan = null;
     mapDescription = null;
     mapImageUrl = null;
     agentLogs.length = 0;
     totalStructures = 0;
     builtStructures = 0;
+    totalTilesPlaced = 0;
     runStartedAtMs = null;
     updateRunLength();
     const runWrap = document.getElementById("timeline-run-wrap");
@@ -1382,6 +1620,9 @@ let currentMasterPlan = null;
 function toggleMapOverlay() {
     const el = document.getElementById("map-overlay");
     el.classList.toggle("visible");
+    if (el.classList.contains("visible")) {
+        setTimeout(() => { drawMiniMap(); }, 60);
+    }
 }
 
 function closeMapOverlay() {
@@ -1516,9 +1757,22 @@ function setupMiniMapControls() {
     miniMapFitView();
 }
 
+/** All placed tiles accumulated across all districts (for minimap). */
+let _miniMapTiles = [];
+
+function miniMapAddTiles(tiles) {
+    for (const t of tiles) {
+        _miniMapTiles.push(t);
+    }
+}
+
+function miniMapClear() {
+    _miniMapTiles = [];
+}
+
 function drawMiniMap() {
     const canvas = document.getElementById("mini-map");
-    if (!canvas || !currentMasterPlan) return;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const W = canvas.width, H = canvas.height;
     const s = miniMapZoom;
@@ -1528,21 +1782,11 @@ function drawMiniMap() {
     ctx.fillStyle = "#1a1a2e";
     ctx.fillRect(0, 0, W, H);
 
-    // Grid lines
-    ctx.strokeStyle = "#2a2a4a";
-    ctx.lineWidth = 0.5;
+    // Grid boundary
     const gW = worldGridWidth;
     const gH = worldGridHeight;
-    const gridMax = Math.max(gW, gH);
-    for (let i = 0; i <= gridMax; i++) {
-        const gx = i * s + ox, gy = i * s + oy;
-        if (gx >= 0 && gx <= W) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
-        if (gy >= 0 && gy <= H) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
-    }
-
-    // Grid boundary
-    ctx.strokeStyle = "#444";
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#2a2a4a";
+    ctx.lineWidth = 0.5;
     ctx.strokeRect(ox, oy, gW * s, gH * s);
 
     const typeColors = {
@@ -1550,66 +1794,52 @@ function drawMiniMap() {
         insula: "#cd853f", domus: "#d2691e", market: "#deb887", water: "#3498db",
         garden: "#27ae60", wall: "#5d4037", gate: "#8b7355", monument: "#e8e8e8",
         aqueduct: "#87ceeb", thermae: "#b0e0e6", circus: "#f4a460", amphitheater: "#daa520",
-        bridge: "#a0a0a0", taberna: "#b8860b", warehouse: "#8b8378", grass: "#5a9a4a"
+        bridge: "#a0a0a0", taberna: "#b8860b", warehouse: "#8b8378", grass: "#5a9a4a",
+        building: "#d4a373",
     };
 
-    // Plot structure tiles
-    for (const item of currentMasterPlan) {
-        const color = typeColors[item.building_type] || "#d4a373";
-        ctx.fillStyle = color;
-        for (const t of (item.tiles || [])) {
-            ctx.fillRect(t.x * s + ox, t.y * s + oy, s - 0.5, s - 0.5);
+    // Draw ALL placed tiles from the world (accumulated across all districts)
+    for (const t of _miniMapTiles) {
+        const terrain = t.terrain || t.building_type || "building";
+        ctx.fillStyle = t.color || typeColors[terrain] || "#d4a373";
+        const px = t.x * s + ox;
+        const py = t.y * s + oy;
+        if (px + s < 0 || py + s < 0 || px > W || py > H) continue; // Off-screen cull
+        ctx.fillRect(px, py, Math.max(1, s - 0.3), Math.max(1, s - 0.3));
+    }
+
+    // Also draw current master plan (survey preview — not yet built)
+    if (currentMasterPlan) {
+        for (const item of currentMasterPlan) {
+            const color = typeColors[item.building_type] || "#d4a373";
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.35; // Dimmer for planned-but-not-built
+            for (const t of (item.tiles || [])) {
+                ctx.fillRect(t.x * s + ox, t.y * s + oy, Math.max(1, s - 0.3), Math.max(1, s - 0.3));
+            }
+            ctx.globalAlpha = 1.0;
         }
     }
 
-    // Labels — with collision detection and dark background for readability
-    if (s >= 6) {
-        const fontSize = Math.max(7, Math.min(14, s * 0.7));
-        ctx.font = `bold ${fontSize}px sans-serif`;
-        const placed = []; // [{x, y, w, h}] — occupied label regions
-
-        for (const item of currentMasterPlan) {
-            if (!item.tiles || item.tiles.length === 0) continue;
-
-            // Find center tile for label placement
-            let cx = 0, cy = 0;
-            for (const t of item.tiles) { cx += t.x; cy += t.y; }
-            cx /= item.tiles.length;
-            cy /= item.tiles.length;
-
-            const label = s >= 12 ? item.name : item.name.substring(0, 10);
-            const textW = ctx.measureText(label).width;
-            const textH = fontSize;
-            const pad = 2;
-            let lx = cx * s + ox + 2;
-            let ly = cy * s + oy + s * 0.5;
-
-            // Check for overlap and nudge down if colliding
-            let attempts = 0;
-            while (attempts < 5) {
-                const rect = { x: lx - pad, y: ly - textH - pad, w: textW + pad * 2, h: textH + pad * 2 };
-                const overlaps = placed.some(p =>
-                    rect.x < p.x + p.w && rect.x + rect.w > p.x &&
-                    rect.y < p.y + p.h && rect.y + rect.h > p.y
-                );
-                if (!overlaps) break;
-                ly += textH + pad * 2;
-                attempts++;
+    // Labels for placed buildings (names from tile data)
+    if (s >= 4) {
+        const fontSize = Math.max(6, Math.min(12, s * 0.6));
+        ctx.font = `${fontSize}px sans-serif`;
+        ctx.fillStyle = "#ccc";
+        const labeled = new Set();
+        for (const t of _miniMapTiles) {
+            const name = t.building_name;
+            if (!name || labeled.has(name)) continue;
+            labeled.add(name);
+            const lx = t.x * s + ox + 2;
+            const ly = t.y * s + oy + s * 0.5;
+            if (lx > 0 && ly > 0 && lx < W && ly < H) {
+                ctx.fillStyle = "rgba(10, 12, 24, 0.75)";
+                const tw = ctx.measureText(name).width;
+                ctx.fillRect(lx - 1, ly - fontSize, tw + 4, fontSize + 2);
+                ctx.fillStyle = "#ddd";
+                ctx.fillText(name, lx, ly);
             }
-            if (attempts >= 5) continue; // skip label if no room
-
-            // Dark background pill
-            const bgX = lx - pad, bgY = ly - textH;
-            ctx.fillStyle = "rgba(10, 12, 24, 0.85)";
-            ctx.beginPath();
-            ctx.roundRect(bgX, bgY, textW + pad * 2, textH + pad * 2, 3);
-            ctx.fill();
-
-            // Text
-            ctx.fillStyle = "#fff";
-            ctx.fillText(label, lx, ly);
-
-            placed.push({ x: bgX, y: bgY, w: textW + pad * 2, h: textH + pad * 2 });
         }
     }
 }
@@ -1705,11 +1935,7 @@ function closeLogOverlay() {
 
 // --- Utility ---
 
-function escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-}
+// escapeHtml is defined earlier (line ~555) with null/undefined guard; avoid duplicate.
 
 // --- City Selection Screen ---
 
@@ -1825,6 +2051,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const container = document.getElementById("world-container");
     renderer = new WorldRenderer(container);
 
+    // Track manual camera interactions so auto-fly respects user control
+    for (const evt of ["mousedown", "wheel", "touchstart"]) {
+        container.addEventListener(evt, () => { lastManualCameraMs = Date.now(); }, { passive: true });
+    }
+
     window.addEventListener("world-render-error", (e) => {
         const d = e.detail || {};
         console.error("[WorldRenderer]", d.error, d.tile, d.key);
@@ -1867,22 +2098,31 @@ document.addEventListener("DOMContentLoaded", () => {
     function makeDraggable(el, handleSelector) {
         if (!el) return;
         let dragging = false, offX = 0, offY = 0;
-        const handle = handleSelector ? el.querySelector(handleSelector) : el;
-        if (!handle) return;
+        // Allow dragging from header OR anywhere on the panel (fallback if header is offscreen)
+        const handle = handleSelector ? (el.querySelector(handleSelector) || el) : el;
         handle.style.cursor = "grab";
-        handle.addEventListener("mousedown", e => {
+        // Also allow dragging from the panel itself (not just the header)
+        const startDrag = (e) => {
             if (e.target.tagName === "BUTTON" || e.target.classList.contains("nav-btn") ||
-                e.target.classList.contains("close-btn") || e.target.classList.contains("popup-close-btn")) return;
+                e.target.classList.contains("close-btn") || e.target.classList.contains("popup-close-btn") ||
+                e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
             dragging = true;
             offX = e.clientX - el.getBoundingClientRect().left;
             offY = e.clientY - el.getBoundingClientRect().top;
             handle.style.cursor = "grabbing";
             e.preventDefault();
-        });
+        };
+        handle.addEventListener("mousedown", startDrag);
+        el.addEventListener("mousedown", startDrag);
         document.addEventListener("mousemove", e => {
             if (!dragging) return;
-            el.style.left = (e.clientX - offX) + "px";
-            el.style.top = (e.clientY - offY) + "px";
+            // Clamp to viewport bounds — prevent panels from going fully offscreen
+            const maxX = window.innerWidth - 40;  // Keep at least 40px visible
+            const maxY = window.innerHeight - 30;
+            const x = Math.max(-el.offsetWidth + 60, Math.min(maxX, e.clientX - offX));
+            const y = Math.max(0, Math.min(maxY, e.clientY - offY));
+            el.style.left = x + "px";
+            el.style.top = y + "px";
             el.style.bottom = "auto";
             el.style.right = "auto";
         });
@@ -2214,6 +2454,92 @@ document.addEventListener("DOMContentLoaded", () => {
             else if (action === "reset") renderer.resetCameraToMap();
         });
     });
+
+    // Global keyboard shortcuts (ignored when typing in inputs)
+    document.addEventListener("keydown", e => {
+        const tag = (e.target.tagName || "").toLowerCase();
+        if (tag === "input" || tag === "textarea" || tag === "select") return;
+        switch (e.key) {
+            case "P":
+            case "p": {
+                const pb = document.getElementById("pause-btn");
+                if (pb) pb.click();
+                break;
+            }
+            case "H":
+            case "h": {
+                const cb = document.getElementById("chat-collapse-btn");
+                if (cb) cb.click();
+                break;
+            }
+            case "L":
+            case "l": {
+                const lb = document.getElementById("run-log-btn");
+                if (lb) lb.click();
+                break;
+            }
+            case "Escape": {
+                if (typeof dismissPausedOverlay === "function") dismissPausedOverlay();
+                break;
+            }
+            case "0": {
+                if (renderer && !renderer._failed) renderer.resetCameraToMap();
+                break;
+            }
+        }
+    });
+
+    // Pause/Resume button
+    const pauseBtn = document.getElementById("pause-btn");
+    if (pauseBtn) {
+        pauseBtn.addEventListener("click", () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (isPaused) {
+                ws.send(JSON.stringify({ type: "resume" }));
+                updatePauseButton(false);
+                dismissPausedOverlay();
+            } else {
+                ws.send(JSON.stringify({ type: "pause" }));
+                updatePauseButton(true);
+            }
+        });
+    }
+
+    // Run log download button — merges server log + client WebSocket log
+    const logBtn = document.getElementById("run-log-btn");
+    if (logBtn) {
+        logBtn.addEventListener("click", async () => {
+            try {
+                const resp = await fetch(apiUrl("/api/logs"));
+                let serverLog = await resp.text();
+                const clientLog = getWsLogText();
+                if (clientLog) {
+                    serverLog += "\n\n" + "=".repeat(72) + "\n";
+                    serverLog += "  CLIENT WEBSOCKET LOG\n";
+                    serverLog += "=".repeat(72) + "\n";
+                    serverLog += clientLog + "\n";
+                }
+                const blob = new Blob([serverLog], { type: "text/plain" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "eternal_cities_run.log";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                console.error("Log download failed:", e);
+                // Fallback: direct server download
+                const a = document.createElement("a");
+                a.href = apiUrl("/api/logs");
+                a.download = "eternal_cities_run.log";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            }
+        });
+    }
 
     void initEternalCitiesSession();
     ensureWebSocketPeriodicReconnect();

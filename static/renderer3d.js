@@ -568,6 +568,13 @@ class WorldRenderer {
         const r = Math.round(Math.max(0.5, Math.min(40, repeat)) * 4) / 4;
         if (!this._buildingNormalByRepeat) this._buildingNormalByRepeat = new Map();
         if (!this._buildingNormalByRepeat.has(r)) {
+            // Cap cache at 16 entries to limit GPU memory; evict oldest
+            if (this._buildingNormalByRepeat.size >= 16) {
+                const oldestKey = this._buildingNormalByRepeat.keys().next().value;
+                const oldestTex = this._buildingNormalByRepeat.get(oldestKey);
+                if (oldestTex) oldestTex.dispose();
+                this._buildingNormalByRepeat.delete(oldestKey);
+            }
             const base = this._getBuildingSurfaceNormalMap();
             const t = base.clone();
             t.repeat.set(r, r);
@@ -700,6 +707,16 @@ class WorldRenderer {
     // ─── Clear scene for reset ───
     _clearScene() {
         this._disposeBuildingSurfaceResources();
+        // Dispose PMREM render target to free GPU memory
+        if (this._pmremRenderTarget) {
+            this._pmremRenderTarget.dispose();
+            this._pmremRenderTarget = null;
+        }
+        // Dispose canvas-based background texture
+        if (this.scene.background && typeof this.scene.background.dispose === "function") {
+            this.scene.background.dispose();
+            this.scene.background = null;
+        }
         // Remove all dynamic objects (buildings, ground, grid) but keep lights and camera
         const keep = new Set();
         this.scene.children.forEach(child => {
@@ -753,6 +770,7 @@ class WorldRenderer {
             for (let i = 0; i <= gw; i++) {
                 let sum = 0;
                 let n = 0;
+                let maxBuildingElev = null; // Track if any adjacent tile is a building
                 for (const [tx, ty] of [[i - 1, j - 1], [i, j - 1], [i - 1, j], [i, j]]) {
                     if (tx >= 0 && ty >= 0 && tx < gw && ty < gh) {
                         const t = this.grid[ty][tx];
@@ -760,10 +778,23 @@ class WorldRenderer {
                         if (Number.isFinite(e)) {
                             sum += e;
                             n++;
+                            // Building tiles force the terrain up to their elevation
+                            // so the ground forms a flat platform under the building
+                            if (t.terrain === "building") {
+                                if (maxBuildingElev === null || e > maxBuildingElev) {
+                                    maxBuildingElev = e;
+                                }
+                            }
                         }
                     }
                 }
-                row.push(n ? sum / n : 0);
+                // If any adjacent tile is a building, raise this corner to the building's
+                // elevation — creates a flat platform the building sits on naturally
+                if (maxBuildingElev !== null) {
+                    row.push(maxBuildingElev);
+                } else {
+                    row.push(n ? sum / n : 0);
+                }
             }
             H.push(row);
         }
@@ -890,7 +921,24 @@ class WorldRenderer {
         this._clearScene();
         this.width = worldState.width;
         this.height = worldState.height;
-        this.grid = worldState.grid;
+
+        // Build empty 2D grid, then patch non-empty tiles from sparse payload
+        const emptyTile = { terrain: "empty", elevation: 0 };
+        this.grid = [];
+        for (let y = 0; y < this.height; y++) {
+            const row = [];
+            for (let x = 0; x < this.width; x++) row.push({ ...emptyTile, x, y });
+            this.grid.push(row);
+        }
+        if (Array.isArray(worldState.tiles)) {
+            for (const t of worldState.tiles) {
+                if (t.x >= 0 && t.y >= 0 && t.x < this.width && t.y < this.height)
+                    this.grid[t.y][t.x] = t;
+            }
+        } else if (Array.isArray(worldState.grid)) {
+            // Legacy dense grid format (backwards compat)
+            this.grid = worldState.grid;
+        }
         const S = TILE_SIZE;
         this._cornerHeights = this._computeCornerHeightGrid();
 
@@ -919,6 +967,10 @@ class WorldRenderer {
             sc.far = Math.max(6000, diagonal * 3.5);
             sc.updateProjectionMatrix();
             const shadowMapSize = diagonal > 1400 ? 4096 : 2048;
+            if (this._sunLight.shadow.map) {
+                this._sunLight.shadow.map.dispose();
+                this._sunLight.shadow.map = null;
+            }
             this._sunLight.shadow.mapSize.set(shadowMapSize, shadowMapSize);
         }
 
@@ -928,6 +980,7 @@ class WorldRenderer {
         const earth = 0x9a7b52;
         const terrainMesh = this._buildTerrainHeightfieldMesh(S, earth, minH, maxH);
         this.scene.add(terrainMesh);
+        this._terrainMesh = terrainMesh;
 
         // Distant water / lake bed (below lowest terrain)
         const waterY = minH * S - S * 0.35;
@@ -958,6 +1011,8 @@ class WorldRenderer {
         water.position.set(this.width * S / 2, waterY, this.height * S / 2);
         water.receiveShadow = true;
         water.userData.isWaterPlane = true;
+        this._waterPlane = water;
+        this._waterPlaneBaseY = waterY;
         this.scene.add(water);
 
         // Grid — slightly above lowest ground so it stays visible on slopes
@@ -990,8 +1045,12 @@ class WorldRenderer {
 
     updateTiles(tiles) {
         if (!this.grid) return;
+        // Recompute terrain heightfield with new tile elevations so buildings sit on ground
+        let heightsDirty = false;
         for (const tile of tiles) {
             if (tile.x >= 0 && tile.y >= 0 && tile.x < this.width && tile.y < this.height) {
+                const old = this.grid[tile.y][tile.x];
+                if (old.elevation !== tile.elevation) heightsDirty = true;
                 this.grid[tile.y][tile.x] = tile;
                 if (tile.terrain && tile.terrain !== "empty") {
                     const anchor = tile.spec && tile.spec.anchor;
@@ -1003,6 +1062,24 @@ class WorldRenderer {
                         this._buildFromSpec(tile, true);
                     }
                 }
+            }
+        }
+        if (heightsDirty) {
+            this._cornerHeights = this._computeCornerHeightGrid();
+            if (this._terrainMesh) {
+                this.scene.remove(this._terrainMesh);
+                this._terrainMesh.geometry.dispose();
+                const S = TILE_SIZE;
+                const earth = 0x9a7b52;
+                let minH = 0, maxH = 0;
+                for (const row of this._cornerHeights) {
+                    for (const v of row) {
+                        if (v < minH) minH = v;
+                        if (v > maxH) maxH = v;
+                    }
+                }
+                this._terrainMesh = this._buildTerrainHeightfieldMesh(S, earth, minH, maxH);
+                this.scene.add(this._terrainMesh);
             }
         }
     }
@@ -1417,6 +1494,8 @@ class WorldRenderer {
             const fp = this._getAnchorFootprint(spec.anchor);
             tileW = (fp.maxX - fp.minX + 1) - 0.1;
             tileD = (fp.maxY - fp.minY + 1) - 0.1;
+            tileW = Math.max(0.3, tileW);
+            tileD = Math.max(0.3, tileD);
             centerX = (fp.minX + fp.maxX + 1) / 2 * S;
             centerZ = (fp.minY + fp.maxY + 1) / 2 * S;
         }
@@ -1458,6 +1537,8 @@ class WorldRenderer {
             }
         }
 
+        // The terrain heightfield already creates flat platforms under buildings
+        // (see _computeCornerHeightGrid). Sample the center — it matches the platform.
         const elevation = this._surfaceYAtWorldXZ(centerX, centerZ);
 
         const group = new THREE.Group();
@@ -1609,7 +1690,8 @@ class WorldRenderer {
             water.userData.isWater = true;
             g.add(water);
         } else if (terrain === "garden" || terrain === "grass") {
-            g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.96), this._mat(spec.color || "#4a8c3f")));
+            const groundColor = spec.color || (terrain === "garden" ? "#4a8c3f" : "#6b8c4f");
+            g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.96), this._mat(groundColor, 0.85)));
             const seed = tile.x * 31 + tile.y * 17;
             const veg = sc.vegetation_density != null ? sc.vegetation_density : null;
             const basePlants = 1 + seed % 3;
@@ -1618,14 +1700,43 @@ class WorldRenderer {
             for (let i = 0; i < n; i++) {
                 const px = -0.25 + ((seed * (i + 1) * 7) % 50) / 100;
                 const pz = -0.25 + ((seed * (i + 1) * 13) % 50) / 100;
-                const treeH = 0.2 + ((seed * (i + 3)) % 30) / 100;
-                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.025, treeH, 5), this._mat("#6b4226"));
+                const treeH = 0.15 + ((seed * (i + 3)) % 35) / 100;
+                // Tapered trunk
+                const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.022, treeH, 5), this._mat("#5a3a1a", 0.8));
                 trunk.position.set(px, 0.04 + treeH / 2, pz);
                 g.add(trunk);
-                const canopySize = 0.08 + ((seed * (i + 7)) % 20) / 200;
-                const canopy = new THREE.Mesh(new THREE.SphereGeometry(canopySize, 6, 5), this._mat("#2d6b1e"));
+                // Varied canopy — alternate between round and conical trees
+                const canopySize = 0.07 + ((seed * (i + 7)) % 25) / 200;
+                const treeType = (seed + i) % 3;
+                let canopy;
+                if (treeType === 0) {
+                    // Round deciduous
+                    canopy = new THREE.Mesh(new THREE.SphereGeometry(canopySize, 6, 5), this._mat("#2d6b1e", 0.75));
+                } else if (treeType === 1) {
+                    // Conical (cypress/pine)
+                    canopy = new THREE.Mesh(new THREE.ConeGeometry(canopySize * 0.7, canopySize * 2.2, 6), this._mat("#1a5c14", 0.7));
+                } else {
+                    // Broad flat (olive/fig)
+                    canopy = new THREE.Mesh(new THREE.SphereGeometry(canopySize * 1.1, 6, 4), this._mat("#3a7a2a", 0.75));
+                    canopy.scale.y = 0.6;
+                }
                 canopy.position.set(px, 0.04 + treeH + canopySize * 0.5, pz);
                 g.add(canopy);
+            }
+            // Low bushes/ground cover for gardens
+            if (terrain === "garden" && n > 0) {
+                const nBush = 2 + seed % 3;
+                for (let i = 0; i < nBush; i++) {
+                    const bx = -0.3 + this._terrainRand01(seed, i + 20, 5) * 0.6;
+                    const bz = -0.3 + this._terrainRand01(seed, i + 20, 6) * 0.6;
+                    const bush = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.035 + this._terrainRand01(seed, i, 7) * 0.02, 5, 4),
+                        this._mat("#3a6b2a", 0.8)
+                    );
+                    bush.position.set(bx, 0.06, bz);
+                    bush.scale.y = 0.6;
+                    g.add(bush);
+                }
             }
         } else {
             throw new Error(`Terrain "${terrain}" has no procedural mesh (internal inconsistency with TERRAIN_WITH_PROCEDURAL_MESH)`);
@@ -2006,10 +2117,139 @@ class WorldRenderer {
                 mesh.rotation.x = -Math.PI / 2;
                 mesh.position.set(px, anchorY + py, pz);
                 maxTop = Math.max(maxTop, anchorY + py + 0.002);
+            } else if (p.shape === "stacked_tower") {
+                // Compound: tapered tower from stacked layers (shikhara, pagoda tier, minaret)
+                // params: base_width, base_depth, height, layers (int), taper (0-1), color
+                const bw = Number(p.base_width || p.width || 0.3);
+                const bd = Number(p.base_depth || p.depth || bw);
+                const th = Number(p.height || 0.5);
+                const layers = Math.max(2, Math.min(12, Math.round(p.layers || 5)));
+                const taper = Math.max(0.1, Math.min(0.95, Number(p.taper || 0.6)));
+                const layerH = th / layers;
+                for (let li = 0; li < layers; li++) {
+                    const frac = 1 - (li / layers) * taper;
+                    const lw = bw * frac;
+                    const ld = bd * frac;
+                    const layer = new THREE.Mesh(
+                        new THREE.BoxGeometry(lw, layerH * 0.9, ld), mat
+                    );
+                    layer.position.set(px, anchorY + py + li * layerH + layerH / 2, pz);
+                    layer.castShadow = true;
+                    layer.receiveShadow = true;
+                    group.add(layer);
+                }
+                maxTop = Math.max(maxTop, anchorY + py + th);
+                mesh = null; // Already added layers
+            } else if (p.shape === "tiered_pyramid") {
+                // Compound: stepped pyramid (Mesoamerican, Khmer, ziggurat)
+                // params: base_width, base_depth, height, steps (int), color
+                const bw = Number(p.base_width || p.width || 0.8);
+                const bd = Number(p.base_depth || p.depth || bw);
+                const th = Number(p.height || 0.5);
+                const steps = Math.max(2, Math.min(10, Math.round(p.steps || 4)));
+                const stepH = th / steps;
+                for (let si = 0; si < steps; si++) {
+                    const frac = 1 - (si / steps) * 0.7;
+                    const sw = bw * frac;
+                    const sd = bd * frac;
+                    const step = new THREE.Mesh(
+                        new THREE.BoxGeometry(sw, stepH, sd), mat
+                    );
+                    step.position.set(px, anchorY + py + si * stepH + stepH / 2, pz);
+                    step.castShadow = true;
+                    step.receiveShadow = true;
+                    group.add(step);
+                }
+                maxTop = Math.max(maxTop, anchorY + py + th);
+                mesh = null;
+            } else if (p.shape === "colonnade_ring") {
+                // Compound: ring of columns (peristyle, Buddhist stupa railing, chhatri)
+                // params: radius, height, column_count, column_radius, color
+                const ringR = Number(p.radius || 0.2);
+                const ringH = Number(p.height || 0.3);
+                const nCols = Math.max(4, Math.min(24, Math.round(p.column_count || 8)));
+                const colR = Number(p.column_radius || 0.012);
+                for (let ci = 0; ci < nCols; ci++) {
+                    const angle = (ci / nCols) * Math.PI * 2;
+                    const cx = px + Math.cos(angle) * ringR;
+                    const cz = pz + Math.sin(angle) * ringR;
+                    const col = new THREE.Mesh(
+                        new THREE.CylinderGeometry(colR, colR * 1.1, ringH, 6), mat
+                    );
+                    col.position.set(cx, anchorY + py + ringH / 2, cz);
+                    col.castShadow = true;
+                    group.add(col);
+                }
+                // Beam ring on top
+                const beam = new THREE.Mesh(
+                    new THREE.TorusGeometry(ringR, colR * 1.5, 6, nCols), mat
+                );
+                beam.rotation.x = -Math.PI / 2;
+                beam.position.set(px, anchorY + py + ringH, pz);
+                beam.castShadow = true;
+                group.add(beam);
+                maxTop = Math.max(maxTop, anchorY + py + ringH);
+                mesh = null;
+            } else if (p.shape === "water_channel") {
+                // Compound: rectangular water channel with side walls
+                // params: width, depth (length), height (wall height), water_color
+                const cw = Number(p.width || 0.15);
+                const cd = Number(p.depth || 0.6);
+                const ch = Number(p.height || 0.04);
+                const wallT = 0.01;
+                const wallMat = mat;
+                // Left wall
+                const lw = new THREE.Mesh(new THREE.BoxGeometry(wallT, ch, cd), wallMat);
+                lw.position.set(px - cw / 2, anchorY + py + ch / 2, pz);
+                lw.castShadow = true; group.add(lw);
+                // Right wall
+                const rw = new THREE.Mesh(new THREE.BoxGeometry(wallT, ch, cd), wallMat);
+                rw.position.set(px + cw / 2, anchorY + py + ch / 2, pz);
+                rw.castShadow = true; group.add(rw);
+                // Water surface
+                const waterColor = p.water_color || "#2980b9";
+                const wm = new THREE.MeshStandardMaterial({
+                    color: waterColor, transparent: true, opacity: 0.8, roughness: 0.08
+                });
+                const ws = new THREE.Mesh(new THREE.BoxGeometry(cw - wallT * 2, 0.005, cd), wm);
+                ws.position.set(px, anchorY + py + ch * 0.7, pz);
+                ws.userData.isWater = true; group.add(ws);
+                maxTop = Math.max(maxTop, anchorY + py + ch);
+                mesh = null;
+            } else if (p.shape === "arch") {
+                // Compound: freestanding arch (torana, torii, triumphal arch)
+                // params: width, height, thickness, pillar_width
+                const aw = Number(p.width || 0.3);
+                const ah = Number(p.height || 0.4);
+                const at = Number(p.thickness || 0.04);
+                const pw = Number(p.pillar_width || 0.04);
+                // Left pillar
+                const lp = new THREE.Mesh(new THREE.BoxGeometry(pw, ah * 0.75, at), mat);
+                lp.position.set(px - aw / 2 + pw / 2, anchorY + py + ah * 0.375, pz);
+                lp.castShadow = true; group.add(lp);
+                // Right pillar
+                const rp = new THREE.Mesh(new THREE.BoxGeometry(pw, ah * 0.75, at), mat);
+                rp.position.set(px + aw / 2 - pw / 2, anchorY + py + ah * 0.375, pz);
+                rp.castShadow = true; group.add(rp);
+                // Arch curve
+                const archR = (aw - pw * 2) / 2 * 0.85;
+                const archMesh = new THREE.Mesh(
+                    new THREE.TorusGeometry(archR, pw * 0.6, 6, 12, Math.PI), mat
+                );
+                archMesh.rotation.x = -Math.PI / 2;
+                archMesh.position.set(px, anchorY + py + ah * 0.75, pz);
+                archMesh.castShadow = true; group.add(archMesh);
+                // Lintel
+                const lintel = new THREE.Mesh(new THREE.BoxGeometry(aw, pw * 0.8, at * 1.2), mat);
+                lintel.position.set(px, anchorY + py + ah * 0.75 + archR, pz);
+                lintel.castShadow = true; group.add(lintel);
+                maxTop = Math.max(maxTop, anchorY + py + ah);
+                mesh = null;
             } else {
                 throw new Error(`procedural.parts[${i}]: unknown shape ${JSON.stringify(p.shape)}`);
             }
 
+            if (!mesh) continue; // Compound shapes already added their meshes above
             if (Array.isArray(p.rotation) && p.rotation.length >= 3) {
                 mesh.rotation.x += Number(p.rotation[0]) || 0;
                 mesh.rotation.y += Number(p.rotation[1]) || 0;
@@ -2151,7 +2391,7 @@ class WorldRenderer {
         shaftInst.receiveShadow = true;
         const dummy = this._instDummy;
 
-        if (baseH > 0) {
+            if (baseH > 0) {
             const baseGeom = new THREE.CylinderGeometry(r + 0.01, r + 0.015, baseH, 8);
             const baseMat = this._matPBR(Object.assign({}, comp, { roughness: baseR, metalness: pbrM }), color, baseR, pbrM);
             const baseInst = new THREE.InstancedMesh(baseGeom, baseMat, n);
@@ -2181,7 +2421,7 @@ class WorldRenderer {
         group.add(shaftInst);
 
         const capMat = this._matPBR(Object.assign({}, comp, { roughness: capR, metalness: pbrM }), color, capR, pbrM);
-        if (style === "corinthian") {
+            if (style === "corinthian") {
             const c1Geom = new THREE.BoxGeometry(capW * 0.7, capH * 0.6, capW * 0.7);
             const c2Geom = new THREE.BoxGeometry(capW, capH * 0.4, capW);
             const c1Inst = new THREE.InstancedMesh(c1Geom, capMat, n);
@@ -2200,7 +2440,7 @@ class WorldRenderer {
             c1Inst.instanceMatrix.needsUpdate = true;
             c2Inst.instanceMatrix.needsUpdate = true;
             group.add(c1Inst, c2Inst);
-        } else {
+            } else {
             const capGeom = new THREE.BoxGeometry(capW, capH, capW);
             const capInst = new THREE.InstancedMesh(capGeom, capMat, n);
             capInst.castShadow = true;
@@ -2265,21 +2505,40 @@ class WorldRenderer {
         const r = comp.radius || Math.min(w, d) * 0.4;
         const color = comp.color || "#8b7355";
 
+        // Drum (cylindrical base for the dome — architectural standard)
+        const drumH = r * 0.35;
+        const drumR = r * 1.02;
+        const drum = new THREE.Mesh(
+            new THREE.CylinderGeometry(drumR, drumR * 1.04, drumH, 16),
+            this._matPBR(comp, color, 0.65)
+        );
+        drum.position.y = baseY + drumH / 2;
+        group.add(drum);
+
+        // Dome hemisphere sits on the drum
         const dome = new THREE.Mesh(
             new THREE.SphereGeometry(r, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2),
             this._matPBR(comp, color, 0.4)
         );
-        dome.position.y = baseY;
+        dome.position.y = baseY + drumH;
         group.add(dome);
 
         // Oculus ring at top
         const oculus = new THREE.Mesh(
-            new THREE.TorusGeometry(r * 0.12, 0.01, 6, 12),
+            new THREE.TorusGeometry(r * 0.12, 0.012, 6, 12),
             this._mat("#e8e0d0", 0.28, 0.12)
         );
         oculus.rotation.x = -Math.PI / 2;
-        oculus.position.y = baseY + r - 0.01;
+        oculus.position.y = baseY + drumH + r - 0.01;
         group.add(oculus);
+
+        // Finial (small sphere/cone at apex — common across cultures)
+        const finial = new THREE.Mesh(
+            new THREE.SphereGeometry(r * 0.06, 8, 6),
+            this._mat("#DAA520", 0.3, 0.2)
+        );
+        finial.position.y = baseY + drumH + r + r * 0.04;
+        group.add(finial);
 
         return baseY + r;
     }
@@ -2308,19 +2567,34 @@ class WorldRenderer {
             const numWin = comp.windows || Math.max(1, Math.floor(sw / (winW * 3.5)));
             const winSpacing = sw / (numWin + 1);
 
+            const winMat = this._mat(windowColor, 0.38, 0.12);
             for (let wi = 0; wi < numWin; wi++) {
                 const wx = -sw / 2 + winSpacing * (wi + 1);
                 const wy = baseY + s * storyH + storyH * 0.55;
 
-                // Front windows (slightly glossy — not tied to wall roughness unless windowRoughness added later)
-                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor, 0.38, 0.12));
+                // Front windows
+                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), winMat);
                 wf.position.set(wx, wy, -sd / 2 - 0.005);
                 group.add(wf);
 
                 // Back windows
-                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), this._mat(windowColor, 0.38, 0.12));
+                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), winMat);
                 wb.position.set(wx, wy, sd / 2 + 0.005);
                 group.add(wb);
+            }
+
+            // Side windows (left and right) — fewer, proportional to depth
+            const sideWinCount = Math.max(1, Math.floor(numWin * (sd / sw)));
+            const sideWinSpacing = sd / (sideWinCount + 1);
+            for (let wi = 0; wi < sideWinCount; wi++) {
+                const wz = -sd / 2 + sideWinSpacing * (wi + 1);
+                const wy = baseY + s * storyH + storyH * 0.55;
+                const wl = new THREE.Mesh(new THREE.BoxGeometry(0.02, winH, winW), winMat);
+                wl.position.set(-sw / 2 - 0.005, wy, wz);
+                group.add(wl);
+                const wr = new THREE.Mesh(new THREE.BoxGeometry(0.02, winH, winW), winMat);
+                wr.position.set(sw / 2 + 0.005, wy, wz);
+                group.add(wr);
             }
 
             // Floor line between stories
@@ -2333,6 +2607,15 @@ class WorldRenderer {
                 group.add(ledge);
             }
         }
+        // Flat roof cap (parapet ledge) — prevents naked top
+        const capH = 0.02;
+        const cap = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.03, capH, d + 0.03),
+            this._matPBR(comp, color, 0.65)
+        );
+        cap.position.y = baseY + totalH + capH / 2;
+        group.add(cap);
+
         return baseY + totalH;
     }
 
@@ -2387,16 +2670,38 @@ class WorldRenderer {
     _buildTiledRoof(group, comp, baseY, w, d) {
         const color = comp.color || "#b5651d";
         const peakH = comp.height || w * 0.2;
+        const slopeAngle = Math.atan2(peakH, d * 0.5);
+        const slopeLen = Math.hypot(peakH, d * 0.5);
 
+        // Two sloped surfaces
         for (const side of [-1, 1]) {
             const slope = new THREE.Mesh(
-                new THREE.BoxGeometry(w + 0.02, 0.03, d * 0.55),
-                this._matPBR(comp, color, 0.7)
+                new THREE.BoxGeometry(w + 0.04, 0.025, slopeLen * 0.52),
+                this._matPBR(comp, color, 0.75)
             );
-            slope.position.set(0, baseY + peakH * 0.5, side * d * 0.2);
-            slope.rotation.x = side * 0.25;
+            slope.position.set(0, baseY + peakH * 0.5, side * d * 0.22);
+            slope.rotation.x = side * slopeAngle * 0.65;
             group.add(slope);
         }
+
+        // Ridge beam along the peak
+        const ridge = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.06, 0.035, 0.04),
+            this._matPBR(comp, color, 0.6)
+        );
+        ridge.position.y = baseY + peakH;
+        group.add(ridge);
+
+        // Eave overhang on both sides
+        for (const side of [-1, 1]) {
+            const eave = new THREE.Mesh(
+                new THREE.BoxGeometry(w + 0.08, 0.015, 0.06),
+                this._matPBR(comp, color, 0.8)
+            );
+            eave.position.set(0, baseY + 0.01, side * (d * 0.5 + 0.02));
+            group.add(eave);
+        }
+
         return baseY + peakH;
     }
 
@@ -2451,18 +2756,53 @@ class WorldRenderer {
         const pedH = totalH * 0.3;
         const figH = totalH * 0.5;
         const headR = totalH * 0.08;
+        const figMat = this._matPBR(comp, color, 0.45, 0.08);
 
-        const ped = new THREE.Mesh(new THREE.BoxGeometry(0.12, pedH, 0.12), this._matPBR(comp, pedColor, 0.82));
+        // Pedestal — varied shape based on optional comp.shape
+        const pedW = 0.12;
+        const ped = new THREE.Mesh(new THREE.BoxGeometry(pedW, pedH, pedW), this._matPBR(comp, pedColor, 0.82));
         ped.position.y = baseY + pedH / 2;
         group.add(ped);
+        // Pedestal cap
+        const pedCap = new THREE.Mesh(new THREE.BoxGeometry(pedW + 0.02, 0.01, pedW + 0.02), this._matPBR(comp, pedColor, 0.75));
+        pedCap.position.y = baseY + pedH;
+        group.add(pedCap);
 
-        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, figH, 8), this._matPBR(comp, color, 0.5));
-        body.position.y = baseY + pedH + figH / 2;
-        group.add(body);
-
-        const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), this._matPBR(comp, color, 0.5));
-        head.position.y = baseY + pedH + figH + headR;
-        group.add(head);
+        const shape = comp.shape || "figure";
+        if (shape === "obelisk" || shape === "column") {
+            // Tall tapered column/obelisk
+            const obelisk = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.025, 0.04, figH * 1.4, 4),
+                figMat
+            );
+            obelisk.position.y = baseY + pedH + figH * 0.7;
+            obelisk.rotation.y = Math.PI / 4;
+            group.add(obelisk);
+        } else if (shape === "equestrian") {
+            // Horse + rider silhouette (box body + cylinder legs)
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.05, 0.04), figMat);
+            body.position.y = baseY + pedH + figH * 0.35;
+            group.add(body);
+            // Rider
+            const rider = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, figH * 0.4, 6), figMat);
+            rider.position.y = baseY + pedH + figH * 0.6;
+            group.add(rider);
+            const rHead = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), figMat);
+            rHead.position.y = baseY + pedH + figH * 0.85;
+            group.add(rHead);
+        } else {
+            // Default standing figure
+            const body = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, figH, 8), figMat);
+            body.position.y = baseY + pedH + figH / 2;
+            group.add(body);
+            // Shoulders
+            const shoulders = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.02, 0.04), figMat);
+            shoulders.position.y = baseY + pedH + figH * 0.85;
+            group.add(shoulders);
+            const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), figMat);
+            head.position.y = baseY + pedH + figH + headR;
+            group.add(head);
+        }
 
         return baseY + totalH;
     }
@@ -2473,30 +2813,55 @@ class WorldRenderer {
         const h = comp.height || 0.25;
         const color = comp.color || "#a0968a";
 
-        // Basin
+        // Basin outer rim
         const basin = new THREE.Mesh(
-            new THREE.CylinderGeometry(r, r - 0.02, h * 0.35, 12),
+            new THREE.CylinderGeometry(r, r - 0.02, h * 0.35, 16),
             this._matPBR(comp, color, 0.75)
         );
         basin.position.y = baseY + h * 0.175;
         group.add(basin);
 
-        // Water surface
-        const water = new THREE.Mesh(
-            new THREE.CylinderGeometry(r - 0.02, r - 0.02, 0.02, 12),
-            new THREE.MeshStandardMaterial({ color: 0x2980b9, transparent: true, opacity: 0.7, roughness: 0.05 })
+        // Basin lip (decorative ring)
+        const lip = new THREE.Mesh(
+            new THREE.TorusGeometry(r - 0.005, 0.012, 6, 16),
+            this._matPBR(comp, color, 0.6)
         );
-        water.position.y = baseY + h * 0.33;
+        lip.rotation.x = -Math.PI / 2;
+        lip.position.y = baseY + h * 0.35;
+        group.add(lip);
+
+        // Water surface — more visible (higher opacity, normal map for ripples)
+        const waterMat = new THREE.MeshStandardMaterial({
+            color: 0x2980b9, transparent: true, opacity: 0.85,
+            roughness: 0.08, metalness: 0.05,
+        });
+        if (this._terrainNormalMap) {
+            waterMat.normalMap = this._terrainNormalMap;
+            waterMat.normalScale = new THREE.Vector2(0.12, 0.12);
+        }
+        const water = new THREE.Mesh(
+            new THREE.CylinderGeometry(r * 0.85, r * 0.85, 0.02, 16),
+            waterMat
+        );
+        water.position.y = baseY + h * 0.32;
         water.userData.isWater = true;
         group.add(water);
 
         // Central spout column
         const col = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.015, 0.02, h * 0.7, 8),
-            this._matPBR(comp, color, 0.75)
+            new THREE.CylinderGeometry(0.012, 0.018, h * 0.75, 8),
+            this._matPBR(comp, color, 0.55)
         );
         col.position.y = baseY + h * 0.35 + h * 0.35;
         group.add(col);
+
+        // Spout cap (small sphere at top)
+        const cap = new THREE.Mesh(
+            new THREE.SphereGeometry(0.018, 8, 6),
+            this._matPBR(comp, color, 0.4)
+        );
+        cap.position.y = baseY + h * 0.35 + h * 0.72;
+        group.add(cap);
 
         return baseY + h;
     }
@@ -2808,10 +3173,26 @@ class WorldRenderer {
             group.position.y = group.userData.animStartY + (group.userData.animTargetY - group.userData.animStartY) * ease;
             if (t >= 1) { delete group.userData.animStart; this._animatingGroups.delete(group); }
         }
-        // Animate only tracked water meshes
-        for (const c of this._waterMeshes) {
-            const gp = c.parent; // group is the direct or indirect parent
-            c.position.y = -0.03 + Math.sin(now * 0.002 + gp.position.x * 2 + gp.position.z * 3) * 0.012;
+        // Animate only tracked water meshes (river/harbor tiles)
+        {
+            const waveT = now * 0.001; // seconds-ish for wave calc
+            for (const c of this._waterMeshes) {
+                const gp = c.parent;
+                // Original shimmer + subtle Y oscillation with wave propagation offset
+                const phase = gp.position.x * 0.15 + gp.position.z * 0.2;
+                c.position.y = -0.03
+                    + Math.sin(now * 0.002 + gp.position.x * 2 + gp.position.z * 3) * 0.012
+                    + Math.sin(waveT * 0.3 * Math.PI * 2 + phase) * 0.15;
+            }
+        }
+        // Animate distant water plane — gentle roughness shimmer + subtle wave
+        if (this._waterPlane) {
+            const wSec = now * 0.001;
+            const sine = Math.sin(wSec * 0.3 * Math.PI * 2); // ~0.3 Hz
+            // Roughness oscillates between 0.15 and 0.30
+            this._waterPlane.material.roughness = 0.225 + sine * 0.075;
+            // Gentle Y oscillation ±0.15 world units
+            this._waterPlane.position.y = this._waterPlaneBaseY + sine * 0.15;
         }
         if (this._flyTarget) {
             const t = Math.min(1, (now - this._flyStart) / 1500);

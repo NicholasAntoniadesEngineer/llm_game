@@ -5,21 +5,41 @@
     {
       "id": "roman_republic_temple_peripteral",
       "match": {
-        "building_types": ["temple"],
-        "cities": ["Rome", "Pompeii"],
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Rome",
+          "Pompeii"
+        ],
         "year_min": -200,
         "year_max": 27
       },
       "title": "Italic / late Republican peripteral temple (archaeological ranges)",
       "proportion_rules_hints": {
         "colonnade": {
-          "height_to_lower_diameter_ratio": [7, 9],
-          "max_shaft_height_fraction_of_min_span": [0.75, 0.85]
+          "height_to_lower_diameter_ratio": [
+            7,
+            9
+          ],
+          "max_shaft_height_fraction_of_min_span": [
+            0.75,
+            0.85
+          ]
         },
         "cella": {
-          "inset_per_side": [0.12, 0.18],
-          "max_width_fraction": [0.55, 0.65],
-          "max_depth_fraction": [0.85, 0.95]
+          "inset_per_side": [
+            0.12,
+            0.18
+          ],
+          "max_width_fraction": [
+            0.55,
+            0.65
+          ],
+          "max_depth_fraction": [
+            0.85,
+            0.95
+          ]
         },
         "podium": {
           "steps_min": 3,
@@ -28,12 +48,21 @@
           "max_height": 0.16
         },
         "pediment": {
-          "max_height_fraction_of_w": [0.14, 0.22]
+          "max_height_fraction_of_w": [
+            0.14,
+            0.22
+          ]
         }
       },
       "measurements_meters_typical": {
-        "intercolumniation_eustyle_m": [2.0, 2.7],
-        "podium_rise_above_ground_m": [1.5, 4.0]
+        "intercolumniation_eustyle_m": [
+          2.0,
+          2.7
+        ],
+        "podium_rise_above_ground_m": [
+          1.5,
+          4.0
+        ]
       },
       "material_hints": {
         "podium_travertine": "#F5E6C8",
@@ -45,7 +74,9 @@
     {
       "id": "insula_ostia_style",
       "match": {
-        "building_types": ["insula"]
+        "building_types": [
+          "insula"
+        ]
       },
       "title": "Multi-storey urban housing block (Mediterranean / comparative)",
       "proportion_rules_hints": {
@@ -58,21 +89,38 @@
         }
       },
       "measurements_meters_typical": {
-        "ground_floor_taberna_width_m": [3.5, 4.5],
-        "ground_wall_thickness_m": [0.45, 0.6],
-        "window_height_m": [1.0, 1.2]
+        "ground_floor_taberna_width_m": [
+          3.5,
+          4.5
+        ],
+        "ground_wall_thickness_m": [
+          0.45,
+          0.6
+        ],
+        "window_height_m": [
+          1.0,
+          1.2
+        ]
       },
       "material_hints": {
         "brick_faced": "#B85C3A",
         "lime_plaster": "#F0EAD6"
       },
-      "citation": "Ostia insulae — excavation ranges (illustrative)."
+      "citation": "Ostia insulae \u2014 excavation ranges (illustrative)."
     },
     {
       "id": "domus_mediterranean",
       "match": {
-        "building_types": ["domus"],
-        "cities": ["Rome", "Pompeii", "Carthage", "Alexandria", "Constantinople"]
+        "building_types": [
+          "domus"
+        ],
+        "cities": [
+          "Rome",
+          "Pompeii",
+          "Carthage",
+          "Alexandria",
+          "Constantinople"
+        ]
       },
       "title": "Courtyard house (Roman / Hellenistic urban)",
       "proportion_rules_hints": {
@@ -94,31 +142,50 @@
         }
       },
       "measurements_meters_typical": {
-        "atrium_width_m": [7, 14],
-        "peristyle_column_count_typical": [8, 16]
+        "atrium_width_m": [
+          7,
+          14
+        ],
+        "peristyle_column_count_typical": [
+          8,
+          16
+        ]
       },
       "material_hints": {
         "stucco": "#F0EAD6",
         "roof_terracotta": "#C45A3C"
       },
-      "citation": "Pompeii / Ostia domus — ranges vary widely by plot."
+      "citation": "Pompeii / Ostia domus \u2014 ranges vary widely by plot."
     },
     {
       "id": "greek_temple_attica",
       "match": {
-        "building_types": ["temple"],
-        "cities": ["Athens"],
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Athens"
+        ],
         "year_min": -500,
         "year_max": 100
       },
       "title": "Classical Greek peripteral temple (Attic)",
       "proportion_rules_hints": {
         "colonnade": {
-          "height_to_lower_diameter_ratio": [8, 10],
-          "max_shaft_height_fraction_of_min_span": [0.78, 0.88]
+          "height_to_lower_diameter_ratio": [
+            8,
+            10
+          ],
+          "max_shaft_height_fraction_of_min_span": [
+            0.78,
+            0.88
+          ]
         },
         "cella": {
-          "inset_per_side": [0.14, 0.2]
+          "inset_per_side": [
+            0.14,
+            0.2
+          ]
         }
       },
       "material_hints": {
@@ -130,10 +197,17 @@
     {
       "id": "roman_thermae_imperial",
       "match": {
-        "building_types": ["thermae"],
-        "cities": ["Rome", "Pompeii", "Constantinople", "Carthage"]
+        "building_types": [
+          "thermae"
+        ],
+        "cities": [
+          "Rome",
+          "Pompeii",
+          "Constantinople",
+          "Carthage"
+        ]
       },
-      "title": "Imperial Roman public baths — volumes and vaulting",
+      "title": "Imperial Roman public baths \u2014 volumes and vaulting",
       "proportion_rules_hints": {
         "block": {
           "stories_min": 1,
@@ -145,7 +219,10 @@
         "dome": {
           "min_radius": 0.2,
           "max_radius": 0.38,
-          "max_radius_fraction_of_min_span": [0.35, 0.55]
+          "max_radius_fraction_of_min_span": [
+            0.35,
+            0.55
+          ]
         },
         "colonnade": {
           "min_radius": 0.012,
@@ -153,19 +230,27 @@
         }
       },
       "measurements_meters_typical": {
-        "frigidarium_span_m": [20, 35],
-        "natatio_pool_depth_m": [1.2, 1.8]
+        "frigidarium_span_m": [
+          20,
+          35
+        ],
+        "natatio_pool_depth_m": [
+          1.2,
+          1.8
+        ]
       },
       "material_hints": {
         "concrete_core": "#A09880",
         "marble_facing": "#F0F0F0"
       },
-      "citation": "Imperial thermae complexes — Stabian/Baths of Caracalla scale ranges."
+      "citation": "Imperial thermae complexes \u2014 Stabian/Baths of Caracalla scale ranges."
     },
     {
       "id": "roman_aqueduct_arcade",
       "match": {
-        "building_types": ["aqueduct"]
+        "building_types": [
+          "aqueduct"
+        ]
       },
       "title": "Arcaded aqueduct / multi-tier water bridge",
       "proportion_rules_hints": {
@@ -175,20 +260,29 @@
         }
       },
       "measurements_meters_typical": {
-        "arch_span_m": [4, 8],
-        "pier_thickness_m": [1.2, 2.5]
+        "arch_span_m": [
+          4,
+          8
+        ],
+        "pier_thickness_m": [
+          1.2,
+          2.5
+        ]
       },
       "material_hints": {
         "tufa_travertine": "#C8B070"
       },
-      "citation": "Pont du Gard–style ratios vary by terrain — Historian sets span."
+      "citation": "Pont du Gard\u2013style ratios vary by terrain \u2014 Historian sets span."
     },
     {
       "id": "amphitheater_oval",
       "match": {
-        "building_types": ["amphitheater", "circus"]
+        "building_types": [
+          "amphitheater",
+          "circus"
+        ]
       },
-      "title": "Oval arena / circus — cavea and vomitoria scale",
+      "title": "Oval arena / circus \u2014 cavea and vomitoria scale",
       "proportion_rules_hints": {
         "tier": {
           "min_height": 0.08,
@@ -200,25 +294,33 @@
         }
       },
       "measurements_meters_typical": {
-        "cavea_rise_per_m_radius": [0.08, 0.12]
+        "cavea_rise_per_m_radius": [
+          0.08,
+          0.12
+        ]
       },
       "material_hints": {
         "arena_sand": "#C4A77D",
         "vault_core": "#A09880"
       },
-      "citation": "Colosseum/Circus Maximus — major axis vs minor axis from Historian."
+      "citation": "Colosseum/Circus Maximus \u2014 major axis vs minor axis from Historian."
     },
     {
       "id": "civic_basilica_hall",
       "match": {
-        "building_types": ["basilica"]
+        "building_types": [
+          "basilica"
+        ]
       },
-      "title": "Civic basilica — nave and colonnades",
+      "title": "Civic basilica \u2014 nave and colonnades",
       "proportion_rules_hints": {
         "colonnade": {
           "min_shaft_height": 0.28,
           "max_shaft_height": 0.48,
-          "max_shaft_height_fraction_of_min_span": [0.55, 0.72]
+          "max_shaft_height_fraction_of_min_span": [
+            0.55,
+            0.72
+          ]
         },
         "block": {
           "stories_min": 1,
@@ -230,12 +332,14 @@
       "material_hints": {
         "floor_marble": "#F0F0F0"
       },
-      "citation": "Basilica Ulpia / Pompeii basilica — L:W from sources."
+      "citation": "Basilica Ulpia / Pompeii basilica \u2014 L:W from sources."
     },
     {
       "id": "city_gate_arch",
       "match": {
-        "building_types": ["gate"]
+        "building_types": [
+          "gate"
+        ]
       },
       "title": "Monumental gate / archway",
       "proportion_rules_hints": {
@@ -251,12 +355,14 @@
       "material_hints": {
         "stone": "#F5E6C8"
       },
-      "citation": "Arch of Titus–scale varies — Historian gives clearances."
+      "citation": "Arch of Titus\u2013scale varies \u2014 Historian gives clearances."
     },
     {
       "id": "defensive_wall_circuit",
       "match": {
-        "building_types": ["wall"]
+        "building_types": [
+          "wall"
+        ]
       },
       "title": "City / circuit wall with walk and battlements",
       "proportion_rules_hints": {
@@ -272,20 +378,28 @@
         }
       },
       "measurements_meters_typical": {
-        "wall_height_m": [8, 16],
-        "tower_spacing_m": [60, 120]
+        "wall_height_m": [
+          8,
+          16
+        ],
+        "tower_spacing_m": [
+          60,
+          120
+        ]
       },
       "material_hints": {
         "ashlar": "#C8B070"
       },
-      "citation": "Aurelian / Servian comparisons — thickness from Historian."
+      "citation": "Aurelian / Servian comparisons \u2014 thickness from Historian."
     },
     {
       "id": "market_portico",
       "match": {
-        "building_types": ["market"]
+        "building_types": [
+          "market"
+        ]
       },
-      "title": "Covered market / macellum — colonnaded courtyard",
+      "title": "Covered market / macellum \u2014 colonnaded courtyard",
       "proportion_rules_hints": {
         "colonnade": {
           "columns_min": 4,
@@ -303,12 +417,15 @@
       "material_hints": {
         "stall_front": "#F0EAD6"
       },
-      "citation": "Pompeii macellum — peristyle proportions from excavation."
+      "citation": "Pompeii macellum \u2014 peristyle proportions from excavation."
     },
     {
       "id": "hypostyle_hall_generic",
       "match": {
-        "building_types": ["basilica", "temple"]
+        "building_types": [
+          "basilica",
+          "temple"
+        ]
       },
       "title": "Large hypostyle hall (non-classical orders)",
       "notes": "Use procedural for non-Greco-Roman capitals; these are span sanity bands.",
@@ -322,13 +439,18 @@
           "max_radius": 0.045
         }
       },
-      "citation": "Comparative hall architecture — defer to Historian."
+      "citation": "Comparative hall architecture \u2014 defer to Historian."
     },
     {
       "id": "mesoamerican_ceremonial_tenochtitlan",
       "match": {
-        "building_types": ["temple", "market"],
-        "cities": ["Tenochtitlan"]
+        "building_types": [
+          "temple",
+          "market"
+        ],
+        "cities": [
+          "Tenochtitlan"
+        ]
       },
       "title": "Mesoamerican ceremonial / great market (Lake Texcoco)",
       "notes": "Talud-tablero and twin shrines: use procedural for pyramidal massing; colonnade labels do not apply.",
@@ -344,13 +466,18 @@
         "volcanic_stone": "#4A4A4A",
         "plaster_red": "#CC5533"
       },
-      "citation": "Templo Mayor excavations — steep twin platforms; Historian sets tier count."
+      "citation": "Templo Mayor excavations \u2014 steep twin platforms; Historian sets tier count."
     },
     {
       "id": "abbasid_round_city_market",
       "match": {
-        "building_types": ["market", "basilica"],
-        "cities": ["Baghdad"]
+        "building_types": [
+          "market",
+          "basilica"
+        ],
+        "cities": [
+          "Baghdad"
+        ]
       },
       "title": "Abbasid-era vaulted halls and suq-scale markets",
       "proportion_rules_hints": {
@@ -367,7 +494,403 @@
         "brick": "#B85C3A",
         "glazed_tile": "#1E6091"
       },
-      "citation": "Islamic vaulting spans — Historian specifies riwaq bays."
+      "citation": "Islamic vaulting spans \u2014 Historian specifies riwaq bays."
+    },
+    {
+      "id": "greek_classical_temple",
+      "match": {
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Athens"
+        ],
+        "year_min": -500,
+        "year_max": -100
+      },
+      "title": "Classical Greek peripteral temple (5th-4th century BCE)",
+      "proportion_rules_hints": {
+        "colonnade": {
+          "height_to_lower_diameter_ratio": [
+            8,
+            10
+          ],
+          "max_shaft_height_fraction_of_min_span": [
+            0.8,
+            0.9
+          ]
+        },
+        "podium": {
+          "steps_min": 3,
+          "steps_max": 3,
+          "min_height": 0.04,
+          "max_height": 0.08
+        },
+        "pediment": {
+          "max_height_fraction_of_w": [
+            0.12,
+            0.18
+          ]
+        }
+      },
+      "measurements_meters_typical": {
+        "stylobate_step_height_m": [
+          0.3,
+          0.5
+        ],
+        "column_drum_diameter_m": [
+          1.0,
+          2.0
+        ]
+      },
+      "material_hints": {
+        "pentelic_marble": "#F0F0F0",
+        "limestone_base": "#F5E6C8"
+      },
+      "citation": "Parthenon / Hephaisteion measured surveys; Coulton 1977."
+    },
+    {
+      "id": "tang_dynasty_hall",
+      "match": {
+        "building_types": [
+          "temple",
+          "basilica"
+        ],
+        "cities": [
+          "Chang'an"
+        ],
+        "year_min": -200,
+        "year_max": 900
+      },
+      "title": "Chinese timber-frame hall (Han through Tang dynasty)",
+      "proportion_rules_hints": {
+        "block": {
+          "stories_min": 1,
+          "stories_max": 3,
+          "min_story_height": 0.25,
+          "max_story_height": 0.45
+        },
+        "colonnade": {
+          "height_to_lower_diameter_ratio": [
+            10,
+            14
+          ]
+        },
+        "tiled_roof": {
+          "min_height": 0.12,
+          "max_height": 0.25
+        }
+      },
+      "measurements_meters_typical": {
+        "bay_width_m": [
+          3.5,
+          5.5
+        ],
+        "column_diameter_m": [
+          0.4,
+          0.8
+        ],
+        "eave_overhang_m": [
+          1.5,
+          3.0
+        ]
+      },
+      "material_hints": {
+        "timber_frame": "#6B4226",
+        "lacquer_red": "#CC3333",
+        "glazed_tile_roof": "#2A2A2A",
+        "gilded_bracket": "#DAA520"
+      },
+      "citation": "Liang Sicheng; Foguang Temple main hall surveys; Steinhardt 1984."
+    },
+    {
+      "id": "mesoamerican_stepped_pyramid",
+      "match": {
+        "building_types": [
+          "temple",
+          "monument"
+        ],
+        "cities": [
+          "Tenochtitlan"
+        ],
+        "year_min": 1200,
+        "year_max": 1521
+      },
+      "title": "Aztec/Mexica stepped pyramid temple (Templo Mayor type)",
+      "proportion_rules_hints": {
+        "podium": {
+          "steps_min": 4,
+          "steps_max": 12,
+          "min_height": 0.15,
+          "max_height": 0.5
+        }
+      },
+      "measurements_meters_typical": {
+        "base_width_m": [
+          30,
+          80
+        ],
+        "total_height_m": [
+          20,
+          45
+        ],
+        "stair_width_m": [
+          8,
+          15
+        ]
+      },
+      "material_hints": {
+        "volcanic_stone": "#4A4A4A",
+        "stucco_painted": "#CC5533",
+        "adobe_core": "#C4A77D"
+      },
+      "citation": "Matos Moctezuma, Templo Mayor excavations 1978-present."
+    },
+    {
+      "id": "abbasid_mosque",
+      "match": {
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Baghdad"
+        ],
+        "year_min": 750,
+        "year_max": 1258
+      },
+      "title": "Abbasid hypostyle mosque (8th-13th century)",
+      "proportion_rules_hints": {
+        "arcade": {
+          "min_height": 0.3,
+          "max_height": 0.5
+        },
+        "dome": {
+          "min_radius": 0.15,
+          "max_radius": 0.4
+        },
+        "walls": {
+          "min_height": 0.25,
+          "max_height": 0.45,
+          "min_thickness": 0.06,
+          "max_thickness": 0.12
+        }
+      },
+      "measurements_meters_typical": {
+        "prayer_hall_depth_m": [
+          30,
+          60
+        ],
+        "minaret_height_m": [
+          15,
+          35
+        ],
+        "courtyard_width_m": [
+          20,
+          50
+        ]
+      },
+      "material_hints": {
+        "brick_fired": "#B85C3A",
+        "glazed_tile_blue": "#1E6091",
+        "stucco_carved": "#F0EAD6",
+        "marble_white": "#F0F0F0"
+      },
+      "citation": "Creswell, Early Muslim Architecture; al-Mansur Round City reconstructions."
+    },
+    {
+      "id": "byzantine_church",
+      "match": {
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Constantinople"
+        ],
+        "year_min": 330,
+        "year_max": 1453
+      },
+      "title": "Byzantine cross-domed church (4th-15th century)",
+      "proportion_rules_hints": {
+        "dome": {
+          "min_radius": 0.2,
+          "max_radius": 0.5,
+          "max_radius_fraction_of_min_span": 0.6
+        },
+        "arcade": {
+          "min_height": 0.25,
+          "max_height": 0.4
+        },
+        "walls": {
+          "min_height": 0.3,
+          "max_height": 0.5
+        }
+      },
+      "measurements_meters_typical": {
+        "nave_width_m": [
+          10,
+          30
+        ],
+        "dome_diameter_m": [
+          8,
+          31
+        ]
+      },
+      "material_hints": {
+        "brick_roman": "#B85C3A",
+        "marble_proconnesian": "#F0F0F0",
+        "gold_mosaic": "#FFD700"
+      },
+      "citation": "Hagia Sophia surveys; Krautheimer, Early Christian Architecture."
+    },
+    {
+      "id": "south_asian_hindu_temple",
+      "match": {
+        "building_types": [
+          "temple"
+        ],
+        "cities": [
+          "Varanasi",
+          "Vijayanagara"
+        ],
+        "year_min": -300,
+        "year_max": 1600
+      },
+      "title": "Hindu temple (Nagara/Dravida shikhara tradition)",
+      "proportion_rules_hints": {
+        "podium": {
+          "steps_min": 2,
+          "steps_max": 6,
+          "min_height": 0.06,
+          "max_height": 0.15
+        },
+        "walls": {
+          "min_height": 0.25,
+          "max_height": 0.45,
+          "min_thickness": 0.06,
+          "max_thickness": 0.12
+        }
+      },
+      "measurements_meters_typical": {
+        "garbhagriha_width_m": [
+          3,
+          8
+        ],
+        "shikhara_height_m": [
+          10,
+          40
+        ],
+        "mandapa_column_count": [
+          4,
+          16
+        ],
+        "gopuram_height_m": [
+          15,
+          50
+        ]
+      },
+      "material_hints": {
+        "granite_grey": "#808080",
+        "sandstone_warm": "#C8B070",
+        "stucco_painted_red": "#CC3333",
+        "stucco_painted_blue": "#2E86AB",
+        "gold_finial": "#FFD700",
+        "laterite_red": "#B85C3A"
+      },
+      "notes": "Use procedural components for shikhara tower (stacked decreasing boxes + sphere kalasha), gopuram (tiered polychrome gateway), and torana (ornamental arch). Named components are insufficient for these forms.",
+      "citation": "Kramrisch, The Hindu Temple; Michell, The Hindu Temple; ASI surveys of Hampi/Vijayanagara."
+    },
+    {
+      "id": "khmer_temple_mountain",
+      "match": {
+        "building_types": [
+          "temple",
+          "monument"
+        ],
+        "cities": [
+          "Angkor"
+        ],
+        "year_min": 800,
+        "year_max": 1431
+      },
+      "title": "Khmer temple-mountain (prasat tradition)",
+      "proportion_rules_hints": {
+        "podium": {
+          "steps_min": 3,
+          "steps_max": 7,
+          "min_height": 0.1,
+          "max_height": 0.4
+        }
+      },
+      "measurements_meters_typical": {
+        "base_platform_m": [
+          50,
+          200
+        ],
+        "prasat_tower_height_m": [
+          15,
+          65
+        ],
+        "gallery_width_m": [
+          3,
+          6
+        ],
+        "moat_width_m": [
+          150,
+          200
+        ]
+      },
+      "material_hints": {
+        "sandstone_grey": "#A09880",
+        "laterite_core": "#B85C3A",
+        "sandstone_carved": "#C8B070",
+        "gold_finial": "#DAA520"
+      },
+      "notes": "Use procedural components for prasat towers (box + cone + sphere finial). Stepped pyramid base from multiple podium tiers. Galleries as colonnade + flat_roof or arcade + flat_roof.",
+      "citation": "Coedes, The Indianized States; Freeman & Jacques, Ancient Angkor; EFEO surveys."
+    },
+    {
+      "id": "south_asian_ghat_steps",
+      "match": {
+        "building_types": [
+          "bridge",
+          "monument"
+        ],
+        "cities": [
+          "Varanasi"
+        ],
+        "year_min": -500,
+        "year_max": 1500
+      },
+      "title": "Ganga ghat (stepped riverfront bathing complex)",
+      "proportion_rules_hints": {
+        "podium": {
+          "steps_min": 10,
+          "steps_max": 30,
+          "min_height": 0.2,
+          "max_height": 0.6
+        }
+      },
+      "measurements_meters_typical": {
+        "ghat_width_m": [
+          20,
+          80
+        ],
+        "total_step_height_m": [
+          8,
+          20
+        ],
+        "platform_depth_m": [
+          5,
+          15
+        ]
+      },
+      "material_hints": {
+        "stone_steps": "#A09880",
+        "ochre_plaster": "#C4A77D",
+        "whitewash": "#F0EAD6"
+      },
+      "notes": "Use stacked podium components for stepped descent to water. Add procedural parasol posts (cylinder + cone) and small shrines (box + dome) on platforms.",
+      "citation": "Singh, Banaras: City of Light; ASI ghat surveys."
     }
   ]
 }

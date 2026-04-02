@@ -3,14 +3,27 @@
 import asyncio
 import json
 import logging
+import os
+import time
 
 from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
+from run_log import log_event
 from agents.base import AgentGenerationError, BaseAgent
-from agents.golden_specs import get_golden_example
+from agents.golden_specs import get_golden_example, get_golden_example_for_culture
 
 # Master-plan building_types that are rendered as procedural terrain (no Urbanista components).
 OPEN_TERRAIN_TYPES = frozenset({"road", "forum", "garden", "water", "grass"})
+
+# Wave 1 (landmarks) — built first across all districts for a quick city skeleton.
+# Wave 2 (infill) — fills density after the skeleton is complete.
+WAVE1_TYPES = frozenset({
+    "temple", "basilica", "gate", "wall", "monument", "amphitheater",
+    "thermae", "circus", "bridge", "aqueduct",
+    # Open terrain is always wave 1 (roads, plazas, water — defines the street grid)
+    "road", "forum", "garden", "water", "grass",
+})
+# Everything else (insula, domus, market, taberna, warehouse) is wave 2.
 from llm_agents import (
     KEY_CARTOGRAPHUS_REFINE,
     KEY_CARTOGRAPHUS_SKELETON,
@@ -37,6 +50,7 @@ from orchestration.validation import (
     validate_master_plan,
     validate_urbanista_tiles,
     validate_urbanista_arch_result,
+    sanitize_urbanista_output,
     UrbanistaValidationError,
 )
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
@@ -47,6 +61,9 @@ logger = logging.getLogger("roma.engine")
 
 
 class BuildEngine:
+    # Toolbar / start-screen status strip (must match static/tiles.js AGENT_NAMES keys).
+    UI_STATUS_STRIP_AGENT_KEYS = ("cartographus", "urbanista")
+
     def __init__(self, world: WorldState, bus: MessageBus, broadcast_fn, chat_history_ref: list):
         self.world = world
         self.bus = bus
@@ -80,19 +97,114 @@ class BuildEngine:
         self._urbanista_semaphore = asyncio.Semaphore(URBANISTA_MAX_CONCURRENT)
         self._structures_since_save = 0
         self._survey_task_by_index: dict[int, asyncio.Task] = {}
+        self._district_scenery_summaries: dict[str, str] = {}
+        self._district_palettes: dict[str, dict] = {}  # {district_name: {primary, secondary, accent}}
         self._map_refine_task: asyncio.Task | None = None
-        self._map_refine_pending = False
         self._fused_seed_master_plan: list | None = None
         self._survey_cache_lock = asyncio.Lock()
         self._run_task: asyncio.Task | None = None
+        # Wall-clock start when an agent enters "thinking" (for UI timer across reconnect / refresh)
+        self._agent_thinking_started: dict[str, float] = {}
+        self._token_telemetry_task: asyncio.Task | None = None
+
+    def _token_telemetry_interval_s(self) -> int:
+        raw = os.environ.get("ROMA_TOKEN_TELEMETRY_INTERVAL_S", "").strip()
+        if not raw:
+            return 5
+        try:
+            v = int(raw)
+        except ValueError:
+            return 5
+        return 1 if v < 1 else v
+
+    def _start_token_telemetry(self) -> None:
+        if self._token_telemetry_task is not None and not self._token_telemetry_task.done():
+            return
+
+        async def _loop() -> None:
+            try:
+                from token_usage import STORE as TOKEN_USAGE_STORE
+                from token_usage import aggregate_for_ui as token_aggregate_for_ui
+                prev_totals: dict[str, int] = {}
+                interval_s = self._token_telemetry_interval_s()
+                logger.info("Token telemetry enabled: interval_s=%s", interval_s)
+                while self.running:
+                    await asyncio.sleep(interval_s)
+                    payload = TOKEN_USAGE_STORE.to_payload()
+                    # Flatten totals by agent_key for delta computation.
+                    current_totals: dict[str, int] = {}
+                    for agent_key, row in payload.items():
+                        total = row.get("total") if isinstance(row, dict) else None
+                        if not isinstance(total, dict):
+                            continue
+                        tt = total.get("total_tokens")
+                        if isinstance(tt, int):
+                            current_totals[str(agent_key)] = int(tt)
+                    if not current_totals:
+                        continue
+                    # Only broadcast when totals have changed since the last send.
+                    if current_totals != prev_totals:
+                        try:
+                            await self.broadcast(
+                                {
+                                    "type": "token_usage",
+                                    "by_ui_agent": token_aggregate_for_ui(),
+                                    "by_llm_key": payload,
+                                }
+                            )
+                        except Exception:
+                            logger.debug("Token telemetry: broadcast failed", exc_info=True)
+                        deltas = {
+                            k: (current_totals.get(k, 0) - prev_totals.get(k, 0))
+                            for k in current_totals.keys()
+                        }
+                        prev_totals = current_totals
+                        # Log top deltas only when something changed (suppress idle noise).
+                        top = sorted(deltas.items(), key=lambda kv: kv[1], reverse=True)[:6]
+                        top_str = ", ".join(f"{k}:+{v}" for k, v in top if v)
+                        if top_str:
+                            total_all = sum(current_totals.values())
+                            logger.info("Token telemetry: total_tokens=%s | deltas=%s", total_all, top_str)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Token telemetry loop failed")
+
+        self._token_telemetry_task = asyncio.create_task(_loop())
+
+    async def _stop_token_telemetry(self) -> None:
+        t = self._token_telemetry_task
+        self._token_telemetry_task = None
+        if t is None:
+            return
+        if not t.done():
+            t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("Token telemetry task ended with exception", exc_info=True)
 
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario (sync; cancel tasks from async)."""
+        for idx, task in self._survey_task_by_index.items():
+            if task.done() and not task.cancelled():
+                try:
+                    task.exception()
+                except Exception:
+                    pass
         self._survey_task_by_index.clear()
+        self._district_scenery_summaries.clear()
+        self._district_palettes.clear()
         self._map_refine_task = None
-        self._map_refine_pending = False
         self._fused_seed_master_plan = None
         self._structures_since_save = 0
+        self._agent_thinking_started.clear()
+        # Clear in-memory survey cache so a new city does not reuse surveys
+        # from the previous city (disk cache is deleted separately by handle_start).
+        if hasattr(self, "_survey_cache"):
+            del self._survey_cache
 
     async def abort_pipeline_tasks(self):
         """Cancel background survey/refine tasks (e.g. new city selected or reset)."""
@@ -131,18 +243,28 @@ class BuildEngine:
         new_task.add_done_callback(_on_done)
         return new_task
 
+    async def broadcast_all_agents_idle(self) -> None:
+        """Ensure the UI never shows 'thinking' when this build is not in progress."""
+        self._agent_thinking_started.clear()
+        for agent_name in self.UI_STATUS_STRIP_AGENT_KEYS:
+            await self._set_status(agent_name, "idle")
+
     async def graceful_shutdown(self):
         """Stop the build loop, cancel prefetch/refine, and join the main ``run()`` task."""
         self.running = False
         await self._cancel_survey_and_refine_tasks()
         await self.cancel_run_task_join()
+        await self.broadcast_all_agents_idle()
 
     async def run(self):
         try:
             self.running = True
+            self._start_token_telemetry()
             logger.info("BuildEngine started — Ave Roma!")
-            await asyncio.sleep(2)
-
+            log_event("engine", "Build started",
+                      scenario=str(config_module.SCENARIO.get("location", "?") if config_module.SCENARIO else "none"),
+                      period=str(config_module.SCENARIO.get("period", "?") if config_module.SCENARIO else "none"),
+                      grid=f"{GRID_WIDTH}x{GRID_HEIGHT}")
             # ─── PHASE 0: district skeleton (cached or fresh two-phase discovery) ───
             if not self.districts:
                 discovery_ok = await self._discover_districts()
@@ -151,6 +273,17 @@ class BuildEngine:
                     return
             else:
                 self._fused_seed_master_plan = None
+                # On resume: if map refine task is dead/cancelled, re-launch it
+                if self._map_refine_task is None or self._map_refine_task.done():
+                    cached = load_districts_cache()
+                    map_desc = cached[1] if cached else ""
+                    if not map_desc:
+                        self._map_refine_task = asyncio.create_task(self._refine_map_description_background())
+                        logger.info("Map refine (re)started on resume (no cached narrative).")
+                    asyncio.create_task(self._find_map_image())
+
+            # Persist immediately so roma_save.json exists (enables "Continue" on reload).
+            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
 
             # ─── Survey first: only the current district (unblocks buildings ASAP). ───
             # Previously we prefetched all districts at once; only SURVEY_MAX_CONCURRENT run, so the
@@ -165,64 +298,123 @@ class BuildEngine:
                 )
 
             build_loop_cancelled = False
-            # ─── Build each district (survey may still be running ahead for later districts) ───
-            try:
-                while self.running and self.district_index < len(self.districts):
-                    district = self.districts[self.district_index]
-                    logger.info(f"=== District: {district['name']} ===")
+
+            # ─── TWO-WAVE BUILD: landmarks first, then density ───
+            # Wave 1: landmarks + terrain (temples, gates, roads, plazas) across ALL districts
+            # Wave 2: infill (houses, shops, workshops) across ALL districts
+            # Result: user sees full city skeleton fast, then it fills in
+
+            # Collect all surveys upfront (prefetch everything)
+            self._start_survey_tasks_from_index(self.district_index, len(self.districts))
+            district_plans: dict[int, list] = {}
+
+            async def _get_plan(di: int) -> list | None:
+                try:
+                    return await self._await_survey_for_district_index(di)
+                except asyncio.CancelledError:
+                    return None
+                except AgentGenerationError as err:
+                    await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
+                    return None
+
+            for wave_label, type_filter in [("Wave 1 — Landmarks", WAVE1_TYPES), ("Wave 2 — Infill", None)]:
+                if not self.running:
+                    build_loop_cancelled = True
+                    break
+
+                await self._chat("cartographus", "info", f"=== {wave_label} ===")
+                log_event("engine", wave_label)
+
+                for di in range(self.district_index, len(self.districts)):
+                    if not self.running:
+                        build_loop_cancelled = True
+                        break
+
+                    district = self.districts[di]
+                    district_name = district["name"]
 
                     self.world.current_period = district.get("period", "")
                     self.world.current_year = district.get("year", -44)
 
-                    await self.broadcast({"type": "phase", "district": district["name"], "description": district.get("description", "")})
+                    scenery = self._district_scenery_summaries.get(district_name, "")
+                    await self.broadcast({
+                        "type": "phase",
+                        "district": district_name,
+                        "description": district.get("description", ""),
+                        "scenery_summary": scenery,
+                        "index": di + 1,
+                        "total_districts": len(self.districts),
+                        "wave": wave_label,
+                    })
                     await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
 
-                    try:
-                        master_plan = await self._await_survey_for_district_index(self.district_index)
-                    except asyncio.CancelledError:
+                    # Get survey (cached or wait for prefetch)
+                    if di not in district_plans:
+                        plan = await _get_plan(di)
+                        if plan is None:
+                            build_loop_cancelled = True
+                            break
+                        district_plans[di] = plan
+
+                    master_plan = district_plans[di]
+
+                    # Filter to only wave-relevant structures
+                    if type_filter is not None:
+                        wave_plan = [s for s in master_plan if s.get("building_type", "") in type_filter]
+                    else:
+                        # Wave 2: everything NOT in wave 1
+                        wave_plan = [s for s in master_plan if s.get("building_type", "") not in WAVE1_TYPES]
+
+                    if not wave_plan:
+                        continue
+
+                    logger.info(f"=== {wave_label}: {district_name} ({len(wave_plan)} structures) ===")
+                    log_event("district", f"{wave_label}: {district_name}",
+                              buildings=str(len(wave_plan)))
+
+                    district_ok = await self._build_district(district, wave_plan)
+                    if not district_ok:
                         build_loop_cancelled = True
                         break
-                    except AgentGenerationError as err:
-                        await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
-                        break
 
-                    if self._map_refine_pending and self._map_refine_task is None:
-                        self._map_refine_pending = False
-                        self._map_refine_task = asyncio.create_task(self._refine_map_description_background())
-                        logger.info("Map description refine started after first district survey (non-blocking).")
+                    await asyncio.to_thread(save_state, self.world, self.chat_history, di, self.districts)
+                    log_event("district", f"Completed {wave_label}: {district_name}")
 
-                    # Prefetch surveys for later districts while Urbanista builds this one.
-                    if self.district_index + 1 < len(self.districts):
-                        n_rest = len(self.districts) - self.district_index - 1
-                        self._start_survey_tasks_from_index(self.district_index + 1, len(self.districts))
-                        if self.district_index == 0:
-                            await self._chat(
-                                "cartographus",
-                                "info",
-                                f"Prefetching {n_rest} other district survey(s) in parallel while the first district is built.",
-                            )
+                if build_loop_cancelled:
+                    break
 
-                    district_ok = await self._build_district(district, master_plan)
-                    if not district_ok:
-                        break
+            # Update district_index to reflect completion
+            if not build_loop_cancelled:
+                self.district_index = len(self.districts)
 
-                    self.district_index += 1
-                    await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
-                    logger.info(f"=== Completed: {district['name']} ===")
-            finally:
-                await self._await_map_refine_task()
+            await self._await_map_refine_task()
 
             if build_loop_cancelled:
                 self.running = False
+                await self._stop_token_telemetry()
+                await self.broadcast_all_agents_idle()
                 return
 
             if self.running:
+                # Log completion with total token usage
+                from token_usage import STORE as _tu_store
+                tu = _tu_store.to_payload()
+                total_tokens = sum(
+                    (r.get("total") or {}).get("total_tokens", 0)
+                    for r in tu.values() if isinstance(r, dict)
+                )
+                log_event("engine", f"Build COMPLETE — {len(self.districts)} districts, {self.world.turn} structures",
+                          total_tokens=total_tokens)
                 await self.broadcast({"type": "complete"})
+            await self.broadcast_all_agents_idle()
             self.running = False
+            await self._stop_token_telemetry()
 
         except asyncio.CancelledError:
             self.running = False
             logger.info("BuildEngine.run cancelled")
+            await self._stop_token_telemetry()
+            await self.broadcast_all_agents_idle()
             raise
 
     async def _discover_districts(self) -> bool:
@@ -260,26 +452,65 @@ class BuildEngine:
             f"Which hadn't been constructed yet? What was the terrain like?\n\n"
             f"For each district: real name, function, footprint in tile coordinates, named buildings that existed, "
             f"roads and natural features.\n\n"
+            f"IMPORTANT: List at most {config_module.MAX_BUILDINGS_PER_DISTRICT} buildings per district. "
+            f"Choose the most significant and visually distinctive structures. Include roads and open spaces between them.\n\n"
             f"Be historically precise: only include structures that existed at this time."
         )
-        try:
-            result = await self.planner_skeleton.generate(plan_prompt)
-        except AgentGenerationError as err:
-            await self._set_status("cartographus", "idle")
-            await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
-            return False
+        for attempt in range(2):
+            try:
+                result = await asyncio.wait_for(
+                    self.planner_skeleton.generate(plan_prompt), timeout=300  # 5 min (CLI may do web searches)
+                )
+                break
+            except (AgentGenerationError, asyncio.TimeoutError) as err:
+                # Kill any orphaned CLI process on timeout
+                import subprocess as _sp
+                _sp.run(["pkill", "-f", r"claude.*--print.*--system-prompt"], capture_output=True)
+                if attempt == 0:
+                    reason = "network" if isinstance(err, asyncio.TimeoutError) else err.pause_reason
+                    retriable = reason in ("bad_model_output", "api_error", "network")
+                    if retriable:
+                        logger.warning("Skeleton planner failed (%s), retrying once", reason)
+                        await asyncio.sleep(3)
+                        continue
+                # Second attempt or non-retriable
+                await self._set_status("cartographus", "idle")
+                if isinstance(err, asyncio.TimeoutError):
+                    await self._pause_for_api_issue("network", "Skeleton planner timed out after 3 minutes.", "cartographus")
+                else:
+                    await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
+                return False
 
         await self._set_status("cartographus", "speaking")
+        logger.info(
+            "Skeleton planner result keys=%s districts_count=%s commentary_len=%s",
+            sorted(result.keys()),
+            len(result.get("districts") or []),
+            len(result.get("commentary") or ""),
+        )
         await self._chat("cartographus", "research", result.get("commentary", "District layout established."))
         await self._set_status("cartographus", "idle")
 
         self.districts = result.get("districts", [])
+        if len(self.districts) > config_module.MAX_DISTRICTS:
+            logger.warning("District count %d exceeds cap of %d — truncating", len(self.districts), config_module.MAX_DISTRICTS)
+            self.districts = self.districts[:config_module.MAX_DISTRICTS]
         logger.info(f"Skeleton: {len(self.districts)} districts")
+        if self.districts:
+            log_event("discovery", f"Mapped {len(self.districts)} districts",
+                      districts=", ".join(d.get("name", "?") for d in self.districts))
 
         if not self.districts:
+            # Log the full result for debugging
+            logger.error(
+                "Skeleton planner returned no districts. Full result: %s",
+                json.dumps(result, indent=2)[:3000],
+            )
             await self._pause_for_api_issue(
-                "unknown",
-                "Skeleton planner returned no districts (empty or missing `districts` array).",
+                "bad_model_output",
+                "Skeleton planner returned no districts (empty or missing `districts` array). "
+                "The model may have returned prose instead of the required JSON schema. "
+                f"Result keys: {sorted(result.keys())}. Check the server log for the full output.",
                 "cartographus",
             )
             return False
@@ -292,9 +523,8 @@ class BuildEngine:
             self._fused_seed_master_plan = None
 
         save_districts_cache(self.districts, "")
-        # Defer long map narrative until after the first district survey completes so it does not
-        # compete with the survey + Urbanista on the Claude CLI (same user log: refine + 3 surveys at once).
-        self._map_refine_pending = True
+        self._map_refine_task = asyncio.create_task(self._refine_map_description_background())
+        logger.info("Map refine started immediately after skeleton (non-blocking).")
         asyncio.create_task(self._find_map_image())
         return True
 
@@ -302,9 +532,10 @@ class BuildEngine:
         """Stop the build and notify clients (rate limit, API error, network, etc.)."""
         pause_detail = (pause_detail or "").strip()
         self.running = False
-        if self._structures_since_save > 0:
-            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
-            self._structures_since_save = 0
+        await self._stop_token_telemetry()
+        # Always save on pause — ensures no progress is lost
+        await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
+        self._structures_since_save = 0
         await self._cancel_survey_and_refine_tasks()
         summaries = {
             "rate_limit": "Build paused: the AI service rate limit was reached. Wait a bit, then try again.",
@@ -329,7 +560,7 @@ class BuildEngine:
             "detail": pause_detail[:1200] if pause_detail else "",
             "agent": agent_role,
         })
-        for agent_name in ("imperator", "cartographus", "urbanista", "faber", "civis"):
+        for agent_name in self.UI_STATUS_STRIP_AGENT_KEYS:
             await self._set_status(agent_name, "idle")
 
     async def _cancel_survey_and_refine_tasks(self):
@@ -443,15 +674,17 @@ class BuildEngine:
         return await task
 
     def _occupancy_summary_for_survey(self, master_plan: list) -> str:
-        cells = []
+        count = 0
         for struct in master_plan:
-            for t in struct.get("tiles") or []:
-                x, y = t.get("x"), t.get("y")
-                if x is not None and y is not None:
-                    cells.append(f"({x},{y})")
-        if not cells:
+            count += len(struct.get("tiles") or [])
+        if count == 0:
             return "None yet."
-        return ", ".join(cells[:120]) + ("…" if len(cells) > 120 else "")
+        names = [s.get("name", "?") for s in master_plan[:10]]
+        extra = len(master_plan) - len(names)
+        name_str = ", ".join(names)
+        if extra > 0:
+            name_str += f", +{extra} more"
+        return f"{count} tiles placed across {len(master_plan)} structures ({name_str})."
 
     async def _survey_work_item(self, district_index: int) -> list:
         """Resolve master_plan for one district (cache, fused seed, or survey API)."""
@@ -465,9 +698,21 @@ class BuildEngine:
             if district_key in self._survey_cache:
                 cached_plan = self._survey_cache[district_key]
         if cached_plan is not None:
-            logger.info("Survey cache hit: %s", district_key)
-            await self._chat("cartographus", "survey", f"Using cached survey of {district_key}.")
-            return cached_plan
+            if isinstance(cached_plan, list) and len(cached_plan) > 0:
+                if all(isinstance(s, dict) and "name" in s for s in cached_plan):
+                    # Sanity: if district lists many buildings but cache has very few, re-survey
+                    expected = len(district.get("buildings", []))
+                    if expected > 3 and len(cached_plan) < 3:
+                        logger.warning(
+                            "Survey cache for %s has only %d structures but district lists %d buildings — re-surveying",
+                            district_key, len(cached_plan), expected,
+                        )
+                    else:
+                        logger.info("Survey cache hit: %s (%d structures)", district_key, len(cached_plan))
+                        await self._chat("cartographus", "survey", f"Using cached survey of {district_key} ({len(cached_plan)} structures).")
+                        return cached_plan
+            # If validation fails, fall through to re-survey
+            logger.warning("Survey cache invalid for %s — re-surveying", district_key)
 
         if district_index == 0 and self._fused_seed_master_plan:
             raw_seed = self._fused_seed_master_plan
@@ -516,33 +761,93 @@ class BuildEngine:
     async def _survey_district_with_chunking(self, district: dict) -> list:
         buildings = district.get("buildings") or []
 
+        district_key = district.get("name", "unknown")
+
         if len(buildings) <= SURVEY_BUILDINGS_PER_CHUNK:
             survey = await self._survey_district_single_pass(district, buildings_filter=None, prior_summary="")
             master_plan = survey.get("master_plan", [])
             if not master_plan:
-                raise AgentGenerationError(
-                    "unknown",
-                    f"Surveyor returned no `master_plan` for {district.get('name', '?')}.",
-                )
+                # LLM sometimes returns a single structure dict instead of the wrapper.
+                # Detect this: if the result has "tiles" and "building_type", wrap it.
+                if survey.get("tiles") and survey.get("building_type"):
+                    logger.warning("Surveyor returned a bare structure (no master_plan wrapper) — wrapping as single-entry plan")
+                    master_plan = [survey]
+                elif survey.get("name") and survey.get("tiles"):
+                    logger.warning("Surveyor returned a bare structure (no master_plan wrapper) — wrapping as single-entry plan")
+                    master_plan = [survey]
+                else:
+                    raise AgentGenerationError(
+                        "bad_model_output",
+                        f"Surveyor returned no `master_plan` for {district.get('name', '?')}. "
+                        f"Keys returned: {sorted(survey.keys())}",
+                    )
+            scenery_sum = (survey.get("district_scenery_summary") or "").strip()
+            if scenery_sum:
+                self._district_scenery_summaries[district_key] = scenery_sum
+            palette = survey.get("suggested_palette")
+            if isinstance(palette, dict):
+                self._district_palettes[district_key] = palette
+                logger.info("District %s palette: %s", district_key, palette)
             mp = self._enforce_spacing(master_plan)
             return self._apply_master_plan_validation(mp, f"Survey {district.get('name', '?')}")
 
         merged: list = []
         occupied_summary = "No tiles placed yet in this chunked survey."
-        for chunk_start in range(0, len(buildings), SURVEY_BUILDINGS_PER_CHUNK):
+        chunks_failed = 0
+        total_chunks = (len(buildings) + SURVEY_BUILDINGS_PER_CHUNK - 1) // SURVEY_BUILDINGS_PER_CHUNK
+        district_name = district.get("name", "?")
+        for i, chunk_start in enumerate(range(0, len(buildings), SURVEY_BUILDINGS_PER_CHUNK)):
             chunk = buildings[chunk_start : chunk_start + SURVEY_BUILDINGS_PER_CHUNK]
-            survey = await self._survey_district_single_pass(district, buildings_filter=chunk, prior_summary=occupied_summary)
-            part = survey.get("master_plan", [])
-            if not part:
-                raise AgentGenerationError(
-                    "unknown",
-                    f"Surveyor returned empty `master_plan` for chunk in {district.get('name', '?')}.",
+            try:
+                survey = await self._survey_district_single_pass(district, buildings_filter=chunk, prior_summary=occupied_summary)
+                part = survey.get("master_plan", [])
+                if not part:
+                    # Try bare-structure fallback
+                    if survey.get("tiles") and (survey.get("building_type") or survey.get("name")):
+                        logger.warning("Surveyor returned bare structure in chunk — wrapping")
+                        part = [survey]
+                    else:
+                        raise AgentGenerationError(
+                            "bad_model_output",
+                            f"Surveyor returned empty `master_plan` for chunk in {district_name}.",
+                        )
+                merged.extend(part)
+                # Capture scenery summary and palette from the first successful chunk
+                if district_key not in self._district_scenery_summaries:
+                    scenery_sum = (survey.get("district_scenery_summary") or "").strip()
+                    if scenery_sum:
+                        self._district_scenery_summaries[district_key] = scenery_sum
+                if district_key not in self._district_palettes:
+                    palette = survey.get("suggested_palette")
+                    if isinstance(palette, dict):
+                        self._district_palettes[district_key] = palette
+                occupied_summary = self._occupancy_summary_for_survey(merged)
+            except Exception as exc:
+                chunks_failed += 1
+                logger.warning(
+                    "Survey chunk %d/%d failed for %s (buildings %d-%d): %s",
+                    i + 1, total_chunks, district_name,
+                    chunk_start, chunk_start + len(chunk) - 1, exc,
                 )
-            merged.extend(part)
-            occupied_summary = self._occupancy_summary_for_survey(merged)
+                await self._chat(
+                    "cartographus", "warning",
+                    f"Survey chunk {i+1} failed — skipping {len(chunk)} buildings. Continuing with remaining.",
+                )
+
+        if not merged:
+            raise AgentGenerationError(
+                "unknown",
+                f"All {total_chunks} survey chunks failed for {district_name}. No master_plan produced.",
+            )
+
+        if chunks_failed:
+            logger.warning(
+                "Survey for %s completed with %d/%d chunks failed — returning partial results.",
+                district_name, chunks_failed, total_chunks,
+            )
 
         mp = self._enforce_spacing(merged)
-        return self._apply_master_plan_validation(mp, f"Survey (chunked) {district.get('name', '?')}")
+        return self._apply_master_plan_validation(mp, f"Survey (chunked) {district_name}")
 
     async def _survey_district_single_pass(
         self,
@@ -575,17 +880,8 @@ class BuildEngine:
             f"Known buildings to place (full list for context): {', '.join(district.get('buildings', []))}\n"
             f"Already built in nearby areas:\n{existing}\n"
             f"{scope_extra}\n"
-            f"MAP THE COMPLETE DISTRICT (for this pass). Research the REAL layout:\n\n"
-            f"1. BUILDINGS: Named footprints in tiles.\n"
-            f"2. STREETS/PATHS: road tiles connecting structures.\n"
-            f"3. OPEN SPACES: forum, garden, water as needed.\n"
-            f"4. ELEVATION per tile.\n"
-            f"5. SPACING: historically accurate.\n\n"
-            f"For EVERY structure, write RICH prose (see system prompt): `description` = long Historian layer "
-            f"(form, orientation, materials, circulation, condition at this date); `historical_note` = long evidence layer "
-            f"(sources, phases, excavations, measurable facts). Thin one-liners are not acceptable.\n"
-            f"For roads, forums, gardens, water, and grass: include `environment_note` (3+ sentences) and strong open-space "
-            f"`description` as in the system prompt. Prefer optional `district_scenery_summary` for full-district passes."
+            f"Map the complete district for this pass: buildings, roads/paths, open spaces, and per-tile elevation.\n"
+            f"Follow the system prompt's prose and evidence requirements for description/historical_note/environment_note."
         )
 
     async def _surveyor_generate_bounded(self, prompt: str) -> dict:
@@ -606,8 +902,21 @@ class BuildEngine:
                 raise
 
     async def _urbanista_generate_bounded(self, prompt: str) -> dict:
-        async with self._urbanista_semaphore:
-            return await self.urbanista.generate(prompt)
+        for attempt in range(2):
+            try:
+                async with self._urbanista_semaphore:
+                    return await self.urbanista.generate(prompt)
+            except AgentGenerationError as err:
+                retriable = err.pause_reason in ("bad_model_output", "api_error", "network")
+                if attempt == 0 and retriable:
+                    logger.warning(
+                        "[roma.engine] Urbanista call failed (%s), retrying once: %s",
+                        err.pause_reason,
+                        err.pause_detail[:200] if err.pause_detail else "",
+                    )
+                    await asyncio.sleep(2.0)
+                    continue
+                raise
 
     def _apply_master_plan_validation(self, master_plan: list, context: str) -> list:
         cleaned = validate_master_plan(master_plan, GRID_WIDTH, GRID_HEIGHT)
@@ -676,11 +985,30 @@ class BuildEngine:
                     logger.warning(f"Tile overlap: {struct['name']} and {all_tiles[key]} at {key}")
                 all_tiles[key] = struct.get("name", "?")
 
+        # Filter out structures whose tiles are already occupied by prior districts
+        filtered_plan = []
+        for struct in master_plan:
+            dominated = True
+            for t in struct.get("tiles", []):
+                existing = self.world.get_tile(t.get("x", 0), t.get("y", 0))
+                if not existing or existing.terrain == "empty":
+                    dominated = False
+                    break
+            if not dominated:
+                filtered_plan.append(struct)
+            else:
+                logger.info("Skipping %s — all tiles already occupied by prior district", struct.get("name", "?"))
+        if filtered_plan != master_plan:
+            logger.info("Cross-district overlap: %d/%d structures remain after filtering", len(filtered_plan), len(master_plan))
+            master_plan = filtered_plan
+
         logger.info(f"Master plan: {len(master_plan)} structures")
         await self.broadcast({"type": "master_plan", "plan": master_plan})
 
         scenario = config_module.SCENARIO or {}
         city_loc = scenario.get("location") or ""
+        district_scenery = self._district_scenery_summaries.get(district_key, "")
+        district_palette = self._district_palettes.get(district_key)
         district_ref_year = district.get("year")
         if district_ref_year is None:
             district_ref_year = scenario.get("year_start", 0)
@@ -819,7 +1147,7 @@ class BuildEngine:
                 )
             else:
                 try:
-                    golden_example_str = get_golden_example(btype, footprint_w, footprint_d)
+                    golden_example_str = get_golden_example_for_culture(btype, footprint_w, footprint_d, city_loc, district_ref_year_i)
                 except ValueError as exc:
                     await self._pause_for_api_issue("unknown", str(exc), "urbanista")
                     return False
@@ -842,22 +1170,51 @@ class BuildEngine:
                     f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
                     f"{ref_db_section}"
                     f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
-                    f"Use it as a REFERENCE for sensible heights, radii, and stack order. You MUST still emit your own full "
-                    f"spec.components list derived from the site brief below — do not paste this block verbatim. "
-                    f"Adapt, add, remove, or replace parts (including type procedural) for {city_loc}. "
-                    f"Only use spec.template if you deliberately choose id \"open\" or a shortcut; the default output is always top-level spec.components.\n\n"
-                    f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n\n"
-                    f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
-                    f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
+                    f"Use the reference example for proportion/stacking only; derive your design from the site brief (do not paste).\n\n"
+                    f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n"
+                    + (f"\nDISTRICT SCENERY (circulation, hydrology, green/blue network — orient facades and entrances accordingly):\n{district_scenery}\n\n" if district_scenery else "\n")
+                    + f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
+                    f"- Max total building height: {round(max(footprint_w, footprint_d) * 1.2, 2)} world units\n"
+                    + (f"- For small buildings (footprint < 2.0): use fewer components (3-6), shorter columns\n" if footprint_w < 2.0 or footprint_d < 2.0 else "")
+                    + (f"- For large buildings (footprint > 5.0): use more components (8-14), add procedural details\n" if footprint_w > 5.0 or footprint_d > 5.0 else "")
+                    + f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
                     f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"
                     f"- Set elevation={avg_elevation} on all tiles\n"
                     f"- Set spec.anchor on EVERY tile to {{\"x\":{anchor_x},\"y\":{anchor_y}}}"
                 )
+
+                # PBR material guidance based on building type
+                pbr_hints = {
+                    "temple": "Use roughness 0.3-0.5 for polished marble columns, 0.7-0.9 for weathered stone podium. Use surface_detail 0.4-0.7 on large stone surfaces.",
+                    "basilica": "Use roughness 0.5-0.7 for plastered walls, 0.3-0.4 for marble floors. Add surface_detail 0.5+ on exterior walls.",
+                    "insula": "Use roughness 0.7-0.9 for brick, 0.5-0.7 for plaster. Vary colors between floors (ground = darker brick, upper = lighter plaster).",
+                    "domus": "Use roughness 0.4-0.6 for stucco, 0.3 for polished interior. Add surface_detail 0.3-0.5 on exterior walls.",
+                    "thermae": "Use roughness 0.2-0.4 for wet/glazed surfaces, 0.6-0.8 for exterior. Metalness 0.1+ for bronze fittings.",
+                    "market": "Use roughness 0.7-0.9 for timber/rough surfaces. Add awning with contrasting color.",
+                    "gate": "Use roughness 0.5-0.7 for dressed stone. Add battlements. Surface_detail 0.5+ for ashlar blocks.",
+                    "wall": "Use roughness 0.8-0.95 for rough defensive walls. Surface_detail 0.6+ for rusticated stone.",
+                    "monument": "Use roughness 0.2-0.4 for polished stone/bronze. Metalness 0.3-0.7 for bronze elements.",
+                    "amphitheater": "Use roughness 0.5-0.7 for travertine. Layer arcade + tier + arcade for multi-story effect.",
+                }
+                hint = pbr_hints.get(btype, "Use roughness 0.5-0.8 for stone, 0.7-0.9 for weathered surfaces. Add surface_detail 0.3-0.6 on large planes.")
+                prompt += f"\n- MATERIAL QUALITY: {hint}"
+
                 if env_note:
                     prompt += (
                         f"\n\nSURVEYOR `environment_note` (edges, planting, circulation — use for façades and setting):\n"
                         f"{env_note}\n"
                     )
+
+            # Inject survey-suggested palette (from Cartographus) so all buildings share coherent materials
+            if district_palette and isinstance(district_palette, dict):
+                parts = []
+                for role in ("primary", "secondary", "accent"):
+                    c = district_palette.get(role)
+                    if isinstance(c, str) and c.startswith("#"):
+                        parts.append(f"{role}={c}")
+                if parts:
+                    prompt += f"\n- DISTRICT PALETTE (from surveyor): {', '.join(parts)}. Use these as your base materials; vary per building ±10% lightness for uniqueness."
+
             urban_jobs.append({
                 "name": name,
                 "btype": btype,
@@ -872,99 +1229,181 @@ class BuildEngine:
                 "prompt": prompt,
             })
 
-        arch_results: list = []
+        # ─── Streaming Urbanista: place each structure as soon as its design completes ───
+        # Instead of waiting for all N structures, fire all tasks and place each result
+        # immediately as it arrives. Buildings appear on screen within seconds of each
+        # Urbanista call finishing, not after a 5-10 minute batch wait.
+        skipped = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 3
+        placed_count = 0
+
         if urban_jobs:
             await self._set_status("urbanista", "thinking")
             await self._chat(
                 "urbanista",
                 "info",
-                f"Designing {len(urban_jobs)} structures (max {URBANISTA_MAX_CONCURRENT} concurrent)...",
+                f"Designing {len(urban_jobs)} structures (max {URBANISTA_MAX_CONCURRENT} concurrent) — placing as each completes...",
             )
-            utasks = [self._urbanista_generate_bounded(job["prompt"]) for job in urban_jobs]
-            arch_results = await asyncio.gather(*utasks, return_exceptions=True)
-            await self._set_status("urbanista", "idle")
 
-        for idx, job in enumerate(urban_jobs):
-            if not self.running:
-                return False
-            arch_result = arch_results[idx]
-            if isinstance(arch_result, AgentGenerationError):
-                await self._pause_for_api_issue(
-                    arch_result.pause_reason,
-                    arch_result.pause_detail,
-                    "urbanista",
-                )
-                return False
-            if isinstance(arch_result, BaseException):
-                raise arch_result
+            # Wrap each task to carry its index
+            async def _design_with_index(idx: int, prompt: str) -> tuple[int, dict | BaseException]:
+                try:
+                    result = await self._urbanista_generate_bounded(prompt)
+                    return (idx, result)
+                except BaseException as err:
+                    return (idx, err)
 
-            name = job["name"]
-            tiles = job["tiles"]
-            hist_note = job["hist_note"]
-            hist_result = job["hist_result"]
-            anchor_x = job["anchor_x"]
-            anchor_y = job["anchor_y"]
+            pending = [
+                asyncio.create_task(_design_with_index(i, job["prompt"]))
+                for i, job in enumerate(urban_jobs)
+            ]
 
             try:
-                validate_urbanista_arch_result(arch_result)
-            except UrbanistaValidationError as err:
-                await self._pause_for_api_issue("api_error", str(err), "urbanista")
-                return False
+              for coro in asyncio.as_completed(pending):
+                if not self.running:
+                    break
 
-            await self._set_status("urbanista", "speaking")
-            await self._chat("urbanista", "design", arch_result.get("commentary", "Design ready."))
-            await self._set_status("urbanista", "idle")
-
-            # Place tiles — ensure multi-tile buildings have anchors
-            final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []), GRID_WIDTH, GRID_HEIGHT)
-            if not final_tiles:
-                await self._pause_for_api_issue(
-                    "unknown",
-                    f"Urbanista returned no in-bounds `tiles` for structure {name!r}.",
-                    "urbanista",
+                idx, arch_result = await coro
+                job = urban_jobs[idx]
+                name = job["name"]
+                placed_count += 1
+                logger.info(
+                    "Streaming result %d/%d: %s — type=%s keys=%s",
+                    placed_count, len(urban_jobs), name,
+                    type(arch_result).__name__,
+                    sorted(arch_result.keys()) if isinstance(arch_result, dict) else "N/A",
                 )
-                return False
 
-            # Inject anchors for multi-tile buildings if AI didn't set them (not for procedural terrain)
-            if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
+                # --- Per-structure error recovery: skip failures, pause only if excessive ---
+                if isinstance(arch_result, AgentGenerationError):
+                    consecutive_failures += 1
+                    skipped += 1
+                    logger.warning(
+                        "Urbanista failed for %s (%s): %s — skipping",
+                        name, arch_result.pause_reason, (arch_result.pause_detail or "")[:200],
+                    )
+                    await self._chat("urbanista", "info", f"Skipped {name} — design failed ({arch_result.pause_reason}). Continuing.")
+                    if consecutive_failures >= max_consecutive_failures:
+                        for t in pending:
+                            if not t.done():
+                                t.cancel()
+                        await self._pause_for_api_issue(
+                            arch_result.pause_reason,
+                            f"{max_consecutive_failures} consecutive failures — last: {arch_result.pause_detail or ''}",
+                            "urbanista",
+                        )
+                        return False
+                    continue
+                if isinstance(arch_result, BaseException):
+                    for t in pending:
+                        if not t.done():
+                            t.cancel()
+                    raise arch_result
+                consecutive_failures = 0
+
+                tiles = job["tiles"]
+                hist_note = job["hist_note"]
+                hist_result = job["hist_result"]
+                anchor_x = job["anchor_x"]
+                anchor_y = job["anchor_y"]
+
+                try:
+                    arch_result = sanitize_urbanista_output(arch_result)
+                    validate_urbanista_arch_result(arch_result)
+                except UrbanistaValidationError as err:
+                    skipped += 1
+                    logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
+                    await self._chat("urbanista", "info", f"Skipped {name} — validation error. Continuing.")
+                    continue
+
+                await self._set_status("urbanista", "speaking")
+                commentary = arch_result.get("commentary", "Design ready.")
+                if len(commentary) > 400:
+                    commentary = commentary[:397] + "..."
+                await self._chat("urbanista", "design", commentary)
+                await self._set_status("urbanista", "thinking" if placed_count < len(urban_jobs) else "idle")
+
+                # Place tiles — ensure multi-tile buildings have anchors
+                final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []), GRID_WIDTH, GRID_HEIGHT)
+                if not final_tiles:
+                    skipped += 1
+                    logger.warning("Urbanista returned no in-bounds tiles for %s — skipping", name)
+                    await self._chat("urbanista", "info", f"Skipped {name} — no valid tiles. Continuing.")
+                    continue
+
+                # Inject anchors for multi-tile buildings if AI didn't set them (not for procedural terrain)
+                if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
+                    for td in final_tiles:
+                        if not td.get("spec"):
+                            td["spec"] = {}
+                        if not td["spec"].get("anchor"):
+                            td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
+
+                placed = []
+                district_elev = district.get("elevation", 0.0)
                 for td in final_tiles:
-                    if not td.get("spec"):
-                        td["spec"] = {}
-                    if not td["spec"].get("anchor"):
-                        td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
+                    x, y = td.get("x"), td.get("y")
+                    if x is not None and y is not None:
+                        if "elevation" not in td or td["elevation"] is None:
+                            td["elevation"] = district_elev
+                        td["period"] = district.get("period", "")
+                        td["placed_by"] = "faber"
+                        td["historical_note"] = hist_result.get("historical_note", hist_note)
+                        if self.world.place_tile(x, y, td):
+                            tile = self.world.get_tile(x, y)
+                            if tile:
+                                placed.append(tile.to_dict())
 
-            placed = []
-            district_elev = district.get("elevation", 0.0)
-            for td in final_tiles:
-                x, y = td.get("x"), td.get("y")
-                if x is not None and y is not None:
-                    # Apply district elevation as default if tile doesn't have its own
-                    if "elevation" not in td or td["elevation"] is None:
-                        td["elevation"] = district_elev
-                    td["period"] = district.get("period", "")
-                    td["placed_by"] = "faber"
-                    td["historical_note"] = hist_result.get("historical_note", hist_note)
-                    if self.world.place_tile(x, y, td):
-                        tile = self.world.get_tile(x, y)
-                        if tile:
-                            placed.append(tile.to_dict())
+                logger.info("Placing %d tiles for %s", len(placed), name)
+                if placed:
+                    await self.broadcast({
+                        "type": "tile_update", "tiles": placed,
+                        "turn": self.world.turn,
+                        "period": district.get("period", ""),
+                        "year": district.get("year", ""),
+                    })
+                    await self.broadcast({
+                        "type": "build_progress",
+                        "structure": name,
+                        "building_type": job["btype"],
+                        "done": placed_count,
+                        "total": len(urban_jobs),
+                        "district": district_key,
+                    })
 
-            if placed:
-                await self.broadcast({
-                    "type": "tile_update", "tiles": placed,
-                    "turn": self.world.turn,
-                    "period": district.get("period", ""),
-                    "year": district.get("year", ""),
-                })
+                self.world.turn += 1
+                await self._persist_progress_after_structure()
+                await asyncio.sleep(0.05)  # Brief yield for UI rendering
 
-            self.world.turn += 1
-            await self._persist_progress_after_structure()
+            finally:
+                # Cancel any still-running tasks (pause, error, or normal completion)
+                for t in pending:
+                    if not t.done():
+                        t.cancel()
+                # Await cancellation to prevent "task was destroyed" warnings
+                for t in pending:
+                    if t.cancelled() or t.done():
+                        continue
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
-            await asyncio.sleep(STEP_DELAY)
+            if not self.running:
+                return False
+            await self._set_status("urbanista", "idle")
 
         if self._structures_since_save > 0:
             await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
             self._structures_since_save = 0
+
+        if skipped:
+            logger.warning("District %s: %d/%d structures skipped due to errors", district_key, skipped, len(urban_jobs))
+            await self._chat(
+                "urbanista", "info",
+                f"District complete — {len(urban_jobs) - skipped} placed, {skipped} skipped due to errors.",
+            )
 
         return True
 
@@ -1010,18 +1449,27 @@ class BuildEngine:
             if not overlap:
                 continue
 
-            # Find shift direction — try right, down, right+down
+            # Find shift direction — try right, down, right+down, left, up, and diagonals
             tiles = master_plan[i].get("tiles", [])
             best_shift = None
-            for sx, sy in [(min_gap + 1, 0), (0, min_gap + 1), (min_gap + 1, min_gap + 1),
-                           (-(min_gap + 1), 0), (0, -(min_gap + 1))]:
+            step = min_gap + 1
+            shift_candidates = [
+                (step, 0), (0, step), (step, step),
+                (-step, 0), (0, -step), (-step, step), (step, -step), (-step, -step),
+            ]
+            for sx, sy in shift_candidates:
                 shifted = set()
+                in_bounds = True
                 for t in tiles:
                     try:
-                        shifted.add((int(t["x"]) + sx, int(t["y"]) + sy))
+                        nx, ny = int(t["x"]) + sx, int(t["y"]) + sy
                     except (KeyError, TypeError, ValueError):
                         continue
-                if not (shifted & occupied):
+                    if not (0 <= nx < GRID_WIDTH and 0 <= ny < GRID_HEIGHT):
+                        in_bounds = False
+                        break
+                    shifted.add((nx, ny))
+                if in_bounds and shifted and not (shifted & occupied):
                     best_shift = (sx, sy)
                     break
 
@@ -1051,6 +1499,11 @@ class BuildEngine:
             "Constantinople": ("https://upload.wikimedia.org/wikipedia/commons/thumb/2/2b/Byzantine_Constantinople-en.png/800px-Byzantine_Constantinople-en.png", "Map of Byzantine Constantinople"),
             "Jerusalem": ("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Jerusalem_in_the_first_century.jpg/800px-Jerusalem_in_the_first_century.jpg", "Jerusalem in the 1st century"),
             "Pompeii": ("https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/Pompeii_map-en.svg/800px-Pompeii_map-en.svg.png", "Archaeological map of Pompeii"),
+            "Alexandria": ("https://upload.wikimedia.org/wikipedia/commons/thumb/0/07/Alexandria_-_Teknisk_Tidskrift_-_1906.jpg/800px-Alexandria_-_Teknisk_Tidskrift_-_1906.jpg", "Map of ancient Alexandria"),
+            "Carthage": ("https://upload.wikimedia.org/wikipedia/commons/thumb/5/50/Carthage_topography.svg/800px-Carthage_topography.svg.png", "Topographic map of ancient Carthage"),
+            "Baghdad": ("https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/CASEY2007_BAG_fig3-2.jpg/800px-CASEY2007_BAG_fig3-2.jpg", "Plan of Round City of Baghdad"),
+            "Tenochtitlan": ("https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Tenochtitlan_y_los_lagos_del_valle_de_Mexico.png/800px-Tenochtitlan_y_los_lagos_del_valle_de_Mexico.png", "Map of Tenochtitlan and the Valley of Mexico"),
+            "Chang'an": ("https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Chang%27an_of_Tang.png/800px-Chang%27an_of_Tang.png", "Map of Tang dynasty Chang'an"),
         }
         try:
             location = config_module.SCENARIO.get("location", "Rome")
@@ -1070,4 +1523,11 @@ class BuildEngine:
         await self.broadcast(data)
 
     async def _set_status(self, agent, status):
-        await self.broadcast({"type": "agent_status", "agent": agent, "status": status})
+        payload = {"type": "agent_status", "agent": agent, "status": status}
+        if status == "thinking":
+            if agent not in self._agent_thinking_started:
+                self._agent_thinking_started[agent] = time.time()
+            payload["thinking_started_at_s"] = self._agent_thinking_started[agent]
+        else:
+            self._agent_thinking_started.pop(agent, None)
+        await self.broadcast(payload)

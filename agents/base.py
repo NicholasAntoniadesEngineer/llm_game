@@ -8,6 +8,7 @@ import time
 import llm_agents
 from agents.provider import LlmProvider, build_provider_from_spec
 from token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text
+from run_log import log_event
 
 logger = logging.getLogger("roma.agents")
 
@@ -180,6 +181,11 @@ class BaseAgent:
                 tok_note,
                 _elapsed_ms,
             )
+            log_event("llm_call", f"{self.role} ({self.llm_agent_key})",
+                      provider=provider_kind, model=str(model or ""),
+                      prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                      total_tokens=total_tokens, accuracy=tok_note,
+                      latency_ms=_elapsed_ms, response_chars=len(raw))
             try:
                 result = self._parse_json(
                     raw,

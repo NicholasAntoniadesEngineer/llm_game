@@ -1,5 +1,6 @@
 """FastAPI application — serves frontend and WebSocket."""
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -27,7 +28,8 @@ bus = MessageBus()
 ws_connections: list[WebSocket] = []
 chat_history: list[dict] = []
 ws_connection_sequence = 0
-agent_status_by_agent: dict[str, str] = {}
+# Full last agent_status message per agent (includes thinking_started_at_s when thinking)
+agent_status_by_agent: dict[str, dict] = {}
 
 
 def _ws_label(websocket: WebSocket) -> str:
@@ -43,6 +45,7 @@ def _ws_label(websocket: WebSocket) -> str:
 reset_callback = None
 start_callback = None  # Called with (city_name, year) when user clicks Start
 resume_callback = None  # Resume build after API/network pause
+pause_callback = None  # Pause the build (user-initiated)
 llm_settings_callback = None  # async (overrides: dict) — persist + apply LLM routing from UI
 restart_server_callback = None  # async () -> dict — persist + touch reload sentinel (dev reload)
 reset_timeline_callback = None  # async () -> dict — new run clock only
@@ -128,6 +131,23 @@ def build_app(lifespan=None):
             await llm_settings_callback(overrides)
         return {"ok": True}
 
+    @app.get("/api/logs")
+    async def api_get_logs():
+        """Download the full run log as plain text."""
+        from run_log import get_log_text
+        from fastapi.responses import Response
+
+        logger.info("GET /api/logs")
+        text = get_log_text()
+        return Response(
+            content=text,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="eternal_cities_run.log"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     @app.post("/api/restart-server")
     async def api_restart_server():
         """Persist save, then touch reload_trigger.txt so uvicorn --reload restarts (keeps caches)."""
@@ -147,11 +167,11 @@ def build_app(lifespan=None):
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
         await websocket.accept()
-        ws_connections.append(websocket)
         global ws_connection_sequence
         ws_connection_sequence += 1
         conn_id = ws_connection_sequence
-        logger.info(f"[ws#{conn_id}] connected client={_ws_label(websocket)} total={len(ws_connections)}")
+        conn_start = time.time()
+        logger.info(f"[ws#{conn_id}] CONNECTED client={_ws_label(websocket)} (replay pending)")
 
         try:
             import config as config_module
@@ -183,9 +203,22 @@ def build_app(lifespan=None):
                 await websocket.send_json(msg)
 
             if agent_status_by_agent:
+                if engine_is_running is not None and not engine_is_running():
+                    for agent_key in list(agent_status_by_agent.keys()):
+                        cached = agent_status_by_agent[agent_key]
+                        if cached.get("status") == "thinking":
+                            agent_id = cached.get("agent", agent_key)
+                            if isinstance(agent_id, str):
+                                fixed = {"type": "agent_status", "agent": agent_id, "status": "idle"}
+                                agent_status_by_agent[agent_key] = fixed
+                                logger.info(
+                                    "[ws#%s] repaired stale cached thinking -> idle (engine not running) agent=%s",
+                                    conn_id,
+                                    agent_id,
+                                )
                 logger.info(f"[ws#{conn_id}] send cached agent_status count={len(agent_status_by_agent)}")
-                for agent, status in agent_status_by_agent.items():
-                    await websocket.send_json({"type": "agent_status", "agent": agent, "status": status})
+                for cached in agent_status_by_agent.values():
+                    await websocket.send_json(cached)
 
             from token_usage import STORE as token_usage_store
             from token_usage import aggregate_for_ui as token_aggregate_for_ui
@@ -215,10 +248,14 @@ def build_app(lifespan=None):
                 paused_payload["suggest_auto_resume"] = True
                 await websocket.send_json(paused_payload)
         except Exception:
-            if websocket in ws_connections:
-                ws_connections.remove(websocket)
-            logger.exception(f"[ws#{conn_id}] error during initial send; disconnected total={len(ws_connections)}")
+            dur = round(time.time() - conn_start, 1)
+            logger.exception(f"[ws#{conn_id}] DISCONNECTED (initial send error) after {dur}s total={len(ws_connections)}")
             return
+
+        # Only register for broadcast() AFTER the replay is complete, so in-flight
+        # broadcasts cannot interleave with the ordered initial-state messages.
+        ws_connections.append(websocket)
+        logger.info(f"[ws#{conn_id}] replay done, registered for broadcast total={len(ws_connections)}")
 
         try:
             while True:
@@ -243,6 +280,10 @@ def build_app(lifespan=None):
                     logger.info(f"[ws#{conn_id}] resume requested")
                     if resume_callback:
                         await resume_callback()
+                elif msg_type == "pause":
+                    logger.info(f"[ws#{conn_id}] pause requested")
+                    if pause_callback:
+                        await pause_callback()
                 elif msg_type == "get_llm_settings":
                     logger.info(f"[ws#{conn_id}] send llm_settings")
                     await websocket.send_json(_build_llm_settings_payload())
@@ -282,16 +323,20 @@ def build_app(lifespan=None):
                         await websocket.send_json(
                             {"type": "reset_timeline_result", "ok": False, "error": "not configured"}
                         )
+                elif msg_type == "ping":
+                    pass  # Keepalive — no response needed
                 else:
                     logger.info(f"[ws#{conn_id}] ignored unknown message type={msg_type}")
         except WebSocketDisconnect:
+            dur = round(time.time() - conn_start, 1)
             if websocket in ws_connections:
                 ws_connections.remove(websocket)
-            logger.info(f"[ws#{conn_id}] disconnected client={_ws_label(websocket)} total={len(ws_connections)}")
+            logger.info(f"[ws#{conn_id}] DISCONNECTED (clean) after {dur}s client={_ws_label(websocket)} total={len(ws_connections)}")
         except Exception:
+            dur = round(time.time() - conn_start, 1)
             if websocket in ws_connections:
                 ws_connections.remove(websocket)
-            logger.exception(f"[ws#{conn_id}] unexpected error; disconnected total={len(ws_connections)}")
+            logger.exception(f"[ws#{conn_id}] DISCONNECTED (error) after {dur}s total={len(ws_connections)}")
 
     return app
 
@@ -328,7 +373,7 @@ async def broadcast(message: dict):
         agent = message.get("agent")
         status = message.get("status")
         if isinstance(agent, str) and isinstance(status, str):
-            agent_status_by_agent[agent] = status
+            agent_status_by_agent[agent] = dict(message)
     if message.get("type") in (
         "chat",
         "phase",
@@ -344,6 +389,9 @@ async def broadcast(message: dict):
         if len(chat_history) > CHAT_HISTORY_MAX_MESSAGES:
             del chat_history[: len(chat_history) - CHAT_HISTORY_MAX_MESSAGES]
 
+    if not ws_connections:
+        return
+    # Sequential sends with per-connection error handling (avoids killing slow connections)
     dead = []
     for ws in ws_connections:
         try:
@@ -351,4 +399,5 @@ async def broadcast(message: dict):
         except Exception:
             dead.append(ws)
     for ws in dead:
-        ws_connections.remove(ws)
+        if ws in ws_connections:
+            ws_connections.remove(ws)

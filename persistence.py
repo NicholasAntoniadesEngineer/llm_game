@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -15,9 +17,23 @@ import llm_agents
 logger = logging.getLogger("roma.persistence")
 
 SAVE_FILE = Path(__file__).parent / "roma_save.json"
+SAVE_BACKUP = Path(__file__).parent / "roma_save.json.backup"
 DISTRICTS_CACHE = Path(__file__).parent / "roma_districts_cache.json"
 SURVEYS_CACHE = Path(__file__).parent / "roma_surveys_cache.json"
 LLM_SETTINGS_FILE = Path(__file__).parent / "roma_llm_settings.json"
+
+
+def _atomic_write(path: Path, text: str, backup: Path | None = None) -> None:
+    """Write *text* to *path* atomically via a temp file + rename.
+
+    If *backup* is given and *path* already exists, the current file is
+    copied to *backup* before the rename so the previous version is preserved.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if backup is not None and path.exists():
+        shutil.copy2(path, backup)
+    os.replace(str(tmp), str(path))
 
 
 def save_state(world: WorldState, chat_history: list[dict], district_index: int, districts: list[dict] = None):
@@ -53,21 +69,16 @@ def save_state(world: WorldState, chat_history: list[dict], district_index: int,
         "chat_history": chat_history,
         "run_started_at_s": run_started_at_s,
         "scenario": scenario,
-        "tiles": [],
+        "tiles": world.occupied_tile_dicts(),
     }
-    for y in range(world.height):
-        for x in range(world.width):
-            tile = world.grid[y][x]
-            if tile.terrain != "empty":
-                data["tiles"].append(tile.to_dict())
 
-    SAVE_FILE.write_text(json.dumps(data, indent=2))
+    _atomic_write(SAVE_FILE, json.dumps(data, indent=2), backup=SAVE_BACKUP)
     logger.info(f"Saved: {len(data['tiles'])} tiles, district #{district_index}, {len(districts or [])} districts")
 
 
 def save_districts_cache(districts: list[dict], map_description: str = ""):
     data = {"districts": districts, "map_description": map_description}
-    DISTRICTS_CACHE.write_text(json.dumps(data, indent=2))
+    _atomic_write(DISTRICTS_CACHE, json.dumps(data, indent=2))
     logger.info(f"Cached {len(districts)} districts")
 
 
@@ -79,33 +90,78 @@ def load_districts_cache() -> tuple[list[dict], str] | None:
         districts = data.get("districts", [])
         map_desc = data.get("map_description", "")
         if districts:
+            # Validate that every district has at least 'name' and 'region'.
+            for d in districts:
+                if not isinstance(d, dict) or "name" not in d or "region" not in d:
+                    logger.warning("Malformed district entry in cache — discarding cache")
+                    try:
+                        DISTRICTS_CACHE.unlink()
+                    except OSError:
+                        pass
+                    return None
             logger.info(f"Loaded {len(districts)} cached districts")
             return districts, map_desc
     except Exception as e:
         logger.error(f"Failed to load districts cache: {e}")
+        try:
+            DISTRICTS_CACHE.unlink()
+        except OSError:
+            pass
     return None
 
 
 def save_surveys_cache(surveys: dict):
-    SURVEYS_CACHE.write_text(json.dumps(surveys, indent=2))
+    _atomic_write(SURVEYS_CACHE, json.dumps(surveys, indent=2))
 
 
 def load_surveys_cache() -> dict:
     if SURVEYS_CACHE.exists():
         try:
-            return json.loads(SURVEYS_CACHE.read_text())
-        except Exception:
-            pass
+            data = json.loads(SURVEYS_CACHE.read_text())
+            if not isinstance(data, dict):
+                logger.warning("Surveys cache is not a dict — discarding")
+                SURVEYS_CACHE.unlink(missing_ok=True)
+                return {}
+            # Each entry must be a list (master_plan)
+            for k, v in data.items():
+                if not isinstance(v, list):
+                    logger.warning("Survey cache entry %s is not a list — discarding cache", k)
+                    SURVEYS_CACHE.unlink(missing_ok=True)
+                    return {}
+            return data
+        except Exception as e:
+            logger.warning("Failed to load surveys cache: %s — discarding", e)
+            SURVEYS_CACHE.unlink(missing_ok=True)
     return {}
 
 
 def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
     """Returns (chat_history, district_index, districts) or None."""
-    if not SAVE_FILE.exists():
+    if not SAVE_FILE.exists() and not SAVE_BACKUP.exists():
+        return None
+
+    data = None
+
+    # Try primary save file first.
+    if SAVE_FILE.exists():
+        try:
+            data = json.loads(SAVE_FILE.read_text())
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("Primary save file is corrupt: %s — trying backup", e)
+
+    # Fall back to backup if primary failed or was missing.
+    if data is None and SAVE_BACKUP.exists():
+        try:
+            data = json.loads(SAVE_BACKUP.read_text())
+            logger.warning("Recovered state from backup %s", SAVE_BACKUP.name)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.error("Backup save file is also corrupt: %s", e)
+            return None
+
+    if data is None:
         return None
 
     try:
-        data = json.loads(SAVE_FILE.read_text())
         world.turn = data.get("turn", 0)
         world.current_period = data.get("current_period", "")
         world.current_year = data.get("current_year", -44)
@@ -113,6 +169,10 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
         for tile_data in data.get("tiles", []):
             x, y = tile_data.get("x", 0), tile_data.get("y", 0)
             world.place_tile(x, y, tile_data)
+
+        # Clear build_log entries generated by the loading loop above;
+        # only NEW placements during this run should be logged.
+        world.build_log.clear()
 
         chat_history = data.get("chat_history", [])
         district_index = data.get("district_index", 0)
@@ -199,5 +259,5 @@ def load_llm_settings() -> dict[str, dict[str, Any]]:
 def save_llm_settings(overrides: dict[str, dict[str, Any]]) -> None:
     """Persist runtime LLM overrides (may contain API keys — file should stay private)."""
     payload = {"overrides": overrides}
-    LLM_SETTINGS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _atomic_write(LLM_SETTINGS_FILE, json.dumps(payload, indent=2))
     logger.info("Saved LLM settings to %s", LLM_SETTINGS_FILE.name)

@@ -1,9 +1,16 @@
 """Eternal Cities — Configuration."""
 
+import os
+
 # Grid settings (each tile ≈ 10 m in agent prompts — total city footprint scales with size)
 # 4× world size (linear dimensions): 80×80 → 320×320 tiles
 GRID_WIDTH = 320
 GRID_HEIGHT = 320
+
+# Allow environment variable overrides for grid dimensions and district cap
+GRID_WIDTH = int(os.environ.get("ETERNAL_GRID_WIDTH", str(GRID_WIDTH)))
+GRID_HEIGHT = int(os.environ.get("ETERNAL_GRID_HEIGHT", str(GRID_HEIGHT)))
+MAX_DISTRICTS = int(os.environ.get("ETERNAL_MAX_DISTRICTS", "12"))
 
 # Legacy names — prefer per-agent settings in llm_agents.py at repo root.
 CLAUDE_MODEL = "haiku"
@@ -17,18 +24,24 @@ OPENAI_COMPATIBLE_API_KEY = ""
 # Optional global override for openai_compatible model (prefer setting model in llm_agents.py per agent).
 OPENAI_COMPATIBLE_MODEL = ""
 
-# Max concurrent Urbanista CLI calls (design pass; placement stays ordered).
-URBANISTA_MAX_CONCURRENT = 3
+# Max concurrent Urbanista CLI calls (design pass; placement streams as each completes).
+# Higher = faster builds but more parallel API calls. 5 is safe for Claude Max plans.
+URBANISTA_MAX_CONCURRENT = 5
 
 # Max concurrent surveyor CLI calls across parallel district surveys.
 SURVEY_MAX_CONCURRENT = 3
 
 # Surveyor: when a district lists more than this many named buildings, run multiple
 # smaller survey passes and merge (fewer tokens per call, clearer placement).
-SURVEY_BUILDINGS_PER_CHUNK = 10
+SURVEY_BUILDINGS_PER_CHUNK = 18
 
-# Persist world to disk every N structures placed (always saved on district boundaries).
-SAVE_STATE_EVERY_N_STRUCTURES = 3
+# Max buildings Cartographus should list per district. Lower = faster builds.
+# The skeleton planner prompt references this. Set via ETERNAL_MAX_BUILDINGS_PER_DISTRICT env var.
+MAX_BUILDINGS_PER_DISTRICT = int(os.environ.get("ETERNAL_MAX_BUILDINGS_PER_DISTRICT", "8"))
+
+# Persist world to disk every N structures placed. With 7+ minute Urbanista calls,
+# each structure is precious — save after every one to prevent data loss on crash.
+SAVE_STATE_EVERY_N_STRUCTURES = 1
 
 # Cap chat messages stored for replay (oldest dropped).
 CHAT_HISTORY_MAX_MESSAGES = 500
@@ -110,6 +123,27 @@ CITIES = [
         "description": "Aztec island capital in Lake Texcoco. Connected to shore by causeways. Centered on the Templo Mayor pyramid.",
         "features": "Templo Mayor (Great Temple), Sacred Precinct, Tlatelolco market, causeways (north/south/west), chinampas (floating gardens), aqueducts",
         "grid_note": "Island city in a lake. Four causeways lead to shore. Sacred precinct in the center. Canals serve as streets. Chinampas around edges.",
+    },
+    {
+        "name": "Varanasi",
+        "year_min": -800, "year_max": 1500,
+        "description": "One of the world's oldest continuously inhabited cities. Sacred city of Hinduism on the banks of the Ganges. Center of learning, art, and devotion.",
+        "features": "Ganges River ghats (bathing steps), Kashi Vishwanath Temple, Dashashwamedh Ghat, Manikarnika cremation ghat, Buddhist Sarnath (nearby), dense old city lanes",
+        "grid_note": "Ganges runs along the eastern edge (north to south). Ghats line the riverfront. Dense organic lanes in the old city (west of river). Temples cluster near the river.",
+    },
+    {
+        "name": "Vijayanagara",
+        "year_min": 1336, "year_max": 1565,
+        "description": "Capital of the Vijayanagara Empire. One of the largest cities in the world in the 15th century. Ruins at Hampi.",
+        "features": "Virupaksha Temple, Vittala Temple (stone chariot), Royal Centre, Sacred Centre, Tungabhadra River, boulder-strewn landscape, massive gopurams",
+        "grid_note": "Tungabhadra River on the north. Sacred Centre (temples) in the northeast. Royal Centre (palaces) in the southwest. Boulder terrain throughout.",
+    },
+    {
+        "name": "Angkor",
+        "year_min": 802, "year_max": 1431,
+        "description": "Capital of the Khmer Empire. Largest pre-industrial city in the world. Temple-mountains and vast water management systems.",
+        "features": "Angkor Wat, Angkor Thom, Bayon temple, Ta Prohm, vast barays (reservoirs), moats, causeways, laterite and sandstone construction",
+        "grid_note": "Flat terrain with water features dominating. Angkor Wat in the south (moated). Angkor Thom (walled city) in the north. Barays to the east.",
     },
     {
         "name": "Chang'an",
