@@ -159,8 +159,8 @@ class WorldRenderer {
         this.cameraTarget = new THREE.Vector3(280, 0, 280);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
-        /** Camera speed multiplier — adjustable from UI (0.25 .. 4.0, default 1.0) */
-        this.cameraSpeedMultiplier = 1.0;
+        /** Camera speed multiplier — adjustable from UI (0.1 .. 1.5, default 0.5) */
+        this.cameraSpeedMultiplier = 0.5;
         /** Triple-click tracking */
         this._clickTimes = [];
 
@@ -936,10 +936,12 @@ class WorldRenderer {
             matParams.normalMap = this._terrainNormalMap;
             matParams.normalScale = new THREE.Vector2(0.45, 0.45);
         }
+        matParams.side = THREE.DoubleSide;  // Visible from below at oblique camera angles
         const mat = new THREE.MeshStandardMaterial(matParams);
         const mesh = new THREE.Mesh(geom, mat);
         mesh.receiveShadow = true;
         mesh.castShadow = false;
+        mesh.frustumCulled = false;  // Never cull the terrain — always visible
         mesh.userData.isTerrainHeightfield = true;
         return mesh;
     }
@@ -1027,9 +1029,9 @@ class WorldRenderer {
 
         this._resetCameraPoseToMapCenter(midY, mapW, mapH);
 
-        // Atmospheric fog — fades distant buildings into a warm haze
-        // Density tuned to scene scale: objects at ~60% of diagonal start fading
-        const fogDensity = 0.00025 / Math.max(1, diagonal / 4000);
+        // Atmospheric fog — very subtle warm haze at extreme distances only
+        // Tuned so nearby terrain is always crisp; only very distant objects fade
+        const fogDensity = 0.00012 / Math.max(1, diagonal / 4000);
         this.scene.fog = new THREE.FogExp2(0xc4b498, fogDensity);
 
         // Earth tone heightfield — matches _surfaceYAtWorldXZ for building / terrain props
@@ -1066,6 +1068,7 @@ class WorldRenderer {
         water.rotation.x = -Math.PI / 2;
         water.position.set(this.width * S / 2, waterY, this.height * S / 2);
         water.receiveShadow = true;
+        water.frustumCulled = false;
         water.userData.isWaterPlane = true;
         this._waterPlane = water;
         this._waterPlaneBaseY = waterY;
