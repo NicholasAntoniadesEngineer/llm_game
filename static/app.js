@@ -2455,6 +2455,25 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     });
 
+    // Camera speed slider
+    const speedSlider = document.getElementById("camera-speed-slider");
+    const speedLabel = document.getElementById("camera-speed-label");
+    if (speedSlider) {
+        // Restore from localStorage
+        const saved = localStorage.getItem("eternal_camera_speed");
+        if (saved) {
+            speedSlider.value = saved;
+            if (renderer) renderer.cameraSpeedMultiplier = parseFloat(saved);
+            if (speedLabel) speedLabel.textContent = saved + "x";
+        }
+        speedSlider.addEventListener("input", () => {
+            const v = parseFloat(speedSlider.value);
+            if (renderer) renderer.cameraSpeedMultiplier = v;
+            if (speedLabel) speedLabel.textContent = v + "x";
+            localStorage.setItem("eternal_camera_speed", String(v));
+        });
+    }
+
     // Global keyboard shortcuts (ignored when typing in inputs)
     document.addEventListener("keydown", e => {
         const tag = (e.target.tagName || "").toLowerCase();

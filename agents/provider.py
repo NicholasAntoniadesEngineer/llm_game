@@ -167,10 +167,12 @@ class ClaudeCliProvider:
             "[%s] Claude CLI pid=%s | flags=%s | model=%s | waiting for response...",
             role, proc.pid, " ".join(cli_flags), model,
         )
-        # Per-process timeout: 5 min for haiku, 8 min for sonnet/opus. Prevents 100-minute hangs.
-        # Surveys produce 50-70K chars of JSON and take 5-10 min on Haiku.
-        # Don't timeout too aggressively — the real protection is ConnectionRefused detection.
-        _cli_timeout_s = 600 if "haiku" in str(model).lower() else 600
+        # Per-process timeout — scales with prompt size. Large buildings (192 tiles)
+        # generate 12K+ char prompts and can take 10-15 min on Sonnet.
+        # Base: 10 min for haiku, 12 min for sonnet/opus. +1 min per 5K chars of input.
+        _base_timeout = 600 if "haiku" in str(model).lower() else 720
+        _input_chars = len(system_prompt) + len(user_text)
+        _cli_timeout_s = _base_timeout + max(0, (_input_chars - 10000)) // 5000 * 60
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=user_text.encode()),

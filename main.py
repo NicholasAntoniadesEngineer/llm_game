@@ -54,6 +54,12 @@ RELOAD_SENTINEL = Path(__file__).resolve().parent / "reload_trigger.txt"
 # Broader patterns like "claude.*--print" can match unrelated Claude CLI usage.
 CLAUDE_AGENT_PKILL_PATTERN = r"claude.*--print.*--system-prompt"
 
+# On startup (including uvicorn auto-reload), kill orphaned Claude CLI processes
+# from the previous server instance to prevent token waste.
+import subprocess as _startup_sp
+_startup_sp.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+logging.info("Startup: killed any orphaned Claude CLI processes")
+
 BANNER = """
 ╔══════════════════════════════════════════════════╗
 ║                                                  ║

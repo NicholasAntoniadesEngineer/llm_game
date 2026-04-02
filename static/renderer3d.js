@@ -159,6 +159,10 @@ class WorldRenderer {
         this.cameraTarget = new THREE.Vector3(280, 0, 280);
         this.isDragging = false;
         this.prevMouse = { x: 0, y: 0 };
+        /** Camera speed multiplier — adjustable from UI (0.25 .. 4.0, default 1.0) */
+        this.cameraSpeedMultiplier = 1.0;
+        /** Triple-click tracking */
+        this._clickTimes = [];
 
         this._setupControls();
         this._updateCamera();
@@ -181,7 +185,7 @@ class WorldRenderer {
                 const dy = e.clientY - this.prevMouse.y;
                 if (this.dragButton === 2 || this.dragButton === 1 || (this.dragButton === 0 && e.shiftKey)) {
                     // Pan using camera's actual right/forward vectors projected onto ground
-                    const panSpeed = this.cameraDistance * 0.002;
+                    const panSpeed = this.cameraDistance * 0.002 * (this.cameraSpeedMultiplier || 1.0);
                     // Camera right vector (perpendicular to look direction, on XZ plane)
                     const rightX = Math.sin(this.cameraAngle);
                     const rightZ = -Math.cos(this.cameraAngle);
@@ -237,7 +241,7 @@ class WorldRenderer {
     // dirX: -1 = left, +1 = right (camera right on ground); dirZ: +1 = forward, -1 = back (along view on XZ).
     panCamera(dirX, dirZ) {
         if (this._failed) return;
-        const speed = this.cameraDistance * 0.05;
+        const speed = this.cameraDistance * 0.05 * (this.cameraSpeedMultiplier || 1.0);
         const rightX = Math.sin(this.cameraAngle);
         const rightZ = -Math.cos(this.cameraAngle);
         const fwdX = -Math.cos(this.cameraAngle);
@@ -264,7 +268,7 @@ class WorldRenderer {
     /** direction: +1 = raise orbit target (Space), -1 = lower (C) — step matches pan buttons */
     liftCamera(direction) {
         if (this._failed) return;
-        const liftSpeed = this.cameraDistance * 0.05;
+        const liftSpeed = this.cameraDistance * 0.05 * (this.cameraSpeedMultiplier || 1.0);
         this.cameraTarget.y += direction * liftSpeed;
         this._updateCamera();
     }
@@ -3110,10 +3114,59 @@ class WorldRenderer {
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         this.raycaster.setFromCamera(this.mouse, this.camera);
         const hits = this.raycaster.intersectObjects(this._getMeshList());
+
+        // Triple-click detection (3 clicks within 600ms)
+        const now = Date.now();
+        this._clickTimes.push(now);
+        if (this._clickTimes.length > 3) this._clickTimes.shift();
+        const isTripleClick = this._clickTimes.length === 3 && (now - this._clickTimes[0]) < 600;
+
         if (hits.length > 0) {
             const tile = hits[0].object.userData.tile;
-            if (tile) this.renderer3d.domElement.dispatchEvent(new CustomEvent("tileclick", { detail: { x: tile.x, y: tile.y, tile } }));
+            if (tile) {
+                this.renderer3d.domElement.dispatchEvent(new CustomEvent("tileclick", { detail: { x: tile.x, y: tile.y, tile } }));
+                // Triple-click: zoom camera close to the building
+                if (isTripleClick && tile.terrain !== "empty") {
+                    this._clickTimes = [];
+                    this._zoomToTile(tile);
+                }
+            }
         }
+    }
+
+    /** Smoothly zoom the camera close to a specific tile/building. */
+    _zoomToTile(tile) {
+        const S = TILE_SIZE;
+        // Find the building group for multi-tile buildings
+        const anchor = tile.spec && tile.spec.anchor;
+        const ax = anchor ? anchor.x : tile.x;
+        const ay = anchor ? anchor.y : tile.y;
+        const key = `${ax},${ay}`;
+        const group = this.buildingGroups.get(key);
+
+        let cx, cz, targetDist;
+        if (group) {
+            // Center on the group's bounding box center
+            const box = new THREE.Box3().setFromObject(group);
+            const center = box.getCenter(new THREE.Vector3());
+            cx = center.x;
+            cz = center.z;
+            // Distance based on building size
+            const size = box.getSize(new THREE.Vector3());
+            targetDist = Math.max(size.x, size.y, size.z) * 2.5;
+        } else {
+            cx = (tile.x + 0.5) * S;
+            cz = (tile.y + 0.5) * S;
+            targetDist = S * 4;
+        }
+        targetDist = this._clampCameraDistance(Math.max(targetDist, 30));
+
+        // Animate to the target
+        this._flyTarget = { x: cx, z: cz };
+        this._flyStart = Date.now();
+        this._flyFrom = { x: this.cameraTarget.x, z: this.cameraTarget.z };
+        this._flyDistTarget = targetDist;
+        this._flyDistFrom = this.cameraDistance;
     }
 
     _animate() {
@@ -3122,7 +3175,8 @@ class WorldRenderer {
 
         // Keyboard: WASD pan; arrows + Q/E = orbit yaw + pitch; +/− zoom; R/F fine zoom
         if (this._keysDown && this._keysDown.size > 0) {
-            const panSpeed = this.cameraDistance * 0.008;
+            const sm = this.cameraSpeedMultiplier || 1.0;
+            const panSpeed = this.cameraDistance * 0.008 * sm;
             const rightX = Math.sin(this.cameraAngle);
             const rightZ = -Math.cos(this.cameraAngle);
             const fwdX = -Math.cos(this.cameraAngle);
@@ -3134,20 +3188,21 @@ class WorldRenderer {
             if (this._keysDown.has("d")) { rx += rightX; rz += rightZ; }
             if (rx || rz) { this.cameraTarget.x += rx * panSpeed; this.cameraTarget.z += rz * panSpeed; }
             // Q/E: yaw orbit (same as Rotate buttons and ◀ / ▶)
-            if (this._keysDown.has("q")) this.cameraAngle += 0.02;
-            if (this._keysDown.has("e")) this.cameraAngle -= 0.02;
+            const orbitSpeed = 0.02 * sm;
+            if (this._keysDown.has("q")) this.cameraAngle += orbitSpeed;
+            if (this._keysDown.has("e")) this.cameraAngle -= orbitSpeed;
             // ArrowLeft/Right = orbit yaw
-            if (this._keysDown.has("arrowleft")) this.cameraAngle += 0.02;
-            if (this._keysDown.has("arrowright")) this.cameraAngle -= 0.02;
+            if (this._keysDown.has("arrowleft")) this.cameraAngle += orbitSpeed;
+            if (this._keysDown.has("arrowright")) this.cameraAngle -= orbitSpeed;
             // ArrowUp/Down = pitch (same as floating Camera ▲ / ▼)
             if (this._keysDown.has("arrowup")) {
-                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + 0.02));
+                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch + orbitSpeed));
             }
             if (this._keysDown.has("arrowdown")) {
-                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch - 0.02));
+                this.cameraPitch = Math.max(0.05, Math.min(1.4, this.cameraPitch - orbitSpeed));
             }
             // Space: raise orbit target (world Y); C: lower
-            const liftSpeed = this.cameraDistance * 0.01;
+            const liftSpeed = this.cameraDistance * 0.01 * sm;
             if (this._keysDown.has("space")) {
                 this.cameraTarget.y += liftSpeed;
             }
@@ -3199,8 +3254,18 @@ class WorldRenderer {
             const ease = 1 - Math.pow(1 - t, 3);
             this.cameraTarget.x = this._flyFrom.x + (this._flyTarget.x - this._flyFrom.x) * ease;
             this.cameraTarget.z = this._flyFrom.z + (this._flyTarget.z - this._flyFrom.z) * ease;
+            // Also animate zoom distance if triple-click set a target distance
+            if (this._flyDistTarget != null && this._flyDistFrom != null) {
+                this.cameraDistance = this._clampCameraDistance(
+                    this._flyDistFrom + (this._flyDistTarget - this._flyDistFrom) * ease
+                );
+            }
             this._updateCamera();
-            if (t >= 1) this._flyTarget = null;
+            if (t >= 1) {
+                this._flyTarget = null;
+                this._flyDistTarget = null;
+                this._flyDistFrom = null;
+            }
         }
 
         this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);

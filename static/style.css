@@ -790,6 +790,16 @@ body {
 .nav-controls--camera .nav-row--tilt {
     gap: 3px;
 }
+.nav-controls--camera .nav-row--speed {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.nav-controls--camera .nav-row--speed input[type="range"] {
+    flex: 1;
+    accent-color: #c9a84c;
+    height: 4px;
+}
 
 .nav-controls--camera .nav-btn {
     flex: 0 1 auto;
