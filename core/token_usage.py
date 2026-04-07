@@ -93,7 +93,7 @@ STORE = TokenUsageStore()
 
 def aggregate_for_ui() -> dict[str, dict[str, int]]:
     """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
-    from llm_agents import (
+    from agents.llm_routing import (
         KEY_CARTOGRAPHUS_REFINE,
         KEY_CARTOGRAPHUS_SKELETON,
         KEY_CARTOGRAPHUS_SURVEY,

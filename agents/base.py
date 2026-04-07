@@ -1,16 +1,16 @@
 """Base agent — LLM completion via pluggable provider (see llm_agents.py + agents/provider.py)."""
 
-import asyncio
 import json
 import logging
 import time
 
-import llm_agents
-from agents.provider import LlmProvider, build_provider_from_spec
-from token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text
-from run_log import log_event
+from agents import llm_routing as llm_agents
+from agents.providers import LlmProvider, build_provider_from_spec
+from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text
+from core.run_log import log_event
+from core.errors import AgentGenerationError, classify_agent_failure
 
-logger = logging.getLogger("roma.agents")
+logger = logging.getLogger("eternal.agents")
 
 
 def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
@@ -36,48 +36,6 @@ def _try_decode_json_object(text: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-class AgentGenerationError(Exception):
-    """CLI or model output failed; no synthetic substitute is allowed."""
-
-    def __init__(self, pause_reason: str, pause_detail: str):
-        self.pause_reason = pause_reason
-        self.pause_detail = pause_detail
-        super().__init__(f"{pause_reason}: {pause_detail}")
-
-
-def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple[str, str]:
-    """Map stderr / exception to (pause_reason, short_detail) for UI and engine."""
-    raw = (stderr_text or "").strip()
-    text = raw.lower()
-
-    if exc is not None:
-        if isinstance(exc, FileNotFoundError):
-            return ("cli_missing", "LLM backend executable not found on PATH (e.g. claude CLI).")
-        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-            return ("network", str(exc) or type(exc).__name__)
-        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionRefusedError, ConnectionAbortedError)):
-            return ("network", str(exc) or type(exc).__name__)
-        if isinstance(exc, OSError) and exc.errno is not None:
-            if exc.errno in (50, 51, 60, 64, 65):
-                return ("network", str(exc))
-
-    if "429" in text or "rate limit" in text or "too many requests" in text:
-        return ("rate_limit", raw[:400] if raw else "Rate limit exceeded.")
-    if "503" in text or "502" in text or "504" in text:
-        return ("api_error", raw[:400] if raw else "Service temporarily unavailable.")
-    if "overloaded" in text or "capacity" in text:
-        return ("api_error", raw[:400] if raw else "Service overloaded.")
-    if "401" in text or "403" in text or "api key" in text or "authentication" in text or ("invalid" in text and "token" in text):
-        return ("api_error", raw[:400] if raw else "Authentication or API access error.")
-    if "getaddrinfo" in text or "name or service not known" in text or "connection refused" in text:
-        return ("network", raw[:400] if raw else "Could not reach the service.")
-    if "econnreset" in text or "network is unreachable" in text or "timed out" in text or "timeout" in text:
-        return ("network", raw[:400] if raw else "Connection problem.")
-    if not raw and exc is None:
-        return ("api_error", "CLI exited with an error (no stderr output). Check quota, network, and CLI login.")
-    return ("unknown", raw[:400] if raw else "Unknown error.")
-
-
 class BaseAgent:
     def __init__(
         self,
@@ -96,22 +54,11 @@ class BaseAgent:
         self.model = spec["model"]
         self._provider_override = provider
 
-    async def generate(
-        self,
-        instruction: str,
-        *,
-        allow_prose_fallback: str | None = None,
-    ) -> dict:
-        """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure.
+    async def generate(self, instruction: str) -> dict:
+        """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure."""
+        return await self._single_generate(instruction)
 
-        allow_prose_fallback:
-          - None: strict JSON only.
-          - 'map_refine': non-JSON prose becomes map_description (Cartographus background refine).
-          - 'historicus': non-JSON prose becomes commentary + note in historical_note.
-        """
-        return await self._single_generate(instruction, allow_prose_fallback=allow_prose_fallback)
-
-    async def _single_generate(self, instruction: str, *, allow_prose_fallback: str | None = None) -> dict:
+    async def _single_generate(self, instruction: str) -> dict:
         """Call LLM once. Raises AgentGenerationError if the process or JSON output is invalid."""
         prompt = instruction + "\n\nRespond with ONLY valid JSON. No markdown, no code fences, no extra text."
 
@@ -186,32 +133,11 @@ class BaseAgent:
                       prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                       total_tokens=total_tokens, accuracy=tok_note,
                       latency_ms=_elapsed_ms, response_chars=len(raw))
-            try:
-                result = self._parse_json(
-                    raw,
-                    model=str(model or ""),
-                    provider_kind=provider_kind,
-                )
-            except AgentGenerationError:
-                body = (raw or "").strip()
-                if body and allow_prose_fallback == "map_refine":
-                    logger.warning(
-                        "[%s] LLM returned prose instead of JSON; using full reply as map_description (%s chars)",
-                        self.role,
-                        len(body),
-                    )
-                    return {"map_description": body, "commentary": ""}
-                if body and allow_prose_fallback == "historicus":
-                    logger.warning(
-                        "[%s] LLM returned prose instead of JSON; using full reply as commentary (%s chars)",
-                        self.role,
-                        len(body),
-                    )
-                    return {
-                        "commentary": body,
-                        "historical_note": "Model output was not valid JSON; full text is in commentary.",
-                    }
-                raise
+            result = self._parse_json(
+                raw,
+                model=str(model or ""),
+                provider_kind=provider_kind,
+            )
             logger.info(f"[{self.role}] parsed: {list(result.keys())}")
             return result
 
@@ -283,14 +209,15 @@ class BaseAgent:
 
     async def _broadcast_token_usage(self) -> None:
         try:
-            from server.app import broadcast
+            from server.state import broadcast_fn
 
-            await broadcast(
-                {
-                    "type": "token_usage",
-                    "by_ui_agent": aggregate_for_ui(),
-                    "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
-                }
-            )
+            if broadcast_fn is not None:
+                await broadcast_fn(
+                    {
+                        "type": "token_usage",
+                        "by_ui_agent": aggregate_for_ui(),
+                        "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
+                    }
+                )
         except Exception:
             pass

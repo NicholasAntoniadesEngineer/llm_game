@@ -14,6 +14,7 @@ Static assets are cache-busted on each server restart (`?v=…`).
 """
 
 import asyncio
+import functools
 import os
 import time
 import logging
@@ -21,22 +22,21 @@ from contextlib import asynccontextmanager
 import uvicorn
 from pathlib import Path
 
-import config
-import server.app as server_module
-from server.app import build_app, world, bus, broadcast, chat_history
-import llm_agents
+from core import config
+from server.state import AppState
+from server.broadcast import broadcast as _broadcast_impl
+from server.app import build_app
+from agents import llm_routing as llm_agents
 from orchestration.engine import BuildEngine
-from persistence import (
-    DISTRICTS_CACHE,
-    SAVE_FILE,
-    SURVEYS_CACHE,
+from core.persistence import (
+    clear_saves,
     load_llm_settings,
     load_state,
     merge_llm_overrides_from_save,
     save_llm_settings,
     save_state,
 )
-from config import GRID_WIDTH, GRID_HEIGHT, create_scenario
+from core.config import create_scenario
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +44,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-from run_log import init_run_log
+from core.run_log import init_run_log
 init_run_log()
 
 # Touched by POST /api/restart-server when ETERNAL_CITIES_RELOAD=1 so uvicorn --reload picks up a restart request.
@@ -74,13 +74,23 @@ BANNER = """
 
 load_llm_settings()
 
-engine = BuildEngine(world, bus, broadcast, chat_history)
+# Shared application state
+state = AppState()
+
+# Bind broadcast to the shared state so callers use broadcast(message) without needing to pass state.
+broadcast = functools.partial(_broadcast_impl, state)
+
+# Make the bound broadcast available for late imports (e.g. agents/base.py token_usage push).
+import server.state as _server_state_mod
+_server_state_mod.broadcast_fn = broadcast
+
+engine = BuildEngine(state.world, state.bus, broadcast, state.chat_history)
 
 # Load saved state if available (tiles, chat, districts, scenario — survives server restarts)
-saved = load_state(world)
+saved = load_state(state.world)
 if saved:
     loaded_chat, district_index, districts = saved
-    chat_history.extend(loaded_chat)
+    state.chat_history.extend(loaded_chat)
     engine.district_index = district_index
     engine.districts = districts
     logging.info(
@@ -110,11 +120,11 @@ async def _handle_start_inner(city_name, year):
     if was_running:
         import subprocess
 
-        subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+        await asyncio.to_thread(subprocess.run, ["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
 
     await engine.abort_pipeline_tasks()
     engine.reset_pipeline_for_new_run()
-    server_module.agent_status_by_agent.clear()
+    state.agent_status_by_agent.clear()
     await engine.broadcast_all_agents_idle()
 
     # Create and set the scenario
@@ -122,28 +132,19 @@ async def _handle_start_inner(city_name, year):
     logging.info(f"Starting: {config.SCENARIO['location']}, {config.SCENARIO['period']}")
 
     # Reset world state for fresh build
-    from world.state import WorldState
-    new_world = WorldState(GRID_WIDTH, GRID_HEIGHT)
-    world.grid = new_world.grid
-    world.turn = 0
-    world.current_period = config.SCENARIO["period"]
-    world.current_year = config.SCENARIO["focus_year"]
-    world.build_log = []
+    state.world.clear()
+    state.world.current_period = config.SCENARIO["period"]
+    state.world.current_year = config.SCENARIO["focus_year"]
 
-    chat_history.clear()
+    state.chat_history.clear()
     engine.districts = []
     engine.district_index = 0
 
     # Delete old caches
-    if SAVE_FILE.exists():
-        SAVE_FILE.unlink()
-    if DISTRICTS_CACHE.exists():
-        DISTRICTS_CACHE.unlink()
-    if SURVEYS_CACHE.exists():
-        SURVEYS_CACHE.unlink()
+    clear_saves()
 
     # Broadcast scenario to all clients
-    await broadcast(world.to_dict())
+    await broadcast(state.world.to_dict())
     await broadcast({
         "type": "scenario",
         "city": config.SCENARIO["location"],
@@ -170,32 +171,23 @@ async def _handle_reset_inner():
     engine.reset_pipeline_for_new_run()
 
     import subprocess
-    subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+    await asyncio.to_thread(subprocess.run, ["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
 
-    from world.state import WorldState
-    new_world = WorldState(GRID_WIDTH, GRID_HEIGHT)
-    world.grid = new_world.grid
-    world.turn = 0
-    world.current_period = ""
-    world.current_year = -44
-    world.build_log = []
+    state.world.clear()
+    state.world.current_period = ""
+    state.world.current_year = -44
 
-    chat_history.clear()
+    state.chat_history.clear()
     engine.districts = []
     engine.district_index = 0
-    server_module.agent_status_by_agent.clear()
+    state.agent_status_by_agent.clear()
     await engine.broadcast_all_agents_idle()
 
-    if SAVE_FILE.exists():
-        SAVE_FILE.unlink()
-    if DISTRICTS_CACHE.exists():
-        DISTRICTS_CACHE.unlink()
-    if SURVEYS_CACHE.exists():
-        SURVEYS_CACHE.unlink()
+    clear_saves()
 
     # Back to selection screen
     config.SCENARIO = None
-    await broadcast(world.to_dict())
+    await broadcast(state.world.to_dict())
 
 
 async def handle_pause():
@@ -217,12 +209,12 @@ async def _handle_pause_inner():
     await engine.abort_pipeline_tasks()
     # Kill any Claude CLI subprocesses still running
     import subprocess
-    subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+    await asyncio.to_thread(subprocess.run, ["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
     await engine.broadcast_all_agents_idle()
     await asyncio.to_thread(
         save_state,
-        world,
-        chat_history,
+        state.world,
+        state.chat_history,
         engine.district_index,
         engine.districts,
     )
@@ -283,12 +275,12 @@ async def handle_restart_server() -> dict:
         await engine.cancel_run_task_join()
         await engine.abort_pipeline_tasks()
     import subprocess as _sp
-    _sp.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+    await asyncio.to_thread(_sp.run, ["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
     if getattr(config, "SCENARIO", None):
         await asyncio.to_thread(
             save_state,
-            world,
-            chat_history,
+            state.world,
+            state.chat_history,
             engine.district_index,
             engine.districts,
         )
@@ -318,8 +310,8 @@ async def handle_reset_timeline() -> dict:
         config.SCENARIO = merged
         await asyncio.to_thread(
             save_state,
-            world,
-            chat_history,
+            state.world,
+            state.chat_history,
             engine.district_index,
             engine.districts,
         )
@@ -337,14 +329,14 @@ async def handle_reset_timeline() -> dict:
     return {"ok": True, "started_at_s": t}
 
 
-server_module.reset_callback = handle_reset
-server_module.start_callback = handle_start
-server_module.resume_callback = handle_resume
-server_module.pause_callback = handle_pause
-server_module.llm_settings_callback = handle_llm_settings_save
-server_module.restart_server_callback = handle_restart_server
-server_module.reset_timeline_callback = handle_reset_timeline
-server_module.engine_is_running = lambda: engine.running
+state.reset_callback = handle_reset
+state.start_callback = handle_start
+state.resume_callback = handle_resume
+state.pause_callback = handle_pause
+state.llm_settings_callback = handle_llm_settings_save
+state.restart_server_callback = handle_restart_server
+state.reset_timeline_callback = handle_reset_timeline
+state.engine_is_running = lambda: engine.running
 
 
 @asynccontextmanager
@@ -357,8 +349,7 @@ async def _app_lifespan(_app):
     logging.info("Build engine stopped (server shutdown or reload)")
 
 
-app = build_app(lifespan=_app_lifespan)
-server_module.app = app
+app = build_app(state, lifespan=_app_lifespan)
 
 
 if __name__ == "__main__":

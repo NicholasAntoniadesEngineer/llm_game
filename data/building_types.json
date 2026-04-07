@@ -1,0 +1,82 @@
+[
+  {
+    "type": "temple",
+    "description": "ANY religious structure: temple, mosque, pyramid, pagoda, shrine, church, ziggurat, stupa, altar"
+  },
+  {
+    "type": "basilica",
+    "description": "large civic/public hall, audience hall, great hall, throne room, administrative building"
+  },
+  {
+    "type": "insula",
+    "description": "multi-story residential block, apartment building, tenement, ward housing"
+  },
+  {
+    "type": "domus",
+    "description": "single-family dwelling, villa, mansion, noble house, palace wing"
+  },
+  {
+    "type": "aqueduct",
+    "description": "water infrastructure: aqueduct, canal, irrigation channel, qanat"
+  },
+  {
+    "type": "thermae",
+    "description": "bathhouse, hammam, public baths, ritual bath"
+  },
+  {
+    "type": "circus",
+    "description": "racetrack, processional avenue, parade ground, large arena"
+  },
+  {
+    "type": "amphitheater",
+    "description": "arena, stadium, theater, ball court, performance space"
+  },
+  {
+    "type": "market",
+    "description": "marketplace, bazaar, souk, agora stoa, trading hall, caravanserai"
+  },
+  {
+    "type": "taberna",
+    "description": "shop, workshop, stall, artisan's workplace, bakery"
+  },
+  {
+    "type": "warehouse",
+    "description": "storehouse, granary, treasury, arsenal, dockside storage, horreum"
+  },
+  {
+    "type": "gate",
+    "description": "city gate, ceremonial entrance, arch, torii, pylon, propylon"
+  },
+  {
+    "type": "monument",
+    "description": "statue, obelisk, stele, column, commemorative structure, altar, triumphal arch"
+  },
+  {
+    "type": "wall",
+    "description": "city wall, fortification, rampart, embankment, defensive tower, palisade"
+  },
+  {
+    "type": "bridge",
+    "description": "bridge, causeway, dam, dock, pier, jetty, pontoon"
+  },
+  {
+    "type": "road",
+    "description": "street, path, processional way, canal as transport, causeway, stairway"
+  },
+  {
+    "type": "forum",
+    "description": "public square, plaza, agora, courtyard, sacred precinct, parade ground"
+  },
+  {
+    "type": "garden",
+    "description": "garden, park, sacred grove, floating garden, orchard, vineyard"
+  },
+  {
+    "type": "water",
+    "description": "river, lake, harbor, pool, reservoir, canal as water feature, moat"
+  },
+  {
+    "type": "grass",
+    "description": "open ground, field, undeveloped land, marshland, cemetery, pasture"
+  }
+]

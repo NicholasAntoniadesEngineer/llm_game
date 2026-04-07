@@ -1,0 +1,17 @@
+{
+  "temple": "Use roughness 0.3-0.5 for polished marble columns, 0.7-0.9 for weathered stone podium. Use surface_detail 0.4-0.7 on large stone surfaces.",
+  "basilica": "Use roughness 0.5-0.7 for plastered walls, 0.3-0.4 for marble floors. Add surface_detail 0.5+ on exterior walls.",
+  "insula": "APARTMENT BLOCK \u2014 NO colonnade. Roughness 0.7-0.9 for brick, 0.5-0.7 for plaster. Vary colors between floors. Simple tiled_roof, many windows.",
+  "domus": "Roughness 0.4-0.6 for stucco, 0.3 for polished interior. Surface_detail 0.3-0.5 on exterior walls.",
+  "thermae": "Roughness 0.2-0.4 for wet/glazed surfaces, 0.6-0.8 for exterior. Metalness 0.1+ for bronze fittings.",
+  "market": "COMMERCIAL \u2014 NO colonnade. Roughness 0.7-0.9 for timber/rough surfaces. Add awning with contrasting color.",
+  "taberna": "SMALL SHOP \u2014 NO colonnade, NO pediment. Single story, rough brick (roughness 0.8+), wide door, awning, flat_roof.",
+  "warehouse": "STORAGE \u2014 NO colonnade, NO decorative elements. Tall plain block, thick walls, few windows, wide door, flat_roof. Roughness 0.8-0.95.",
+  "gate": "FORTIFIED \u2014 NO colonnade. Roughness 0.5-0.7 for dressed stone. Arcade for arch, battlements. Surface_detail 0.5+ for ashlar.",
+  "wall": "Roughness 0.8-0.95 for rough defensive walls. Surface_detail 0.6+ for rusticated stone.",
+  "monument": "Roughness 0.2-0.4 for polished stone/bronze. Metalness 0.3-0.7 for bronze. NO colonnade unless explicitly described.",
+  "amphitheater": "Roughness 0.5-0.7 for travertine. Layer arcade + tier + arcade for multi-story effect.",
+  "circus": "ELONGATED TRACK \u2014 low walls with seating tiers, pilasters for rhythm. Roughness 0.5-0.7.",
+  "bridge": "UTILITARIAN \u2014 arcade for arches, flat deck, low parapet walls. NO colonnade. Roughness 0.6-0.8.",
+  "_default": "Roughness 0.5-0.8 for stone, 0.7-0.9 for weathered surfaces. Surface_detail 0.3-0.6 on large planes."
+}

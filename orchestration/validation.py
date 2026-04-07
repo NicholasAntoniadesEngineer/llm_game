@@ -3,80 +3,26 @@
 from __future__ import annotations
 
 import logging
-import re
 
-logger = logging.getLogger("roma.validation")
+from core.errors import UrbanistaValidationError
+from orchestration.schema import (
+    _DEFAULT_STACK_ROLES,
+    _HEX_COLOR,
+    _MAP_URL_MAX_LEN,
+    _NAMED_COLOR_MAP,
+    _PHASE4_BOOL_KEYS,
+    _PHASE4_HEX_KEYS,
+    _PHASE4_NUM_KEYS,
+    _STACK_ROLE_ORDER,
+    MAX_PROCEDURAL_PARTS,
+    PARAMETRIC_TEMPLATE_IDS,
+    PROCEDURAL_SHAPES,
+    RENDERER_COMPONENT_TYPES,
+    STACK_ROLES,
+)
 
-# Must match static/renderer3d.js component builders + procedural
-RENDERER_COMPONENT_TYPES = frozenset({
-    "podium", "colonnade", "pediment", "dome", "block", "arcade",
-    "tiled_roof", "atrium", "statue", "fountain", "awning", "battlements",
-    "tier", "door", "pilasters", "vault", "flat_roof", "cella", "walls",
-    "procedural",
-})
+logger = logging.getLogger("eternal.validation")
 
-PROCEDURAL_SHAPES = frozenset({
-    "box", "cylinder", "sphere", "cone", "torus", "plane",
-    # Compound shapes (renderer expands into multiple meshes)
-    "stacked_tower", "tiered_pyramid", "colonnade_ring", "water_channel", "arch",
-})
-
-STACK_ROLES = frozenset({
-    "foundation", "structural", "infill", "roof", "decorative", "freestanding",
-})
-
-MAX_PROCEDURAL_PARTS = 48
-_HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
-_MAP_URL_MAX_LEN = 2048
-
-# Optional spec.phase4 — must match static/renderer3d.js _applyPhase4ContextualPolish
-_PHASE4_BOOL_KEYS = frozenset({
-    "disable_all",
-    "disable_auto_steps",
-    "disable_party_walls",
-    "disable_street_fascia",
-    "disable_water_mooring",
-    "disable_garden_hedge",
-    "disable_ruin_vegetation",
-    "disable_road_awning",
-    "disable_street_signs",
-})
-_PHASE4_HEX_KEYS = frozenset({
-    "step_color",
-    "party_wall_color",
-    "street_front_color",
-    "awning_color",
-    "sign_color",
-})
-_PHASE4_NUM_KEYS = frozenset({
-    "ruin_overgrowth",
-    "party_wall_height",
-    "street_fascia_height",
-    "awning_height",
-})
-
-# Must match static/parametric_templates.js TEMPLATES keys
-PARAMETRIC_TEMPLATE_IDS = frozenset({
-    "open",
-    "temple",
-    "basilica",
-    "insula",
-    "domus",
-    "thermae",
-    "amphitheater",
-    "market",
-    "monument",
-    "gate",
-    "wall",
-    "aqueduct",
-    "mesoamerican_temple",
-    "mesoamerican_shrine",
-    "mesoamerican_civic",
-})
-
-
-class UrbanistaValidationError(ValueError):
-    """Urbanista JSON violates renderer contract; do not strip or substitute."""
 
 
 def _require_color(part: dict, ctx: str) -> None:
@@ -282,16 +228,6 @@ def _validate_component(comp: dict, ctx: str) -> None:
     _validate_optional_pbr(comp, ctx)
 
 
-_NAMED_COLOR_MAP = {
-    "white": "#F0F0F0", "black": "#1A1008", "red": "#CC3333", "blue": "#2E86AB",
-    "green": "#3A7D44", "gold": "#FFD700", "bronze": "#8B6914", "silver": "#C0C0C0",
-    "grey": "#808080", "gray": "#808080", "brown": "#6B4226", "orange": "#CC5533",
-    "yellow": "#DAA520", "cream": "#F5E6C8", "tan": "#C8B070", "beige": "#F0EAD6",
-    "terracotta": "#C45A3C", "sandstone": "#C8B070", "marble": "#F0F0F0",
-    "limestone": "#F5E6C8", "granite": "#808080", "obsidian": "#2A2A2A",
-    "jade": "#3A7D44", "ivory": "#FFFFF0", "copper": "#8B6914",
-}
-
 
 def sanitize_urbanista_output(arch_result: dict) -> dict:
     """Auto-correct common Urbanista errors before validation. Returns a cleaned copy."""
@@ -414,17 +350,6 @@ def validate_urbanista_arch_result(arch_result: dict) -> dict:
 # Simulates the renderer's component stacking and checks for bounding-box
 # intersections between components. Returns a list of collision descriptions
 # that can be fed back to Urbanista for regeneration.
-
-_STACK_ROLE_ORDER = ["foundation", "structural", "infill", "roof", "decorative", "freestanding"]
-_DEFAULT_STACK_ROLES = {
-    "podium": "foundation", "colonnade": "structural", "block": "structural",
-    "walls": "structural", "arcade": "structural", "cella": "infill",
-    "atrium": "infill", "tier": "infill", "pediment": "roof", "dome": "roof",
-    "tiled_roof": "roof", "flat_roof": "roof", "vault": "roof",
-    "door": "decorative", "pilasters": "decorative", "awning": "decorative",
-    "battlements": "decorative", "statue": "freestanding", "fountain": "freestanding",
-    "procedural": "structural",
-}
 
 
 def _resolve_stack_role(comp: dict) -> str:
@@ -643,8 +568,6 @@ def check_component_collisions(spec: dict, footprint_w: float, footprint_d: floa
 
 def validate_master_plan(
     master_plan: list,
-    grid_width: int,
-    grid_height: int,
 ) -> list[dict]:
     """
     Keep structures with at least one in-bounds tile; drop OOB tiles; enforce global
@@ -682,11 +605,7 @@ def validate_master_plan(
                 xi, yi = int(x), int(y)
             except (TypeError, ValueError):
                 continue
-            if not (0 <= xi < grid_width and 0 <= yi < grid_height):
-                oob_dropped += 1
-                if oob_first is None:
-                    oob_first = (xi, yi)
-                continue
+            # World is unbounded — no OOB rejection
             key = (xi, yi)
             if key in seen:
                 dup_dropped += 1
@@ -727,15 +646,11 @@ def validate_master_plan(
 
 def validate_urbanista_tiles(
     tiles: list,
-    grid_width: int,
-    grid_height: int,
 ) -> list[dict]:
-    """Keep only in-bounds tile dicts; drop invalid entries. x/y are int in output."""
+    """Normalize tile dicts; drop invalid entries. x/y are int in output. No bounds check — world is unbounded."""
     if not tiles:
         return []
     out: list[dict] = []
-    oob_dropped = 0
-    oob_first: tuple[int, int] | None = None
     for td in tiles:
         if not isinstance(td, dict):
             continue
@@ -746,21 +661,8 @@ def validate_urbanista_tiles(
             xi, yi = int(x), int(y)
         except (TypeError, ValueError):
             continue
-        if not (0 <= xi < grid_width and 0 <= yi < grid_height):
-            oob_dropped += 1
-            if oob_first is None:
-                oob_first = (xi, yi)
-            continue
         normalized = dict(td)
         normalized["x"] = xi
         normalized["y"] = yi
         out.append(normalized)
-    if oob_dropped:
-        logger.warning(
-            "Urbanista: dropped %s out-of-bounds tiles (grid %s×%s; first at %s)",
-            oob_dropped,
-            grid_width,
-            grid_height,
-            oob_first,
-        )
     return out

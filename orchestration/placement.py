@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-logger = logging.getLogger("roma.placement")
+logger = logging.getLogger("eternal.placement")
 
 # Types that usually need direct adjacency to a road tile (cardinal).
 COMMERCIAL_TYPES = frozenset({"taberna", "market", "warehouse"})

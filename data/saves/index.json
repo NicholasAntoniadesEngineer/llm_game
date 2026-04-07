@@ -1,0 +1,35 @@
+{
+  "district_index": 0,
+  "districts": [],
+  "generation": 0,
+  "turn": 0,
+  "current_period": "around 1117",
+  "current_year": 1117,
+  "min_x": 0,
+  "max_x": 0,
+  "min_y": 0,
+  "max_y": 0,
+  "chat_history": [
+    {
+      "type": "chat",
+      "sender": "cartographus",
+      "msg_type": "research",
+      "content": "Phase 1 \u2014 district skeleton for Angkor (around 1117). A detailed map narrative will follow in the background while we build.",
+      "turn": 0
+    }
+  ],
+  "run_started_at_s": 1775561035.7632089,
+  "scenario": {
+    "location": "Angkor",
+    "description": "Capital of the Khmer Empire. Largest pre-industrial city in the world. Temple-mountains and vast water management systems.",
+    "features": "Angkor Wat, Angkor Thom, Bayon temple, Ta Prohm, vast barays (reservoirs), moats, causeways, laterite and sandstone construction",
+    "grid_note": "Flat terrain with water features dominating. Angkor Wat in the south (moated). Angkor Thom (walled city) in the north. Barays to the east.",
+    "period": "around 1117",
+    "focus_year": 1117,
+    "started_at_s": 1775561035.7632089,
+    "year_start": 1092,
+    "year_end": 1142,
+    "ruler": "Research who ruled and what the city looked like at this exact time"
+  },
+  "chunk_size": 64
+}

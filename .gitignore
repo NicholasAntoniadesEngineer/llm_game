@@ -1,5 +1,25 @@
+# Python
 __pycache__/
 *.pyc
-roma_districts_cache.json
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Runtime data files
 roma_save.json
+roma_save.json.backup
+roma_districts_cache.json
+roma_surveys_cache.json
 roma_llm_settings.json
+reload_trigger.txt
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+.idea/
+.vscode/settings.json

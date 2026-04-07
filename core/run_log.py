@@ -4,7 +4,6 @@ Every log message from every logger (agents, engine, server, persistence, etc.)
 is captured, plus structured events (agent calls, token usage, decisions).
 """
 
-import io
 import logging
 import time
 from collections import deque

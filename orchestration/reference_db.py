@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("roma.reference_db")
+logger = logging.getLogger("eternal.reference_db")
 
 _CACHE: list[dict[str, Any]] | None = None
 _LOOKUP_CACHE: dict[tuple[str, str, int], dict[str, Any] | None] = {}

@@ -58,34 +58,39 @@
         const refD = 1.8;
         const scale = footprintScale(tileW, tileD, refW, refD);
         const p = mergeParams({}, params);
+        // Italic/Roman temples: tall podium, FRONT colonnade only, solid flank walls.
+        // Greek peripteral (columns on all sides) is explicit opt-in via params.peripteral.
         const steps = clampInt(p.podium_steps != null ? p.podium_steps : 5, 1, 14);
-        const columns = clampInt(p.columns != null ? p.columns : 8, 4, 32);
+        const columns = clampInt(p.columns != null ? p.columns : 6, 4, 32);
         const style = colonnadeStyle(p, "ionic");
+        const peripteral = p.peripteral === true; // default FALSE for Roman temples
         const base = [
-            { type: "podium", steps, height: 0.12, color: hexColor(p.podium_color, "#F5E6C8") },
+            { type: "podium", steps, height: 0.18, color: hexColor(p.podium_color, "#F5E6C8") },
             {
                 type: "colonnade",
                 columns,
                 style,
                 height: 0.42,
-                color: hexColor(p.colonnade_color, "#808080"),
+                color: hexColor(p.colonnade_color, "#E8E0D0"),
                 radius: 0.022,
+                peripteral,
             },
             {
                 type: "cella",
-                height: 0.34,
-                width: 1.4,
-                depth: 0.9,
+                height: 0.4,
+                width: 1.5,
+                depth: 1.05,
                 color: hexColor(p.cella_color, "#C8B070"),
             },
             { type: "pediment", height: 0.09, color: hexColor(p.pediment_color, "#C45A3C") },
             {
                 type: "pilasters",
                 count: clampInt(p.pilaster_count != null ? p.pilaster_count : 4, 0, 12),
-                height: 0.35,
-                color: hexColor(p.pilaster_color, "#808080"),
+                height: 0.4,
+                color: hexColor(p.pilaster_color, "#C8B070"),
+                placement: "sides",
             },
-            { type: "door", width: 0.12, height: 0.22, color: hexColor(p.door_color, "#6B4226") },
+            { type: "door", width: 0.16, height: 0.3, color: hexColor(p.door_color, "#6B4226") },
         ];
         const scaled = scaleComponents(base, scale);
         return scaled;
@@ -100,27 +105,18 @@
             { type: "podium", steps: clampInt(p.podium_steps, 3, 10), height: 0.08, color: hexColor(p.podium_color, "#F5E6C8") },
             {
                 type: "block",
-                stories: clampInt(p.stories != null ? p.stories : 1, 1, 4),
-                storyHeight: 0.45,
+                stories: clampInt(p.stories != null ? p.stories : 2, 1, 4),
+                storyHeight: 0.32,
                 color: hexColor(p.block_color, "#F5E6C8"),
-                windows: clampInt(p.windows != null ? p.windows : 6, 1, 20),
+                windows: clampInt(p.windows != null ? p.windows : 8, 1, 20),
                 windowColor: hexColor(p.window_color, "#1A1008"),
             },
-            {
-                type: "colonnade",
-                columns: clampInt(p.colonnade_columns != null ? p.colonnade_columns : 10, 4, 24),
-                style: colonnadeStyle(p, "corinthian"),
-                height: 0.38,
-                color: hexColor(p.colonnade_color, "#F0F0F0"),
-                radius: 0.018,
-                peripteral: false,
-            },
             { type: "tiled_roof", height: 0.1, color: hexColor(p.roof_color, "#C45A3C") },
-            { type: "door", width: 0.14, height: 0.28, color: hexColor(p.door_color, "#6B4226") },
+            { type: "door", width: 0.2, height: 0.32, color: hexColor(p.door_color, "#6B4226") },
             {
                 type: "pilasters",
                 count: clampInt(p.pilaster_count != null ? p.pilaster_count : 6, 0, 12),
-                height: 0.38,
+                height: 0.55,
                 color: hexColor(p.pilaster_color, "#F0EAD6"),
             },
         ];
@@ -162,15 +158,6 @@
             { type: "atrium", height: 0.25, color: hexColor(p.atrium_color, "#F0EAD6") },
             { type: "tiled_roof", height: 0.08, color: hexColor(p.roof_color, "#C45A3C") },
             { type: "door", width: 0.1, height: 0.2, color: hexColor(p.door_color, "#6B4226") },
-            {
-                type: "colonnade",
-                columns: clampInt(p.peristyle_columns != null ? p.peristyle_columns : 4, 2, 12),
-                style: colonnadeStyle(p, "ionic"),
-                height: 0.25,
-                color: hexColor(p.colonnade_color, "#F0F0F0"),
-                radius: 0.012,
-                peripteral: false,
-            },
         ];
         return scaleComponents(base, scale);
     }
@@ -185,23 +172,20 @@
             {
                 type: "block",
                 stories: 1,
-                storyHeight: 0.4,
+                storyHeight: 0.5,
                 color: hexColor(p.block_color, "#B85C3A"),
-                windows: clampInt(p.windows != null ? p.windows : 5, 1, 16),
+                windows: clampInt(p.windows != null ? p.windows : 8, 1, 16),
                 windowColor: hexColor(p.window_color, "#1A1008"),
             },
-            { type: "dome", radius: 0.28, color: hexColor(p.dome_color, "#A09880") },
-            {
-                type: "colonnade",
-                columns: clampInt(p.colonnade_columns != null ? p.colonnade_columns : 6, 4, 16),
-                style: colonnadeStyle(p, "corinthian"),
-                height: 0.32,
-                color: hexColor(p.colonnade_color, "#F0F0F0"),
-                radius: 0.015,
-                peripteral: false,
-            },
+            { type: "dome", radius: 0.3, color: hexColor(p.dome_color, "#A09880") },
             { type: "fountain", radius: 0.12, height: 0.15, color: hexColor(p.fountain_color, "#F0F0F0") },
-            { type: "door", width: 0.14, height: 0.25, color: hexColor(p.door_color, "#6B4226") },
+            { type: "door", width: 0.18, height: 0.3, color: hexColor(p.door_color, "#6B4226") },
+            {
+                type: "pilasters",
+                count: clampInt(p.pilaster_count != null ? p.pilaster_count : 4, 0, 10),
+                height: 0.55,
+                color: hexColor(p.pilaster_color, "#F5E6C8"),
+            },
         ];
         return scaleComponents(base, scale);
     }
@@ -261,17 +245,15 @@
             { type: "podium", steps: clampInt(p.podium_steps != null ? p.podium_steps : 5, 1, 12), height: 0.2, color: hexColor(p.podium_color, "#F0F0F0") },
             {
                 type: "statue",
-                height: 0.35,
+                height: 0.45,
                 color: hexColor(p.statue_color, "#8B6914"),
                 pedestalColor: hexColor(p.pedestal_color, "#F0F0F0"),
             },
             {
-                type: "colonnade",
-                columns: clampInt(p.columns != null ? p.columns : 4, 2, 12),
-                style: colonnadeStyle(p, "corinthian"),
-                height: 0.3,
-                color: hexColor(p.colonnade_color, "#F0F0F0"),
-                radius: 0.012,
+                type: "pilasters",
+                count: clampInt(p.pilaster_count != null ? p.pilaster_count : 4, 0, 8),
+                height: 0.15,
+                color: hexColor(p.pilaster_color, "#F0F0F0"),
             },
         ];
         return scaleComponents(base, scale);
@@ -291,13 +273,10 @@
             },
             { type: "battlements", height: 0.08, color: hexColor(p.battlement_color, "#C8B070") },
             {
-                type: "colonnade",
-                columns: clampInt(p.colonnade_columns != null ? p.colonnade_columns : 4, 2, 12),
-                style: colonnadeStyle(p, "corinthian"),
+                type: "pilasters",
+                count: clampInt(p.pilaster_count != null ? p.pilaster_count : 4, 0, 8),
                 height: 0.4,
-                color: hexColor(p.colonnade_color, "#F0F0F0"),
-                radius: 0.015,
-                peripteral: false,
+                color: hexColor(p.pilaster_color, "#C8B070"),
             },
             { type: "flat_roof", color: hexColor(p.roof_color, "#F5E6C8"), overhang: 0.04 },
         ];
@@ -334,6 +313,89 @@
                 color: hexColor(p.arcade_color, "#C8B070"),
             },
             { type: "flat_roof", color: hexColor(p.deck_color, "#C8B070") },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /** Taberna — single-story shop with wide opening, awning, no columns. */
+    function taberna(params, tileW, tileD) {
+        const refW = 0.9;
+        const refD = 0.9;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            {
+                type: "block",
+                stories: 1,
+                storyHeight: 0.25,
+                color: hexColor(p.wall_color, "#B85C3A"),
+                windows: clampInt(p.windows != null ? p.windows : 1, 0, 4),
+                windowColor: hexColor(p.window_color, "#1A1008"),
+            },
+            { type: "awning", color: hexColor(p.awning_color, "#CC3333") },
+            { type: "door", width: 0.14, height: 0.18, color: hexColor(p.door_color, "#6B4226") },
+            { type: "flat_roof", color: hexColor(p.roof_color, "#A09880"), overhang: 0.02 },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /** Warehouse (horreum) — tall plain block, minimal windows, wide loading door, flat roof. */
+    function warehouse(params, tileW, tileD) {
+        const refW = 2.7;
+        const refD = 1.8;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            { type: "podium", steps: clampInt(p.podium_steps, 1, 4), height: 0.04, color: hexColor(p.podium_color, "#808080") },
+            {
+                type: "block",
+                stories: clampInt(p.stories != null ? p.stories : 2, 1, 3),
+                storyHeight: 0.35,
+                color: hexColor(p.wall_color, "#C8B070"),
+                windows: clampInt(p.windows != null ? p.windows : 2, 0, 6),
+                windowColor: hexColor(p.window_color, "#1A1008"),
+            },
+            { type: "door", width: 0.2, height: 0.28, color: hexColor(p.door_color, "#6B4226") },
+            { type: "flat_roof", color: hexColor(p.roof_color, "#A09880"), overhang: 0.03 },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /** Circus — elongated track with low walls and seating tiers. */
+    function circus(params, tileW, tileD) {
+        const refW = 5.4;
+        const refD = 1.8;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            { type: "walls", height: 0.2, thickness: 0.08, color: hexColor(p.wall_color, "#F5E6C8") },
+            { type: "tier", height: 0.15, color: hexColor(p.tier1_color, "#F5E6C8") },
+            { type: "tier", height: 0.12, color: hexColor(p.tier2_color, "#A09880") },
+            {
+                type: "pilasters",
+                count: clampInt(p.pilaster_count != null ? p.pilaster_count : 6, 0, 12),
+                height: 0.25,
+                color: hexColor(p.pilaster_color, "#F5E6C8"),
+            },
+        ];
+        return scaleComponents(base, scale);
+    }
+
+    /** Bridge — arched span, heavier piers, flat deck, no columns. */
+    function bridge(params, tileW, tileD) {
+        const refW = 0.9;
+        const refD = 2.7;
+        const scale = footprintScale(tileW, tileD, refW, refD);
+        const p = mergeParams({}, params);
+        const base = [
+            {
+                type: "arcade",
+                arches: clampInt(p.arches != null ? p.arches : 3, 1, 8),
+                height: 0.4,
+                color: hexColor(p.pier_color, "#C8B070"),
+            },
+            { type: "flat_roof", color: hexColor(p.deck_color, "#808080"), overhang: 0.02 },
+            { type: "walls", height: 0.06, thickness: 0.03, color: hexColor(p.parapet_color, "#C8B070") },
         ];
         return scaleComponents(base, scale);
     }
@@ -495,6 +557,10 @@
         gate,
         wall,
         aqueduct,
+        taberna,
+        warehouse,
+        circus,
+        bridge,
         mesoamerican_temple,
         mesoamerican_shrine,
         mesoamerican_civic,

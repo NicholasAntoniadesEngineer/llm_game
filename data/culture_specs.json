@@ -1,0 +1,125 @@
+{
+    "east_asian": {
+        "temple": {
+            "ref_w": 3.6, "ref_d": 2.7,
+            "components": [
+                {"type": "podium", "steps": 3, "height": 0.08, "color": "#C4A77D", "roughness": 0.85},
+                {"type": "block", "stories": 1, "storyHeight": 0.4, "color": "#6B4226", "windows": 4, "windowColor": "#1A1008", "roughness": 0.7},
+                {"type": "colonnade", "columns": 6, "style": "doric", "height": 0.35, "color": "#6B4226", "radius": 0.025, "roughness": 0.65},
+                {"type": "tiled_roof", "height": 0.18, "color": "#2A2A2A", "roughness": 0.5},
+                {"type": "door", "width": 0.14, "height": 0.25, "color": "#CC3333", "roughness": 0.4}
+            ]
+        },
+        "basilica": {
+            "ref_w": 4.5, "ref_d": 2.7,
+            "components": [
+                {"type": "podium", "steps": 5, "height": 0.12, "color": "#C4A77D", "roughness": 0.85},
+                {"type": "block", "stories": 1, "storyHeight": 0.5, "color": "#CC3333", "windows": 6, "windowColor": "#1A1008", "roughness": 0.6},
+                {"type": "colonnade", "columns": 8, "style": "doric", "height": 0.4, "color": "#CC3333", "radius": 0.03, "roughness": 0.55},
+                {"type": "tiled_roof", "height": 0.22, "color": "#DAA520", "roughness": 0.45}
+            ]
+        },
+        "gate": {
+            "ref_w": 2.7, "ref_d": 1.8,
+            "components": [
+                {"type": "podium", "steps": 2, "height": 0.06, "color": "#C4A77D", "roughness": 0.85},
+                {"type": "arcade", "arches": 3, "height": 0.5, "color": "#C4A77D", "roughness": 0.75},
+                {"type": "block", "stories": 1, "storyHeight": 0.3, "color": "#CC3333", "windows": 3, "windowColor": "#1A1008"},
+                {"type": "tiled_roof", "height": 0.15, "color": "#2A2A2A"},
+                {"type": "battlements", "height": 0.06, "color": "#C4A77D"}
+            ]
+        }
+    },
+    "mesoamerican": {
+        "temple": {
+            "ref_w": 4.5, "ref_d": 4.5,
+            "components": [
+                {"type": "podium", "steps": 8, "height": 0.35, "color": "#C4A77D", "roughness": 0.9, "surface_detail": 0.7},
+                {"type": "podium", "steps": 6, "height": 0.25, "color": "#C4A77D", "roughness": 0.85, "surface_detail": 0.6},
+                {"type": "podium", "steps": 4, "height": 0.15, "color": "#CC5533", "roughness": 0.8},
+                {"type": "block", "stories": 1, "storyHeight": 0.25, "color": "#CC5533", "windows": 0, "windowColor": "#1A1008"},
+                {"type": "flat_roof", "color": "#C4A77D", "overhang": 0.02}
+            ]
+        }
+    },
+    "middle_eastern": {
+        "temple": {
+            "ref_w": 3.6, "ref_d": 2.7,
+            "components": [
+                {"type": "podium", "steps": 2, "height": 0.06, "color": "#F5E6C8", "roughness": 0.8},
+                {"type": "arcade", "arches": 6, "height": 0.4, "color": "#F5E6C8", "roughness": 0.65},
+                {"type": "dome", "radius": 0.3, "color": "#DAA520", "roughness": 0.35, "metalness": 0.15},
+                {"type": "walls", "height": 0.3, "thickness": 0.08, "color": "#F0EAD6", "roughness": 0.7}
+            ]
+        }
+    },
+    "south_asian": {
+        "temple": {
+            "ref_w": 4.5, "ref_d": 3.6,
+            "components": [
+                {"type": "podium", "steps": 4, "height": 0.1, "color": "#C8B070", "roughness": 0.85, "surface_detail": 0.6},
+                {"type": "walls", "height": 0.35, "thickness": 0.08, "color": "#C8B070", "roughness": 0.75, "surface_detail": 0.5},
+                {"type": "procedural", "stack_role": "structural", "recipe": "shikhara_tower",
+                 "parts": [
+                     {"shape": "box", "width": 0.35, "height": 0.5, "depth": 0.35, "color": "#C8B070", "position": [0, 0.2, 0], "roughness": 0.7, "surface_detail": 0.65},
+                     {"shape": "box", "width": 0.28, "height": 0.35, "depth": 0.28, "color": "#C8B070", "position": [0, 0.55, 0], "roughness": 0.65, "surface_detail": 0.6},
+                     {"shape": "box", "width": 0.2, "height": 0.25, "depth": 0.2, "color": "#C8B070", "position": [0, 0.8, 0], "roughness": 0.6},
+                     {"shape": "sphere", "radius": 0.08, "color": "#DAA520", "position": [0, 1.0, 0], "roughness": 0.3, "metalness": 0.2}
+                 ]},
+                {"type": "procedural", "stack_role": "decorative", "recipe": "gopuram_tiers",
+                 "parts": [
+                     {"shape": "box", "width": 0.6, "height": 0.08, "depth": 0.15, "color": "#CC3333", "position": [0, 0.0, 0.25], "roughness": 0.7},
+                     {"shape": "box", "width": 0.5, "height": 0.08, "depth": 0.12, "color": "#2E86AB", "position": [0, 0.08, 0.25], "roughness": 0.65},
+                     {"shape": "box", "width": 0.4, "height": 0.06, "depth": 0.1, "color": "#DAA520", "position": [0, 0.16, 0.25], "roughness": 0.5},
+                     {"shape": "cylinder", "radius": 0.04, "height": 0.06, "color": "#FFD700", "position": [0, 0.22, 0.25], "roughness": 0.25, "metalness": 0.3}
+                 ]},
+                {"type": "door", "width": 0.12, "height": 0.2, "color": "#6B4226", "roughness": 0.6},
+                {"type": "colonnade", "columns": 6, "style": "doric", "height": 0.3, "color": "#C8B070", "radius": 0.02, "roughness": 0.7}
+            ]
+        },
+        "basilica": {
+            "ref_w": 4.5, "ref_d": 3.6,
+            "components": [
+                {"type": "podium", "steps": 3, "height": 0.08, "color": "#C8B070", "roughness": 0.85},
+                {"type": "colonnade", "columns": 8, "style": "doric", "height": 0.35, "color": "#C8B070", "radius": 0.022, "roughness": 0.7},
+                {"type": "block", "stories": 2, "storyHeight": 0.25, "color": "#C8B070", "windows": 5, "windowColor": "#1A1008", "roughness": 0.7, "surface_detail": 0.4},
+                {"type": "flat_roof", "color": "#C4A77D", "overhang": 0.04},
+                {"type": "dome", "radius": 0.2, "color": "#F0F0F0", "roughness": 0.4}
+            ]
+        },
+        "gate": {
+            "ref_w": 2.7, "ref_d": 1.8,
+            "components": [
+                {"type": "podium", "steps": 2, "height": 0.06, "color": "#C8B070", "roughness": 0.8},
+                {"type": "procedural", "stack_role": "structural", "recipe": "gopuram_gate",
+                 "parts": [
+                     {"shape": "box", "width": 0.7, "height": 0.6, "depth": 0.3, "color": "#C8B070", "position": [0, 0, 0], "roughness": 0.75, "surface_detail": 0.55},
+                     {"shape": "box", "width": 0.6, "height": 0.4, "depth": 0.25, "color": "#CC3333", "position": [0, 0.5, 0], "roughness": 0.65},
+                     {"shape": "box", "width": 0.45, "height": 0.3, "depth": 0.2, "color": "#2E86AB", "position": [0, 0.8, 0], "roughness": 0.6},
+                     {"shape": "cylinder", "radius": 0.06, "height": 0.08, "color": "#FFD700", "position": [0, 1.0, 0], "roughness": 0.3, "metalness": 0.25}
+                 ]}
+            ]
+        }
+    },
+    "southeast_asian": {
+        "temple": {
+            "ref_w": 5.4, "ref_d": 5.4,
+            "components": [
+                {"type": "podium", "steps": 3, "height": 0.06, "color": "#808080", "roughness": 0.85, "surface_detail": 0.7},
+                {"type": "procedural", "stack_role": "foundation", "recipe": "temple_mountain_base",
+                 "parts": [
+                     {"shape": "box", "width": 0.9, "height": 0.2, "depth": 0.9, "color": "#808080", "position": [0, 0, 0], "roughness": 0.8, "surface_detail": 0.65},
+                     {"shape": "box", "width": 0.7, "height": 0.2, "depth": 0.7, "color": "#808080", "position": [0, 0.2, 0], "roughness": 0.75, "surface_detail": 0.6},
+                     {"shape": "box", "width": 0.5, "height": 0.2, "depth": 0.5, "color": "#808080", "position": [0, 0.4, 0], "roughness": 0.7, "surface_detail": 0.55}
+                 ]},
+                {"type": "procedural", "stack_role": "structural", "recipe": "prasat_tower",
+                 "parts": [
+                     {"shape": "box", "width": 0.3, "height": 0.4, "depth": 0.3, "color": "#A09880", "position": [0, 0.1, 0], "roughness": 0.7, "surface_detail": 0.6},
+                     {"shape": "cone", "radius": 0.18, "height": 0.3, "color": "#A09880", "position": [0, 0.5, 0], "roughness": 0.65},
+                     {"shape": "sphere", "radius": 0.05, "color": "#DAA520", "position": [0, 0.75, 0], "roughness": 0.3, "metalness": 0.2}
+                 ]},
+                {"type": "door", "width": 0.1, "height": 0.18, "color": "#4A4A4A", "roughness": 0.7}
+            ]
+        }
+    }
+}

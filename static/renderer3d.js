@@ -31,11 +31,13 @@ class WorldRenderer {
         dome: "roof",
         tiled_roof: "roof",
         flat_roof: "roof",
+        hipped_roof: "roof",
         vault: "roof",
         door: "decorative",
         pilasters: "decorative",
         awning: "decorative",
         battlements: "decorative",
+        staircase: "decorative",
         statue: "freestanding",
         fountain: "freestanding",
     };
@@ -47,6 +49,7 @@ class WorldRenderer {
         block: "_buildBlock",
         arcade: "_buildArcade",
         tiled_roof: "_buildTiledRoof",
+        hipped_roof: "_buildHippedRoof",
         atrium: "_buildAtrium",
         statue: "_buildStatue",
         fountain: "_buildFountain",
@@ -59,6 +62,7 @@ class WorldRenderer {
         flat_roof: "_buildFlatRoof",
         cella: "_buildCella",
         walls: "_buildWalls",
+        staircase: "_buildStaircase",
     };
 
     constructor(container) {
@@ -66,6 +70,8 @@ class WorldRenderer {
         this.grid = null;
         this.width = 0;
         this.height = 0;
+        this.minX = 0;
+        this.minY = 0;
         this.buildingGroups = new Map();
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
@@ -74,6 +80,8 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups = new Set();
+        // Spatial index: anchor key → footprint bounds (maintained on tile update)
+        this._anchorFootprints = new Map();
         /** @type {number[][]|null} Elevation samples at grid corners [j][i], 0..height × 0..width */
         this._cornerHeights = null;
         // Frustum culling (bounding spheres per building tile)
@@ -122,12 +130,12 @@ class WorldRenderer {
         this._terrainRoughnessMap = terrainDetail.roughnessMap;
         this._terrainNormalMap = terrainDetail.normalMap;
 
-        // Mediterranean lighting — balanced with IBL (scene.environment)
-        this.scene.add(new THREE.AmbientLight(0xfff5e6, 0.36));
+        // Dynamic lighting system — supports time-of-day via setTimeOfDay(0-1)
+        this._ambientLight = new THREE.AmbientLight(0xfff5e6, 0.36);
+        this.scene.add(this._ambientLight);
         const sun = new THREE.DirectionalLight(0xfff0d0, 0.92);
         sun.position.set(400, 500, 250);
         sun.castShadow = true;
-        // 2048² is a good balance for many buildings; raise if GPU-bound and quality-first
         sun.shadow.mapSize.set(2048, 2048);
         sun.shadow.normalBias = 0.028;
         sun.shadow.bias = -0.00065;
@@ -140,14 +148,16 @@ class WorldRenderer {
         sc.bottom = -1200;
         this.scene.add(sun);
         this._sunLight = sun;
-        this.scene.add(new THREE.HemisphereLight(0xa8d4f0, 0x7a6e52, 0.42));
-        const fillLight = new THREE.DirectionalLight(0xffd4a0, 0.1);
-        fillLight.position.set(-200, 50, -100);
-        this.scene.add(fillLight);
+        this._hemiLight = new THREE.HemisphereLight(0xa8d4f0, 0x7a6e52, 0.42);
+        this.scene.add(this._hemiLight);
+        this._fillLight = new THREE.DirectionalLight(0xffd4a0, 0.1);
+        this._fillLight.position.set(-200, 50, -100);
+        this.scene.add(this._fillLight);
         const rimLight = new THREE.DirectionalLight(0xe8e2f8, 0.13);
         rimLight.position.set(-380, 120, -420);
         rimLight.castShadow = false;
         this.scene.add(rimLight);
+        this._timeOfDay = 0.35; // Default: late morning
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
@@ -983,14 +993,17 @@ class WorldRenderer {
             for (let x = 0; x < this.width; x++) row.push({ ...emptyTile, x, y });
             this.grid.push(row);
         }
+        // Load world origin offset for growing worlds
+        this.minX = worldState.min_x || 0;
+        this.minY = worldState.min_y || 0;
+        this._anchorFootprints.clear();
         if (Array.isArray(worldState.tiles)) {
             for (const t of worldState.tiles) {
-                if (t.x >= 0 && t.y >= 0 && t.x < this.width && t.y < this.height)
+                if (t.x >= 0 && t.y >= 0 && t.x < this.width && t.y < this.height) {
                     this.grid[t.y][t.x] = t;
+                    this._updateAnchorIndex(t);
+                }
             }
-        } else if (Array.isArray(worldState.grid)) {
-            // Legacy dense grid format (backwards compat)
-            this.grid = worldState.grid;
         }
         const S = TILE_SIZE;
         this._cornerHeights = this._computeCornerHeightGrid();
@@ -1104,6 +1117,17 @@ class WorldRenderer {
 
     updateTiles(tiles) {
         if (!this.grid) return;
+        // Auto-expand grid if tiles arrive outside current bounds
+        let needsExpand = false;
+        let newW = this.width, newH = this.height;
+        for (const tile of tiles) {
+            if (tile.x >= newW) { newW = tile.x + 1; needsExpand = true; }
+            if (tile.y >= newH) { newH = tile.y + 1; needsExpand = true; }
+        }
+        if (needsExpand) {
+            this._expandGrid(newW, newH);
+        }
+
         // Recompute terrain heightfield with new tile elevations so buildings sit on ground
         let heightsDirty = false;
         for (const tile of tiles) {
@@ -1111,12 +1135,16 @@ class WorldRenderer {
                 const old = this.grid[tile.y][tile.x];
                 if (old.elevation !== tile.elevation) heightsDirty = true;
                 this.grid[tile.y][tile.x] = tile;
+                this._updateAnchorIndex(tile);  // Maintain spatial index
                 if (tile.terrain && tile.terrain !== "empty") {
                     const anchor = tile.spec && tile.spec.anchor;
                     if (anchor && (tile.x !== anchor.x || tile.y !== anchor.y)) {
-                        // Secondary tile updated — re-render via anchor
-                        if (anchor.y < this.height && anchor.x < this.width)
-                            this._buildFromSpec(this.grid[anchor.y][anchor.x], true);
+                        if (anchor.y < this.height && anchor.x < this.width) {
+                            const anchorTile = this.grid[anchor.y][anchor.x];
+                            if (anchorTile && anchorTile.terrain && anchorTile.terrain !== "empty") {
+                                this._buildFromSpec(anchorTile, true);
+                            }
+                        }
                     } else {
                         this._buildFromSpec(tile, true);
                     }
@@ -1147,19 +1175,63 @@ class WorldRenderer {
     // MULTI-TILE SUPPORT
     // ═══════════════════════════════════════════════
 
+    // O(1) anchor footprint lookup — maintained via _updateAnchorIndex on every tile update
     _getAnchorFootprint(anchor) {
-        let minX = anchor.x, maxX = anchor.x, minY = anchor.y, maxY = anchor.y;
-        for (let y = 0; y < this.height; y++)
-            for (let x = 0; x < this.width; x++) {
-                const a = this.grid[y][x].spec && this.grid[y][x].spec.anchor;
-                if (a && a.x === anchor.x && a.y === anchor.y) {
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
+        const key = `${anchor.x},${anchor.y}`;
+        return this._anchorFootprints.get(key)
+            || { minX: anchor.x, maxX: anchor.x, minY: anchor.y, maxY: anchor.y };
+    }
+
+    // Dynamically expand the dense grid to accommodate tiles beyond current bounds.
+    // Preserves all existing tile data and building groups.
+    _expandGrid(newWidth, newHeight) {
+        const emptyTile = { terrain: "empty", elevation: 0 };
+        const oldW = this.width, oldH = this.height;
+        // Extend existing rows
+        for (let y = 0; y < oldH; y++) {
+            for (let x = oldW; x < newWidth; x++) {
+                this.grid[y].push({ ...emptyTile, x, y });
+            }
+        }
+        // Add new rows
+        for (let y = oldH; y < newHeight; y++) {
+            const row = [];
+            for (let x = 0; x < newWidth; x++) row.push({ ...emptyTile, x, y });
+            this.grid.push(row);
+        }
+        this.width = newWidth;
+        this.height = newHeight;
+        // Rebuild terrain heightfield for the expanded area
+        this._cornerHeights = this._computeCornerHeightGrid();
+        // Rebuild terrain mesh to cover new area
+        if (this._terrainMesh) {
+            this.scene.remove(this._terrainMesh);
+            this._terrainMesh.geometry.dispose();
+            const S = TILE_SIZE;
+            let minH = 0, maxH = 0;
+            for (const row of this._cornerHeights) {
+                for (const v of row) {
+                    if (v < minH) minH = v;
+                    if (v > maxH) maxH = v;
                 }
             }
-        return { minX, maxX, minY, maxY };
+            this._terrainMesh = this._buildTerrainHeightfieldMesh(S, 0x9a7b52, minH, maxH);
+            this.scene.add(this._terrainMesh);
+        }
+        console.log(`Grid expanded: ${oldW}×${oldH} → ${newWidth}×${newHeight}`);
+    }
+
+    _updateAnchorIndex(tile) {
+        const anchor = tile.spec && tile.spec.anchor;
+        if (!anchor) return;
+        const key = `${anchor.x},${anchor.y}`;
+        const fp = this._anchorFootprints.get(key)
+            || { minX: anchor.x, maxX: anchor.x, minY: anchor.y, maxY: anchor.y };
+        fp.minX = Math.min(fp.minX, tile.x);
+        fp.maxX = Math.max(fp.maxX, tile.x);
+        fp.minY = Math.min(fp.minY, tile.y);
+        fp.maxY = Math.max(fp.maxY, tile.y);
+        this._anchorFootprints.set(key, fp);
     }
 
     _tileAt(gridX, gridY) {
@@ -1594,6 +1666,14 @@ class WorldRenderer {
                 this._emitRenderError(err, tile, key);
                 return { ok: false, error: err, key };
             }
+            // Per-instance deterministic variation — same-type buildings differ in
+            // colors, stories, windows, column counts, heights. Stable per tile.
+            const anchorKey = spec.anchor
+                ? spec.anchor.x * 73856093 + spec.anchor.y * 19349663
+                : tile.x * 73856093 + tile.y * 19349663;
+            resolvedComponents = this._applyInstanceVariation(
+                resolvedComponents, anchorKey, tile.building_type
+            );
         }
 
         // The terrain heightfield already creates flat platforms under buildings
@@ -1646,13 +1726,24 @@ class WorldRenderer {
 
         group.traverse((c) => {
             if (c.isMesh) {
-                c.receiveShadow = true;
                 c.userData.tile = tile;
-                if (c.geometry && c.geometry.boundingSphere) {
-                    c.geometry.computeBoundingSphere();
-                    c.castShadow = c.geometry.boundingSphere.radius > 0.05;
+                // Skip shadow casting for tiny meshes, water, and Phase 4 decoration
+                const isWater = c.userData && c.userData.isWater;
+                const isPhase4 = c.userData && c.userData.phase4Decor;
+                if (isWater) {
+                    c.castShadow = false;
+                    c.receiveShadow = false;
+                } else if (isPhase4) {
+                    c.castShadow = false;
+                    c.receiveShadow = true;
                 } else {
-                    c.castShadow = true;
+                    c.receiveShadow = true;
+                    if (c.geometry && c.geometry.boundingSphere) {
+                        c.geometry.computeBoundingSphere();
+                        c.castShadow = c.geometry.boundingSphere.radius > 0.04;
+                    } else {
+                        c.castShadow = true;
+                    }
                 }
             }
         });
@@ -2222,23 +2313,30 @@ class WorldRenderer {
                 maxTop = Math.max(maxTop, anchorY + py + th);
                 mesh = null;
             } else if (p.shape === "colonnade_ring") {
-                // Compound: ring of columns (peristyle, Buddhist stupa railing, chhatri)
-                // params: radius, height, column_count, column_radius, color
+                // Compound: ring of columns using InstancedMesh (1 draw call instead of N)
                 const ringR = Number(p.radius || 0.2);
                 const ringH = Number(p.height || 0.3);
                 const nCols = Math.max(4, Math.min(24, Math.round(p.column_count || 8)));
                 const colR = Number(p.column_radius || 0.012);
+                const colGeom = new THREE.CylinderGeometry(colR, colR * 1.1, ringH, 6);
+                const colInst = new THREE.InstancedMesh(colGeom, mat, nCols);
+                colInst.castShadow = true;
+                colInst.receiveShadow = true;
+                const ringDummy = this._instDummy;
                 for (let ci = 0; ci < nCols; ci++) {
                     const angle = (ci / nCols) * Math.PI * 2;
-                    const cx = px + Math.cos(angle) * ringR;
-                    const cz = pz + Math.sin(angle) * ringR;
-                    const col = new THREE.Mesh(
-                        new THREE.CylinderGeometry(colR, colR * 1.1, ringH, 6), mat
+                    ringDummy.position.set(
+                        px + Math.cos(angle) * ringR,
+                        anchorY + py + ringH / 2,
+                        pz + Math.sin(angle) * ringR
                     );
-                    col.position.set(cx, anchorY + py + ringH / 2, cz);
-                    col.castShadow = true;
-                    group.add(col);
+                    ringDummy.rotation.set(0, 0, 0);
+                    ringDummy.scale.set(1, 1, 1);
+                    ringDummy.updateMatrix();
+                    colInst.setMatrixAt(ci, ringDummy.matrix);
                 }
+                colInst.instanceMatrix.needsUpdate = true;
+                group.add(colInst);
                 // Beam ring on top
                 const beam = new THREE.Mesh(
                     new THREE.TorusGeometry(ringR, colR * 1.5, 6, nCols), mat
@@ -2303,6 +2401,265 @@ class WorldRenderer {
                 lintel.position.set(px, anchorY + py + ah * 0.75 + archR, pz);
                 lintel.castShadow = true; group.add(lintel);
                 maxTop = Math.max(maxTop, anchorY + py + ah);
+                mesh = null;
+            } else if (p.shape === "barrel_roof") {
+                // Curved barrel/semicircular roof — like Roman baths or vaulted ceilings
+                // params: width, depth, height, segments
+                const bw = Number(p.width || w * 0.9);
+                const bd = Number(p.depth || d * 0.9);
+                const bh = Number(p.height || bw * 0.3);
+                const segs = capSeg(p.segments ?? 12, 6, 24);
+                // Build from triangle strips (half-cylinder)
+                const positions = [];
+                for (let si = 0; si < segs; si++) {
+                    const a0 = (si / segs) * Math.PI;
+                    const a1 = ((si + 1) / segs) * Math.PI;
+                    const x0 = Math.cos(a0) * bw / 2, y0 = Math.sin(a0) * bh;
+                    const x1 = Math.cos(a1) * bw / 2, y1 = Math.sin(a1) * bh;
+                    // Front and back triangles for this strip
+                    positions.push(
+                        x0, y0, -bd / 2,  x1, y1, -bd / 2,  x1, y1, bd / 2,
+                        x0, y0, -bd / 2,  x1, y1, bd / 2,   x0, y0, bd / 2
+                    );
+                }
+                // End caps (semicircles)
+                for (const zSide of [-bd / 2, bd / 2]) {
+                    for (let si = 0; si < segs; si++) {
+                        const a0 = (si / segs) * Math.PI;
+                        const a1 = ((si + 1) / segs) * Math.PI;
+                        const sign = zSide < 0 ? 1 : -1;
+                        positions.push(
+                            0, 0, zSide,
+                            Math.cos(a0 * sign + (sign < 0 ? 0 : Math.PI)) * bw / 2 * sign, Math.sin(a0) * bh, zSide,
+                            Math.cos(a1 * sign + (sign < 0 ? 0 : Math.PI)) * bw / 2 * sign, Math.sin(a1) * bh, zSide
+                        );
+                    }
+                }
+                const brGeo = new THREE.BufferGeometry();
+                brGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+                brGeo.computeVertexNormals();
+                mesh = new THREE.Mesh(brGeo, mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + bh);
+            } else if (p.shape === "buttress") {
+                // External triangular support wall
+                // params: width, height, depth (projection), side: left|right|front|back
+                const bw = Number(p.width || 0.04);
+                const bh = Number(p.height || 0.3);
+                const bd = Number(p.depth || 0.08);
+                // Triangular profile: box that tapers from full depth at base to zero at top
+                const verts = new Float32Array([
+                    // Front face (triangle)
+                    -bw/2, 0, 0,   bw/2, 0, 0,   bw/2, 0, -bd,
+                    -bw/2, 0, 0,   bw/2, 0, -bd,  -bw/2, 0, -bd,
+                    // Top face (triangle)
+                    -bw/2, bh, 0,   bw/2, bh, 0,   bw/2, 0, -bd,
+                    -bw/2, bh, 0,   bw/2, 0, -bd,  -bw/2, 0, -bd,
+                    // Side faces
+                    -bw/2, 0, 0,   -bw/2, bh, 0,  -bw/2, 0, -bd,
+                     bw/2, 0, 0,    bw/2, 0, -bd,   bw/2, bh, 0,
+                ]);
+                const bGeo = new THREE.BufferGeometry();
+                bGeo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+                bGeo.computeVertexNormals();
+                mesh = new THREE.Mesh(bGeo, mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + bh);
+            } else if (p.shape === "apse") {
+                // Semicircular extension (church/temple apse)
+                // params: radius, height, segments
+                const ar = Number(p.radius || 0.15);
+                const ah = Number(p.height || 0.3);
+                const asegs = capSeg(p.segments ?? 12, 6, 24);
+                // Half-cylinder (open on one side)
+                const apseMesh = new THREE.Mesh(
+                    new THREE.CylinderGeometry(ar, ar, ah, asegs, 1, true, 0, Math.PI),
+                    mat
+                );
+                apseMesh.position.set(px, anchorY + py + ah / 2, pz);
+                apseMesh.castShadow = true;
+                group.add(apseMesh);
+                // Half-dome cap
+                const domeMesh = new THREE.Mesh(
+                    new THREE.SphereGeometry(ar, asegs, 8, 0, Math.PI, 0, Math.PI / 2),
+                    mat
+                );
+                domeMesh.position.set(px, anchorY + py + ah, pz);
+                domeMesh.castShadow = true;
+                group.add(domeMesh);
+                maxTop = Math.max(maxTop, anchorY + py + ah + ar * 0.5);
+                mesh = null;
+            } else if (p.shape === "tower") {
+                // Tall narrow structure with a conical/pyramidal cap
+                // params: base_width, base_depth, height, cap_height, cap_style (cone|pyramid|dome)
+                const tw = Number(p.base_width || p.width || 0.12);
+                const td = Number(p.base_depth || p.depth || tw);
+                const th = Number(p.height || 0.6);
+                const capH = Number(p.cap_height || th * 0.15);
+                const capStyle = p.cap_style || "cone";
+                // Tower shaft
+                const shaft = new THREE.Mesh(
+                    new THREE.BoxGeometry(tw, th - capH, td), mat
+                );
+                shaft.position.set(px, anchorY + py + (th - capH) / 2, pz);
+                shaft.castShadow = true;
+                group.add(shaft);
+                // Cap
+                let capMesh;
+                if (capStyle === "dome") {
+                    capMesh = new THREE.Mesh(
+                        new THREE.SphereGeometry(Math.max(tw, td) / 2, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+                        mat
+                    );
+                } else if (capStyle === "pyramid") {
+                    capMesh = new THREE.Mesh(
+                        new THREE.ConeGeometry(Math.max(tw, td) * 0.6, capH, 4), mat
+                    );
+                    capMesh.rotation.y = Math.PI / 4;
+                } else {
+                    capMesh = new THREE.Mesh(
+                        new THREE.ConeGeometry(Math.max(tw, td) * 0.55, capH, 8), mat
+                    );
+                }
+                capMesh.position.set(px, anchorY + py + th - capH / 2, pz);
+                capMesh.castShadow = true;
+                group.add(capMesh);
+                maxTop = Math.max(maxTop, anchorY + py + th);
+                mesh = null;
+            } else if (p.shape === "shed_roof") {
+                // Single-slope lean-to roof — common on workshops, additions
+                // params: width, depth, height_high, height_low
+                const srw = Number(p.width || w * 0.9);
+                const srd = Number(p.depth || d * 0.9);
+                const hHigh = Number(p.height_high || 0.15);
+                const hLow = Number(p.height_low || 0.04);
+                const srVerts = new Float32Array([
+                    // Top surface (quad as 2 triangles)
+                    -srw/2, hHigh, -srd/2,   srw/2, hHigh, -srd/2,   srw/2, hLow, srd/2,
+                    -srw/2, hHigh, -srd/2,   srw/2, hLow, srd/2,    -srw/2, hLow, srd/2,
+                    // High side (front gable)
+                    -srw/2, 0, -srd/2,       srw/2, 0, -srd/2,       srw/2, hHigh, -srd/2,
+                    -srw/2, 0, -srd/2,       srw/2, hHigh, -srd/2,  -srw/2, hHigh, -srd/2,
+                    // Low side (back)
+                    -srw/2, 0, srd/2,        -srw/2, hLow, srd/2,    srw/2, hLow, srd/2,
+                    -srw/2, 0, srd/2,         srw/2, hLow, srd/2,    srw/2, 0, srd/2,
+                    // Left gable
+                    -srw/2, 0, -srd/2,  -srw/2, hHigh, -srd/2,  -srw/2, hLow, srd/2,
+                    -srw/2, 0, -srd/2,  -srw/2, hLow, srd/2,    -srw/2, 0, srd/2,
+                    // Right gable
+                     srw/2, 0, -srd/2,   srw/2, hLow, srd/2,     srw/2, hHigh, -srd/2,
+                     srw/2, 0, -srd/2,   srw/2, 0, srd/2,        srw/2, hLow, srd/2,
+                ]);
+                const srGeo = new THREE.BufferGeometry();
+                srGeo.setAttribute("position", new THREE.BufferAttribute(srVerts, 3));
+                srGeo.computeVertexNormals();
+                mesh = new THREE.Mesh(srGeo, mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + hHigh);
+            } else if (p.shape === "balustrade") {
+                // Railing with balusters — for terraces, parapets, galleries
+                // params: width, height, baluster_count, baluster_radius
+                const brw = Number(p.width || 0.5);
+                const brh = Number(p.height || 0.08);
+                const nBal = Math.max(3, Math.min(20, Math.round(p.baluster_count || 6)));
+                const bRad = Number(p.baluster_radius || 0.008);
+                const spacing = brw / (nBal + 1);
+                for (let bi = 0; bi < nBal; bi++) {
+                    const bx = px - brw / 2 + spacing * (bi + 1);
+                    const bal = new THREE.Mesh(
+                        new THREE.CylinderGeometry(bRad, bRad * 1.15, brh, 6), mat
+                    );
+                    bal.position.set(bx, anchorY + py + brh / 2, pz);
+                    bal.castShadow = true;
+                    group.add(bal);
+                }
+                // Top rail
+                const rail = new THREE.Mesh(
+                    new THREE.BoxGeometry(brw + 0.02, bRad * 2, bRad * 3), mat
+                );
+                rail.position.set(px, anchorY + py + brh, pz);
+                rail.castShadow = true;
+                group.add(rail);
+                // Bottom rail
+                const bRail = new THREE.Mesh(
+                    new THREE.BoxGeometry(brw + 0.01, bRad * 1.5, bRad * 2.5), mat
+                );
+                bRail.position.set(px, anchorY + py + brh * 0.1, pz);
+                group.add(bRail);
+                maxTop = Math.max(maxTop, anchorY + py + brh);
+                mesh = null;
+            } else if (p.shape === "hemisphere") {
+                // Explicit half-sphere (igloos, stupas, domes, beehive huts)
+                // params: radius, segments
+                const hr = Number(p.radius || 0.2);
+                const hsegs = capSeg(p.segments ?? 16, 8, 32);
+                mesh = new THREE.Mesh(
+                    new THREE.SphereGeometry(hr, hsegs, hsegs / 2, 0, Math.PI * 2, 0, Math.PI / 2),
+                    mat
+                );
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + hr);
+            } else if (p.shape === "platform") {
+                // Raised platform on stilts (stilt houses, palafitos, granaries)
+                // params: width, depth, height, stilt_count, stilt_radius
+                const plW = Number(p.width || 0.5);
+                const plD = Number(p.depth || 0.5);
+                const plH = Number(p.height || 0.3);
+                const nStilts = Math.max(4, Math.min(12, Math.round(p.stilt_count || 4)));
+                const stR = Number(p.stilt_radius || 0.015);
+                // Platform deck
+                const deck = new THREE.Mesh(
+                    new THREE.BoxGeometry(plW, 0.025, plD), mat
+                );
+                deck.position.set(px, anchorY + py + plH, pz);
+                deck.castShadow = true;
+                group.add(deck);
+                // Stilts — distributed in a grid pattern
+                const cols = Math.ceil(Math.sqrt(nStilts));
+                const rows = Math.ceil(nStilts / cols);
+                for (let si = 0; si < nStilts; si++) {
+                    const col = si % cols;
+                    const row = Math.floor(si / cols);
+                    const sx = px - plW / 2 + (plW / (cols + 1)) * (col + 1);
+                    const sz = pz - plD / 2 + (plD / (rows + 1)) * (row + 1);
+                    const stilt = new THREE.Mesh(
+                        new THREE.CylinderGeometry(stR, stR * 1.2, plH, 6), mat
+                    );
+                    stilt.position.set(sx, anchorY + py + plH / 2, sz);
+                    stilt.castShadow = true;
+                    group.add(stilt);
+                }
+                maxTop = Math.max(maxTop, anchorY + py + plH + 0.025);
+                mesh = null;
+            } else if (p.shape === "lattice_screen") {
+                // Perforated wall (jali, mashrabiya, Roman cancellum)
+                // params: width, height, depth, grid_x, grid_y
+                const lw = Number(p.width || 0.3);
+                const lh = Number(p.height || 0.25);
+                const ld = Number(p.depth || 0.015);
+                const gx = Math.max(2, Math.min(10, Math.round(p.grid_x || 4)));
+                const gy = Math.max(2, Math.min(10, Math.round(p.grid_y || 5)));
+                const cellW = lw / gx;
+                const cellH = lh / gy;
+                const barW = cellW * 0.25;
+                const barH = cellH * 0.25;
+                // Horizontal bars
+                for (let yi = 0; yi <= gy; yi++) {
+                    const bar = new THREE.Mesh(
+                        new THREE.BoxGeometry(lw, barH, ld), mat
+                    );
+                    bar.position.set(px, anchorY + py + yi * cellH, pz);
+                    group.add(bar);
+                }
+                // Vertical bars
+                for (let xi = 0; xi <= gx; xi++) {
+                    const bar = new THREE.Mesh(
+                        new THREE.BoxGeometry(barW, lh, ld), mat
+                    );
+                    bar.position.set(px - lw / 2 + xi * cellW, anchorY + py + lh / 2, pz);
+                    group.add(bar);
+                }
+                maxTop = Math.max(maxTop, anchorY + py + lh);
                 mesh = null;
             } else {
                 throw new Error(`procedural.parts[${i}]: unknown shape ${JSON.stringify(p.shape)}`);
@@ -2374,23 +2731,206 @@ class WorldRenderer {
         }
     }
 
-    // Stepped platform
+    // Deterministic per-building variation — jitters colors AND structural numbers
+    // so same-type buildings don't look identical. Keyed on anchor hash (stable).
+    _applyInstanceVariation(components, seed, buildingType) {
+        // LCG producing a stable sequence of numbers in [0, 1) from seed.
+        let s = (seed | 0) >>> 0;
+        const rand = () => {
+            s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+            return s / 0xFFFFFFFF;
+        };
+        const rAsym = () => rand() * 2 - 1;           // [-1, 1)
+        const jitterInt = (v, amount) => {
+            if (!Number.isFinite(v)) return v;
+            const delta = Math.round(rAsym() * amount);
+            return Math.max(1, v + delta);
+        };
+        const jitterFloat = (v, frac) => {
+            if (!Number.isFinite(v)) return v;
+            return Math.max(0.001, v * (1 + rAsym() * frac));
+        };
+        // Per-building uniform color shift — aggressive to make buildings visibly distinct
+        // All hex colors shifted together so the building feels like one palette.
+        const lightShift = rAsym() * 0.28;     // ±28% lightness (was ±14%)
+        const hueShift = rAsym() * 0.055;      // ±20° (was ±8°)
+        const satShift = rAsym() * 0.22;       // ±22% saturation (was ±12%)
+
+        const tmpColor = new THREE.Color();
+        const jitterHex = (hex) => {
+            if (typeof hex !== "string" || !/^#[0-9a-fA-F]{6}$/.test(hex)) return hex;
+            tmpColor.set(hex);
+            const hsl = { h: 0, s: 0, l: 0 };
+            tmpColor.getHSL(hsl);
+            hsl.h = (hsl.h + hueShift + 1) % 1;
+            hsl.s = Math.max(0, Math.min(1, hsl.s + satShift));
+            hsl.l = Math.max(0.05, Math.min(0.95, hsl.l + lightShift));
+            tmpColor.setHSL(hsl.h, hsl.s, hsl.l);
+            return "#" + tmpColor.getHexString();
+        };
+
+        // Whether this building-type allows columns (sacred/civic only).
+        // Utilitarian types get colonnade/pediment STRIPPED even if the AI emits them.
+        const btype = (buildingType || "").toLowerCase();
+        const SACRED_OR_CIVIC = new Set(["temple", "basilica", "monument", "stoa"]);
+        const stripColumns = btype && !SACRED_OR_CIVIC.has(btype)
+            && !btype.includes("temple") && !btype.includes("forum");
+
+        const out = [];
+        for (const c of components) {
+            if (!c || typeof c !== "object") { out.push(c); continue; }
+            const type = String(c.type || "").toLowerCase();
+
+            // Enforce building-type rules — drop components that don't belong
+            if (stripColumns && (type === "colonnade" || type === "pediment")) {
+                continue;
+            }
+
+            const clone = Object.assign({}, c);
+
+            // Jitter color fields
+            for (const key of ["color", "pedestalColor", "windowColor", "postColor",
+                               "architraveColor", "corniceColor", "gableColor",
+                               "parapetColor", "trimColor", "frameColor"]) {
+                if (typeof clone[key] === "string") clone[key] = jitterHex(clone[key]);
+            }
+
+            // STRUCTURAL jitter — per-component-type
+            if (type === "block") {
+                if (Number.isFinite(clone.stories)) clone.stories = jitterInt(clone.stories, 1);
+                if (Number.isFinite(clone.windows)) clone.windows = jitterInt(clone.windows, 2);
+                if (Number.isFinite(clone.storyHeight)) clone.storyHeight = jitterFloat(clone.storyHeight, 0.12);
+                // Variant selector for visual diversity — 7 different facade treatments
+                const variants = ["plain", "arched_windows", "articulated", "tabernae_ground", "balconies", "courtyard", "overhang"];
+                clone._variant = variants[Math.floor(rand() * variants.length)];
+                // Rustication on base floor
+                clone._rusticated = rand() < 0.35;
+                // Which story gets a balcony (if balconies variant)
+                clone._balconyStory = Math.max(1, Math.floor(rand() * 3) + 1);
+                // Overhang amount (upper stories project beyond ground floor)
+                clone._overhangAmount = 0.02 + rand() * 0.03;
+                // Window shutters (40% of buildings get shutters — adds huge visual variety)
+                clone._hasShutters = rand() < 0.40;
+                // Chimney (25% chance for non-temple utilitarian buildings)
+                clone._hasChimney = stripColumns && rand() < 0.25;
+            } else if (type === "colonnade") {
+                if (Number.isFinite(clone.columns)) {
+                    clone.columns = Math.max(4, jitterInt(clone.columns, 2));
+                }
+                if (Number.isFinite(clone.height)) clone.height = jitterFloat(clone.height, 0.08);
+            } else if (type === "podium") {
+                if (Number.isFinite(clone.steps)) clone.steps = Math.max(1, jitterInt(clone.steps, 1));
+                if (Number.isFinite(clone.height)) clone.height = jitterFloat(clone.height, 0.1);
+            } else if (type === "arcade") {
+                if (Number.isFinite(clone.arches)) clone.arches = Math.max(1, jitterInt(clone.arches, 1));
+                if (Number.isFinite(clone.height)) clone.height = jitterFloat(clone.height, 0.08);
+            } else if (type === "pilasters") {
+                if (Number.isFinite(clone.count)) clone.count = Math.max(2, jitterInt(clone.count, 1));
+            } else if (type === "tiled_roof" || type === "pediment" || type === "flat_roof" || type === "dome" || type === "hipped_roof") {
+                if (Number.isFinite(clone.height)) clone.height = jitterFloat(clone.height, 0.1);
+                if (Number.isFinite(clone.radius)) clone.radius = jitterFloat(clone.radius, 0.08);
+                // For non-temple utilitarian/residential buildings, 35% chance to swap
+                // tiled_roof → hipped_roof for skyline diversity.
+                if (type === "tiled_roof" && stripColumns && rand() < 0.35) {
+                    clone.type = "hipped_roof";
+                }
+            } else if (type === "walls") {
+                if (Number.isFinite(clone.height)) clone.height = jitterFloat(clone.height, 0.1);
+            }
+
+            // Jitter roughness/surface_detail for material variety
+            if (Number.isFinite(clone.roughness)) {
+                clone.roughness = Math.max(0.05, Math.min(0.98, clone.roughness + rAsym() * 0.08));
+            }
+            if (Number.isFinite(clone.surface_detail)) {
+                clone.surface_detail = Math.max(0, Math.min(1, clone.surface_detail + rAsym() * 0.08));
+            }
+
+            // Recursively jitter procedural parts (colors only — positions would break layout)
+            if (Array.isArray(clone.parts)) {
+                clone.parts = clone.parts.map((p) => {
+                    if (!p || typeof p !== "object") return p;
+                    const pClone = Object.assign({}, p);
+                    if (typeof pClone.color === "string") pClone.color = jitterHex(pClone.color);
+                    return pClone;
+                });
+            }
+            out.push(clone);
+        }
+
+        // Auto-inject staircase onto insulae/residential buildings (30% chance)
+        // This adds external stairs on the side for accessing upper floors.
+        if (stripColumns && rand() < 0.30) {
+            const hasBlock = out.some(c => c.type === "block" && (c.stories || 2) >= 2);
+            if (hasBlock) {
+                const block = out.find(c => c.type === "block");
+                out.push({
+                    type: "staircase",
+                    height: (block.stories || 2) * (block.storyHeight || 0.3) * 0.7,
+                    color: jitterHex("#808080"),
+                    side: rand() < 0.5 ? "left" : "right",
+                    stack_role: "decorative",
+                });
+            }
+        }
+        return out;
+    }
+
+    // Fluted column shaft — classical Greek/Roman detail
+    // Applies a cosine wave to the radius around the circumference to create vertical flutes.
+    _buildFlutedShaftGeometry(rTop, rBot, h, segments, flutes, fluteDepth) {
+        const geom = new THREE.CylinderGeometry(rTop, rBot, h, segments);
+        const pos = geom.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i);
+            const z = pos.getZ(i);
+            const theta = Math.atan2(z, x);
+            const r = Math.hypot(x, z);
+            if (r < 0.0001) continue;
+            // cos(flutes * theta): +1 at fillets (ridges between flutes), -1 at flute valleys
+            // We want the radius to dip slightly at the flute valleys:
+            const wave = Math.cos(flutes * theta);
+            const newR = r - fluteDepth * (1 - wave) * 0.5;
+            pos.setX(i, Math.cos(theta) * newR);
+            pos.setZ(i, Math.sin(theta) * newR);
+        }
+        geom.computeVertexNormals();
+        return geom;
+    }
+
+    // Stepped platform with edge moldings
     _buildPodium(group, comp, baseY, w, d) {
         const steps = comp.steps || 3;
         const totalH = comp.height || steps * 0.06;
         const stepH = totalH / steps;
         const color = comp.color || "#c8b88a";
+        const mat = this._matPBR(comp, color, 0.75);
+        const topMat = this._matPBR(comp, color, 0.65);
 
+        // Top molding is drawn slightly darker/lighter for contrast
         for (let i = 0; i < steps; i++) {
             const shrink = (i / steps) * 0.08;
             const step = new THREE.Mesh(
                 new THREE.BoxGeometry(w - shrink, stepH, d - shrink),
-                this._matPBR(comp, color, 0.75)
+                i === steps - 1 ? topMat : mat
             );
             step.position.y = baseY + i * stepH + stepH / 2;
             group.add(step);
         }
-        return baseY + totalH;
+
+        // Top crown molding (small projecting lip at the top — defines the podium cap)
+        const crownH = Math.min(0.015, stepH * 0.3);
+        const lastShrink = ((steps - 1) / steps) * 0.08;
+        const crownW = w - lastShrink + 0.012;
+        const crownD = d - lastShrink + 0.012;
+        const crown = new THREE.Mesh(
+            new THREE.BoxGeometry(crownW, crownH, crownD),
+            topMat
+        );
+        crown.position.y = baseY + totalH + crownH / 2;
+        group.add(crown);
+
+        return baseY + totalH + crownH;
     }
 
     // Columns with capitals/bases arranged by style
@@ -2441,9 +2981,14 @@ class WorldRenderer {
         }
 
         const n = positions.length;
-        // Cap segments: very thin columns need few; thick columns cap at 28 for GPU cost
-        const shaftSegs = Math.min(28, Math.max(8, Math.round(r * 200)));
-        const shaftGeom = new THREE.CylinderGeometry(r * 0.83, r, colH, shaftSegs);
+        // Cap segments: very thin columns need few; thick columns cap at 48 for GPU cost
+        // Higher segment count is needed for fluting
+        const shaftSegs = Math.min(48, Math.max(12, Math.round(r * 300)));
+        // Number of flutes: Doric=20, Ionic/Corinthian=24 (historical standard)
+        const numFlutes = style === "doric" ? 20 : 24;
+        // Flute depth as fraction of radius (shallow grooves)
+        const fluteDepth = r * 0.06;
+        const shaftGeom = this._buildFlutedShaftGeometry(r * 0.83, r, colH, shaftSegs, numFlutes, fluteDepth);
         const shaftMat = this._matPBR(Object.assign({}, comp, { roughness: shaftR, metalness: pbrM }), color, shaftR, pbrM);
         const shaftInst = new THREE.InstancedMesh(shaftGeom, shaftMat, n);
         shaftInst.castShadow = true;
@@ -2531,32 +3076,63 @@ class WorldRenderer {
         // Vitruvian pediment: rise = 1/5 of width (~11 degrees)
         const peakH = comp.height || Math.min(w * 0.2, 0.2);
         const color = comp.color || "#d4a373";
+        // Architrave band (horizontal entablature below the pediment)
+        const archH = peakH * 0.28;
+        const archMat = this._matPBR(comp, comp.architraveColor || color, 0.7);
+        const architrave = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.04, archH, d + 0.04),
+            archMat
+        );
+        architrave.position.set(0, baseY + archH / 2, 0);
+        group.add(architrave);
+
+        const pedBaseY = baseY + archH;
         const hw = w / 2, hd = d / 2;
 
         // Gabled roof: ridge runs along Z, slopes on left/right, gables on front/back
         const verts = new Float32Array([
             // Left slope (two triangles)
-            -hw, baseY, -hd,   -hw, baseY, hd,   0, baseY + peakH, hd,
-            -hw, baseY, -hd,   0, baseY + peakH, hd,   0, baseY + peakH, -hd,
+            -hw, pedBaseY, -hd,   -hw, pedBaseY, hd,   0, pedBaseY + peakH, hd,
+            -hw, pedBaseY, -hd,   0, pedBaseY + peakH, hd,   0, pedBaseY + peakH, -hd,
             // Right slope (two triangles)
-            hw, baseY, hd,   hw, baseY, -hd,   0, baseY + peakH, -hd,
-            hw, baseY, hd,   0, baseY + peakH, -hd,   0, baseY + peakH, hd,
-            // Front gable
-            -hw, baseY, -hd,   0, baseY + peakH, -hd,   hw, baseY, -hd,
+            hw, pedBaseY, hd,   hw, pedBaseY, -hd,   0, pedBaseY + peakH, -hd,
+            hw, pedBaseY, hd,   0, pedBaseY + peakH, -hd,   0, pedBaseY + peakH, hd,
+            // Front gable (tympanum — the decorative triangle)
+            -hw, pedBaseY, -hd,   0, pedBaseY + peakH, -hd,   hw, pedBaseY, -hd,
             // Back gable
-            hw, baseY, hd,   0, baseY + peakH, hd,   -hw, baseY, hd,
+            hw, pedBaseY, hd,   0, pedBaseY + peakH, hd,   -hw, pedBaseY, hd,
         ]);
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
         geo.computeVertexNormals();
-        group.add(new THREE.Mesh(geo, this._matPBR(comp, color, 0.65)));
+        const roofMat = this._matPBR(comp, color, 0.65);
+        group.add(new THREE.Mesh(geo, roofMat));
 
-        // Ridge beam
-        const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, d + 0.02), this._matPBR(comp, color, 0.65));
-        ridge.position.set(0, baseY + peakH, 0);
+        // Raking cornices along both slope edges (front gable)
+        const slopeLen = Math.hypot(peakH, hw);
+        const slopeAngleZ = Math.atan2(peakH, hw);
+        const corniceMat = this._matPBR(comp, comp.corniceColor || color, 0.6);
+        for (const xSide of [-1, 1]) {
+            for (const zSide of [-1, 1]) {
+                const rc = new THREE.Mesh(
+                    new THREE.BoxGeometry(slopeLen + 0.02, 0.025, 0.035),
+                    corniceMat
+                );
+                rc.position.set(xSide * hw / 2, pedBaseY + peakH / 2, zSide * (hd + 0.01));
+                rc.rotation.z = -xSide * slopeAngleZ;
+                group.add(rc);
+            }
+        }
+
+        // Ridge beam along the peak (Z direction)
+        const ridge = new THREE.Mesh(
+            new THREE.BoxGeometry(0.035, 0.035, d + 0.06),
+            corniceMat
+        );
+        ridge.position.set(0, pedBaseY + peakH, 0);
         group.add(ridge);
 
-        return baseY + peakH;
+        return pedBaseY + peakH;
     }
 
     // Hemisphere dome
@@ -2609,73 +3185,319 @@ class WorldRenderer {
         const color = comp.color || "#d4a373";
         const windowColor = comp.windowColor || "#1a1008";
         const totalH = stories * storyH;
+        const variant = comp._variant || "plain";
+        const rusticated = comp._rusticated === true;
+
+        // Base plinth — darker, slightly wider band at ground level
+        // Thicker if rusticated
+        const plinthH = Math.min(rusticated ? 0.06 : 0.04, storyH * (rusticated ? 0.22 : 0.15));
+        const plinth = new THREE.Mesh(
+            new THREE.BoxGeometry(w + (rusticated ? 0.035 : 0.02), plinthH, d + (rusticated ? 0.035 : 0.02)),
+            this._matPBR(comp, color, rusticated ? 0.92 : 0.85)
+        );
+        plinth.position.y = baseY + plinthH / 2;
+        plinth.material.color.multiplyScalar(rusticated ? 0.68 : 0.75); // Darker base
+        group.add(plinth);
+
+        // Courtyard variant: central light-well cut out from upper stories
+        const hasCourtyard = variant === "courtyard" && stories >= 2 && w > 1.2 && d > 1.2;
+        const courtyardW = hasCourtyard ? w * 0.28 : 0;
+        const courtyardD = hasCourtyard ? d * 0.28 : 0;
+
+        // --- Window instancing: pre-count total windows across all stories ---
+        let totalFrontBackWins = 0;
+        let totalSideWins = 0;
+        for (let s = 0; s < stories; s++) {
+            const isGround = s === 0;
+            const shrinkPre = (variant === "overhang" && s > 0) ? -(( comp._overhangAmount || 0.03) * Math.min(s, 2)) : s * 0.015;
+            const swPre = w - shrinkPre, sdPre = d - shrinkPre;
+            const winWPre = Math.max(0.035, swPre * 0.05);
+            const numWinPre = comp.windows || Math.max(1, Math.floor(swPre / (winWPre * 3.0)));
+            const isTabGround = variant === "tabernae_ground" && isGround;
+            const actualNumWinPre = isTabGround ? Math.max(1, Math.floor(numWinPre * 0.65)) : numWinPre;
+            totalFrontBackWins += actualNumWinPre * 2;  // front + back
+            const sideWinCountPre = Math.max(1, Math.floor(actualNumWinPre * (sdPre / swPre)));
+            totalSideWins += sideWinCountPre * 2;  // left + right
+        }
+
+        // Create instanced meshes for window panes and frames (front/back)
+        const paneGeom = new THREE.BoxGeometry(1, 1, 0.015);  // unit-sized, scaled per instance
+        const paneMat = this._mat(windowColor, 0.38, 0.12);
+        const paneInst = new THREE.InstancedMesh(paneGeom, paneMat, totalFrontBackWins);
+        let paneIdx = 0;
+
+        // Single frame backing per window (replaces 4-piece frame)
+        const frameGeom = new THREE.BoxGeometry(1, 1, 0.025);  // unit-sized, scaled per instance
+        const frameMatShared = this._matPBR(comp, color, 0.8);
+        frameMatShared.color.multiplyScalar(0.82);
+        const frameInst = new THREE.InstancedMesh(frameGeom, frameMatShared, totalFrontBackWins);
+        let frameIdx = 0;
+
+        // Side window panes (oriented along Z axis, so geometry is rotated)
+        const sidePaneGeom = new THREE.BoxGeometry(0.015, 1, 1);  // unit-sized, scaled per instance
+        const sidePaneInst = new THREE.InstancedMesh(sidePaneGeom, paneMat, totalSideWins);
+        let sidePaneIdx = 0;
+
+        const dummy = this._instDummy;
 
         for (let s = 0; s < stories; s++) {
-            const shrink = s * 0.015;
+            // Overhang variant: upper floors project outward (negative shrink)
+            const isOverhang = variant === "overhang" && s > 0;
+            const ovh = comp._overhangAmount || 0.03;
+            const shrink = isOverhang ? -(ovh * Math.min(s, 2)) : s * 0.015;
             const sw = w - shrink, sd = d - shrink;
-            const wall = new THREE.Mesh(
-                new THREE.BoxGeometry(sw, storyH - 0.01, sd),
-                this._matPBR(comp, color, 0.72)
-            );
-            wall.position.y = baseY + s * storyH + storyH / 2;
-            group.add(wall);
+            const storyBaseY = baseY + s * storyH;
 
-            // Windows on front and back — scale to footprint
-            const winW = Math.max(0.03, sw * 0.04);
-            const winH = storyH * 0.35;
-            const numWin = comp.windows || Math.max(1, Math.floor(sw / (winW * 3.5)));
-            const winSpacing = sw / (numWin + 1);
-
-            const winMat = this._mat(windowColor, 0.38, 0.12);
-            for (let wi = 0; wi < numWin; wi++) {
-                const wx = -sw / 2 + winSpacing * (wi + 1);
-                const wy = baseY + s * storyH + storyH * 0.55;
-
-                // Front windows
-                const wf = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), winMat);
-                wf.position.set(wx, wy, -sd / 2 - 0.005);
-                group.add(wf);
-
-                // Back windows
-                const wb = new THREE.Mesh(new THREE.BoxGeometry(winW, winH, 0.02), winMat);
-                wb.position.set(wx, wy, sd / 2 + 0.005);
-                group.add(wb);
+            if (hasCourtyard && s > 0) {
+                // Build 4 wall segments around the courtyard instead of a solid block
+                const wt = (sw - courtyardW) / 2; // wall thickness around courtyard
+                const dt = (sd - courtyardD) / 2;
+                const wallMat = this._matPBR(comp, color, 0.72);
+                const wallH = storyH - 0.01;
+                const wy = storyBaseY + storyH / 2;
+                // Front slab (between front edge and courtyard)
+                const fs = new THREE.Mesh(new THREE.BoxGeometry(sw, wallH, dt), wallMat);
+                fs.position.set(0, wy, -sd / 2 + dt / 2);
+                group.add(fs);
+                // Back slab
+                const bs = new THREE.Mesh(new THREE.BoxGeometry(sw, wallH, dt), wallMat);
+                bs.position.set(0, wy, sd / 2 - dt / 2);
+                group.add(bs);
+                // Left slab (fills between front and back slabs, minus courtyard)
+                const ls = new THREE.Mesh(new THREE.BoxGeometry(wt, wallH, courtyardD), wallMat);
+                ls.position.set(-sw / 2 + wt / 2, wy, 0);
+                group.add(ls);
+                // Right slab
+                const rs = new THREE.Mesh(new THREE.BoxGeometry(wt, wallH, courtyardD), wallMat);
+                rs.position.set(sw / 2 - wt / 2, wy, 0);
+                group.add(rs);
+            } else {
+                const wall = new THREE.Mesh(
+                    new THREE.BoxGeometry(sw, storyH - 0.01, sd),
+                    this._matPBR(comp, color, 0.72)
+                );
+                wall.position.y = storyBaseY + storyH / 2;
+                group.add(wall);
             }
 
-            // Side windows (left and right) — fewer, proportional to depth
-            const sideWinCount = Math.max(1, Math.floor(numWin * (sd / sw)));
+            // Windows — instanced panes and frames for performance
+            const winW = Math.max(0.035, sw * 0.05);
+            const winH = storyH * 0.4;
+            const frameT = Math.max(0.008, winW * 0.12);
+            const numWin = comp.windows || Math.max(1, Math.floor(sw / (winW * 3.0)));
+
+            // Ground floor windows are taller (shops); upper floors smaller (apartments)
+            const isGround = s === 0;
+            const isTabGround = variant === "tabernae_ground" && isGround;
+            const winHActual = isTabGround
+                ? storyH * 0.75
+                : (isGround ? winH * 1.3 : winH * (0.85 + (s % 3) * 0.08));
+            const winYOffset = isTabGround
+                ? storyH * 0.45
+                : (isGround ? storyH * 0.5 : storyH * 0.6);
+            const actualNumWin = isTabGround ? Math.max(1, Math.floor(numWin * 0.65)) : numWin;
+            const actualWinW = isTabGround ? winW * 2.2 : winW;
+            const actualSpacing = sw / (actualNumWin + 1);
+            const isArched = variant === "arched_windows" && s > 0;
+
+            // frameMat only needed for non-instanced items (arches, shutters, articulated panels)
+            const frameMat = this._matPBR(comp, color, 0.8);
+            frameMat.color.multiplyScalar(0.82);
+
+            for (let wi = 0; wi < actualNumWin; wi++) {
+                const wx = -sw / 2 + actualSpacing * (wi + 1);
+                const wy = storyBaseY + winYOffset;
+
+                // Front and back windows — instanced panes and frames
+                for (const zSide of [-1, 1]) {
+                    const wz = zSide * (sd / 2 + 0.003);
+
+                    // Window pane instance (unit geom scaled to actual size)
+                    dummy.position.set(wx, wy, wz - zSide * 0.012);
+                    dummy.rotation.set(0, 0, 0);
+                    dummy.scale.set(actualWinW, winHActual, 1);
+                    dummy.updateMatrix();
+                    paneInst.setMatrixAt(paneIdx++, dummy.matrix);
+
+                    // Frame backing instance (slightly larger than pane, behind it)
+                    dummy.position.set(wx, wy, wz);
+                    dummy.rotation.set(0, 0, 0);
+                    dummy.scale.set(actualWinW + frameT * 2, winHActual + frameT * 2, 1);
+                    dummy.updateMatrix();
+                    frameInst.setMatrixAt(frameIdx++, dummy.matrix);
+
+                    // Arched variant: add half-torus above window (low count, keep as Mesh)
+                    if (isArched) {
+                        const archR = actualWinW / 2 + frameT;
+                        const archTube = frameT * 0.7;
+                        const arch = new THREE.Mesh(
+                            new THREE.TorusGeometry(archR, archTube, 4, 10, Math.PI),
+                            frameMat
+                        );
+                        arch.rotation.x = -Math.PI / 2;
+                        arch.rotation.z = 0;
+                        arch.position.set(wx, wy + winHActual / 2 + frameT, wz);
+                        group.add(arch);
+                    }
+                    // Window shutters (low count, keep as Mesh)
+                    if (comp._hasShutters && !isTabGround) {
+                        const shutterW = actualWinW * 0.5;
+                        const shutterH = winHActual * 0.95;
+                        const shutterMat = this._matPBR(comp, comp.windowColor || "#6B4226", 0.72);
+                        for (const xSide of [-1, 1]) {
+                            const shutter = new THREE.Mesh(
+                                new THREE.BoxGeometry(shutterW, shutterH, 0.012),
+                                shutterMat
+                            );
+                            const sx = wx + xSide * (actualWinW / 2 + shutterW / 2 * 0.7);
+                            shutter.position.set(sx, wy, wz + zSide * 0.018);
+                            shutter.rotation.y = xSide * 0.5;
+                            group.add(shutter);
+                        }
+                    }
+                }
+            }
+
+            // Side windows (left and right) — instanced panes
+            const sideWinCount = Math.max(1, Math.floor(actualNumWin * (sd / sw)));
             const sideWinSpacing = sd / (sideWinCount + 1);
             for (let wi = 0; wi < sideWinCount; wi++) {
                 const wz = -sd / 2 + sideWinSpacing * (wi + 1);
-                const wy = baseY + s * storyH + storyH * 0.55;
-                const wl = new THREE.Mesh(new THREE.BoxGeometry(0.02, winH, winW), winMat);
-                wl.position.set(-sw / 2 - 0.005, wy, wz);
-                group.add(wl);
-                const wr = new THREE.Mesh(new THREE.BoxGeometry(0.02, winH, winW), winMat);
-                wr.position.set(sw / 2 + 0.005, wy, wz);
-                group.add(wr);
+                const wy = storyBaseY + winYOffset;
+                for (const xSide of [-1, 1]) {
+                    const wx = xSide * (sw / 2 + 0.003);
+                    dummy.position.set(wx - xSide * 0.012, wy, wz);
+                    dummy.rotation.set(0, 0, 0);
+                    dummy.scale.set(1, winHActual, actualWinW);
+                    dummy.updateMatrix();
+                    sidePaneInst.setMatrixAt(sidePaneIdx++, dummy.matrix);
+                }
             }
 
-            // Floor line between stories
-            if (s > 0) {
-                const ledge = new THREE.Mesh(
-                    new THREE.BoxGeometry(sw + 0.02, 0.015, sd + 0.02),
-                    this._matPBR(comp, color, 0.72)
+            // Articulated variant: add blind arch/panel between windows
+            if (variant === "articulated" && s < stories - 1) {
+                for (let wi = 0; wi < actualNumWin; wi++) {
+                    const wx = -sw / 2 + actualSpacing * (wi + 1);
+                    for (const zSide of [-1, 1]) {
+                        const panel = new THREE.Mesh(
+                            new THREE.BoxGeometry(actualSpacing * 0.55, storyH * 0.12, 0.015),
+                            frameMat
+                        );
+                        panel.position.set(wx - actualSpacing / 2, storyBaseY + storyH * 0.88, zSide * (sd / 2 + 0.002));
+                        group.add(panel);
+                    }
+                }
+            }
+
+            // Balconies variant: projecting balcony on the front face at a specific story
+            if (variant === "balconies" && s === (comp._balconyStory || 1) && s < stories) {
+                const balconyD = 0.055;
+                const balconyH = 0.04;
+                const balconyY = storyBaseY + storyH * 0.05;
+                const balconyW = sw * 0.7;
+                // Balcony slab (projects outward from front face)
+                const slab = new THREE.Mesh(
+                    new THREE.BoxGeometry(balconyW, balconyH, balconyD),
+                    frameMat
                 );
-                ledge.position.y = baseY + s * storyH;
-                group.add(ledge);
+                slab.position.set(0, balconyY + balconyH / 2, -sd / 2 - balconyD / 2 + 0.003);
+                group.add(slab);
+                // Railing balusters
+                const railH = storyH * 0.22;
+                const numBalusters = Math.max(4, Math.floor(balconyW / 0.08));
+                for (let b = 0; b <= numBalusters; b++) {
+                    const bx = -balconyW / 2 + (balconyW / numBalusters) * b;
+                    const baluster = new THREE.Mesh(
+                        new THREE.BoxGeometry(0.015, railH, 0.015),
+                        frameMat
+                    );
+                    baluster.position.set(bx, balconyY + balconyH + railH / 2, -sd / 2 - balconyD + 0.01);
+                    group.add(baluster);
+                }
+                // Top rail
+                const topRail = new THREE.Mesh(
+                    new THREE.BoxGeometry(balconyW + 0.02, 0.012, 0.025),
+                    frameMat
+                );
+                topRail.position.set(0, balconyY + balconyH + railH, -sd / 2 - balconyD + 0.01);
+                group.add(topRail);
+                // Support brackets under the balcony
+                for (const bx of [-balconyW * 0.35, 0, balconyW * 0.35]) {
+                    const bracket = new THREE.Mesh(
+                        new THREE.BoxGeometry(0.02, 0.03, balconyD * 0.9),
+                        frameMat
+                    );
+                    bracket.position.set(bx, balconyY - 0.015, -sd / 2 - balconyD / 2 + 0.003);
+                    group.add(bracket);
+                }
+            }
+
+            // Cornice between stories — stronger profile than flat ledge
+            if (s > 0) {
+                const corniceH = 0.022;
+                const cornice = new THREE.Mesh(
+                    new THREE.BoxGeometry(sw + 0.04, corniceH, sd + 0.04),
+                    this._matPBR(comp, color, 0.7)
+                );
+                cornice.position.y = storyBaseY;
+                group.add(cornice);
+                // Shadow-line under cornice
+                const shadow = new THREE.Mesh(
+                    new THREE.BoxGeometry(sw + 0.02, 0.008, sd + 0.02),
+                    this._matPBR(comp, color, 0.85)
+                );
+                shadow.material.color.multiplyScalar(0.72);
+                shadow.position.y = storyBaseY - corniceH / 2 - 0.004;
+                group.add(shadow);
             }
         }
-        // Flat roof cap (parapet ledge) — prevents naked top
-        const capH = 0.02;
-        const cap = new THREE.Mesh(
-            new THREE.BoxGeometry(w + 0.03, capH, d + 0.03),
+
+        // --- Finalize window instanced meshes and add to group ---
+        if (paneIdx > 0) {
+            paneInst.count = paneIdx;  // trim to actual count used
+            paneInst.instanceMatrix.needsUpdate = true;
+            group.add(paneInst);
+        }
+        if (frameIdx > 0) {
+            frameInst.count = frameIdx;
+            frameInst.instanceMatrix.needsUpdate = true;
+            group.add(frameInst);
+        }
+        if (sidePaneIdx > 0) {
+            sidePaneInst.count = sidePaneIdx;
+            sidePaneInst.instanceMatrix.needsUpdate = true;
+            group.add(sidePaneInst);
+        }
+
+        // Top cornice — strong profile before roof
+        const topCorniceH = 0.03;
+        const topCornice = new THREE.Mesh(
+            new THREE.BoxGeometry(w + 0.05, topCorniceH, d + 0.05),
             this._matPBR(comp, color, 0.65)
         );
-        cap.position.y = baseY + totalH + capH / 2;
-        group.add(cap);
+        topCornice.position.y = baseY + totalH + topCorniceH / 2;
+        group.add(topCornice);
 
-        return baseY + totalH;
+        // Chimney — small cylinder on one corner of the roof
+        if (comp._hasChimney) {
+            const chimneyH = Math.max(0.06, totalH * 0.12);
+            const chimneyR = 0.022;
+            const chimney = new THREE.Mesh(
+                new THREE.CylinderGeometry(chimneyR, chimneyR * 1.1, chimneyH, 6),
+                this._matPBR(comp, "#4A4A4A", 0.88)
+            );
+            chimney.position.set(w * 0.3, baseY + totalH + topCorniceH + chimneyH / 2, d * 0.25);
+            group.add(chimney);
+            // Chimney cap
+            const cap = new THREE.Mesh(
+                new THREE.BoxGeometry(chimneyR * 3, 0.008, chimneyR * 3),
+                this._matPBR(comp, "#4A4A4A", 0.7)
+            );
+            cap.position.set(w * 0.3, baseY + totalH + topCorniceH + chimneyH + 0.004, d * 0.25);
+            group.add(cap);
+        }
+
+        return baseY + totalH + topCorniceH;
     }
 
     // Arched openings with pillars
@@ -2687,42 +3509,82 @@ class WorldRenderer {
         const pillarW = Math.max(0.04, archSpacing * 0.2);  // pier = 1/5 of arch span (Vitruvius: 1/4)
         const archR = Math.min((archSpacing - pillarW) / 2 * 0.85, totalH * 0.45);
         const pillarH = Math.max(0.1, totalH - archR);
+        const mat = this._matPBR(comp, color, 0.72);
+        const trimMat = this._matPBR(comp, comp.trimColor || color, 0.65);
 
-        // Pillars between arches
+        // Pillars between arches (with wider base plinth)
+        const plinthH = Math.min(0.04, pillarH * 0.08);
         for (let i = 0; i <= numArches; i++) {
             const px = -w / 2 + i * archSpacing;
-            const pillar = new THREE.Mesh(
-                new THREE.BoxGeometry(pillarW, pillarH, d),
-                this._matPBR(comp, color, 0.72)
+            // Base plinth
+            const plinth = new THREE.Mesh(
+                new THREE.BoxGeometry(pillarW + 0.02, plinthH, d + 0.01),
+                trimMat
             );
-            pillar.position.set(px, baseY + pillarH / 2, 0);
+            plinth.position.set(px, baseY + plinthH / 2, 0);
+            group.add(plinth);
+            // Main pillar shaft
+            const pillar = new THREE.Mesh(
+                new THREE.BoxGeometry(pillarW, pillarH - plinthH, d),
+                mat
+            );
+            pillar.position.set(px, baseY + plinthH + (pillarH - plinthH) / 2, 0);
             group.add(pillar);
+            // Impost block (cap on pier where arch springs from)
+            const impostH = Math.min(0.025, pillarH * 0.07);
+            const impost = new THREE.Mesh(
+                new THREE.BoxGeometry(pillarW + 0.015, impostH, d + 0.005),
+                trimMat
+            );
+            impost.position.set(px, baseY + pillarH - impostH / 2, 0);
+            group.add(impost);
         }
 
-        // Arch semicircles on front and back faces
+        // Arch semicircles on front and back faces + spandrel fill
+        const archTube = Math.max(0.022, pillarW * 0.28);
         for (let i = 0; i < numArches; i++) {
             const cx = -w / 2 + (i + 0.5) * archSpacing;
             for (const z of [-d / 2, d / 2]) {
+                // Arch voussoir ring
                 const arch = new THREE.Mesh(
-                    new THREE.TorusGeometry(archR, 0.02, 6, 12, Math.PI),
-                    this._matPBR(comp, color, 0.72)
+                    new THREE.TorusGeometry(archR, archTube, 6, 16, Math.PI),
+                    trimMat
                 );
                 arch.rotation.x = -Math.PI / 2;
                 arch.position.set(cx, baseY + pillarH, z);
                 group.add(arch);
+                // Keystone (wedge at top of arch)
+                const keyW = Math.max(0.025, archR * 0.12);
+                const keystone = new THREE.Mesh(
+                    new THREE.BoxGeometry(keyW, archTube * 2.2, archTube * 1.5),
+                    trimMat
+                );
+                keystone.position.set(cx, baseY + pillarH + archR - archTube * 0.2, z);
+                group.add(keystone);
+            }
+            // Spandrel (flat wall filling the space above the arch between piers)
+            const spandrelW = archSpacing - pillarW;
+            const spandrelH = Math.max(0.01, totalH - pillarH - archR);
+            if (spandrelH > 0.005) {
+                const spandrel = new THREE.Mesh(
+                    new THREE.BoxGeometry(spandrelW, spandrelH, d + 0.005),
+                    mat
+                );
+                spandrel.position.set(cx, baseY + pillarH + archR + spandrelH / 2, 0);
+                group.add(spandrel);
             }
         }
 
-        // Top beam
+        // Top cornice beam
         const beamH = 0.04;
         const beam = new THREE.Mesh(
-            new THREE.BoxGeometry(w + 0.02, beamH, d + 0.02),
-            this._matPBR(comp, color, 0.72)
+            new THREE.BoxGeometry(w + 0.03, beamH, d + 0.03),
+            trimMat
         );
-        beam.position.y = baseY + pillarH + archR + beamH / 2;
+        beam.position.y = baseY + totalH + beamH / 2;
         group.add(beam);
 
-        return baseY + pillarH + archR + beamH;
+        return baseY + totalH + beamH;
     }
 
     // Angled tile roof
@@ -2732,36 +3594,159 @@ class WorldRenderer {
         const slopeAngle = Math.atan2(peakH, d * 0.5);
         const slopeLen = Math.hypot(peakH, d * 0.5);
 
-        // Two sloped surfaces
+        // Two sloped surfaces — each panel spans eave to ridge
         for (const side of [-1, 1]) {
             const slope = new THREE.Mesh(
-                new THREE.BoxGeometry(w + 0.04, 0.025, slopeLen * 0.52),
+                new THREE.BoxGeometry(w + 0.04, 0.025, slopeLen),
                 this._matPBR(comp, color, 0.75)
             );
-            slope.position.set(0, baseY + peakH * 0.5, side * d * 0.22);
-            slope.rotation.x = side * slopeAngle * 0.65;
+            slope.position.set(0, baseY + peakH / 2, side * d / 4);
+            slope.rotation.x = side * slopeAngle;
             group.add(slope);
         }
 
-        // Ridge beam along the peak
+        // Gable end triangles close the roof at the left/right faces
+        const hw = w / 2, hd = d / 2;
+        const gableVerts = new Float32Array([
+            // Left gable (x = -hw)
+            -hw, baseY, -hd,  -hw, baseY, hd,  -hw, baseY + peakH, 0,
+            // Right gable (x = +hw) — reversed winding so normal faces +X
+             hw, baseY, hd,   hw, baseY, -hd,  hw, baseY + peakH, 0,
+        ]);
+        const gableGeo = new THREE.BufferGeometry();
+        gableGeo.setAttribute("position", new THREE.BufferAttribute(gableVerts, 3));
+        gableGeo.computeVertexNormals();
+        const gableColor = comp.gableColor || "#d4a373";
+        group.add(new THREE.Mesh(gableGeo, this._matPBR(comp, gableColor, 0.75)));
+
+        // Tile course ridges (imbrex pattern) — horizontal ridges running along the slope
+        const numCourses = Math.max(3, Math.min(8, Math.round(slopeLen / 0.08)));
+        const courseSpacing = slopeLen / (numCourses + 1);
+        const tileRidgeMat = this._matPBR(comp, color, 0.7);
+        tileRidgeMat.color.multiplyScalar(0.88);
+        for (const side of [-1, 1]) {
+            for (let i = 1; i <= numCourses; i++) {
+                const frac = i / (numCourses + 1);
+                const courseY = baseY + peakH * (1 - frac);
+                const courseZ = side * (d / 2) * frac;
+                const courseLen = w + 0.02;
+                const ridge = new THREE.Mesh(
+                    new THREE.BoxGeometry(courseLen, 0.012, 0.018),
+                    tileRidgeMat
+                );
+                ridge.position.set(0, courseY, courseZ);
+                ridge.rotation.x = side * slopeAngle;
+                group.add(ridge);
+            }
+        }
+
+        // Ridge beam along the peak (runs along X)
         const ridge = new THREE.Mesh(
-            new THREE.BoxGeometry(w + 0.06, 0.035, 0.04),
-            this._matPBR(comp, color, 0.6)
+            new THREE.BoxGeometry(w + 0.06, 0.04, 0.045),
+            this._matPBR(comp, color, 0.55)
         );
-        ridge.position.y = baseY + peakH;
+        ridge.position.y = baseY + peakH + 0.005;
         group.add(ridge);
 
-        // Eave overhang on both sides
+        // Eave cornice along front and back edges
         for (const side of [-1, 1]) {
             const eave = new THREE.Mesh(
-                new THREE.BoxGeometry(w + 0.08, 0.015, 0.06),
+                new THREE.BoxGeometry(w + 0.08, 0.025, 0.06),
                 this._matPBR(comp, color, 0.8)
             );
-            eave.position.set(0, baseY + 0.01, side * (d * 0.5 + 0.02));
+            eave.position.set(0, baseY - 0.005, side * (d * 0.5 + 0.015));
             group.add(eave);
         }
 
         return baseY + peakH;
+    }
+
+    // Four-slope hipped roof (pyramidal / half-hipped)
+    // Completely different silhouette from tiled_roof — 4 sloped faces meeting at a ridge.
+    _buildHippedRoof(group, comp, baseY, w, d) {
+        const color = comp.color || "#b5651d";
+        const peakH = comp.height || Math.min(w, d) * 0.25;
+        const hw = w / 2 + 0.02, hd = d / 2 + 0.02;
+        const ridgeRunsX = w >= d;
+        // Ridge length: half the shorter footprint dimension (creates 4 proper slopes)
+        const ridgeHalfLen = ridgeRunsX
+            ? Math.max(0, (hw - hd) * 0.9)
+            : Math.max(0, (hd - hw) * 0.9);
+        const topY = baseY + peakH;
+        // 4 eave corners
+        const fl = { x: -hw, y: baseY, z: -hd };
+        const fr = { x:  hw, y: baseY, z: -hd };
+        const br = { x:  hw, y: baseY, z:  hd };
+        const bl = { x: -hw, y: baseY, z:  hd };
+        // Ridge endpoints
+        const r1 = ridgeRunsX
+            ? { x: -ridgeHalfLen, y: topY, z: 0 }
+            : { x: 0, y: topY, z: -ridgeHalfLen };
+        const r2 = ridgeRunsX
+            ? { x:  ridgeHalfLen, y: topY, z: 0 }
+            : { x: 0, y: topY, z:  ridgeHalfLen };
+
+        // Triangles for the 4 slopes. Each slope is two triangles (or one if it degenerates to a hip).
+        const verts = [];
+        const push = (a, b, c) => {
+            verts.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z);
+        };
+        if (ridgeRunsX) {
+            // Front slope (z=-hd → ridge): fl→fr→r2, fl→r2→r1
+            push(fl, fr, r2); push(fl, r2, r1);
+            // Back slope: br→bl→r1, br→r1→r2
+            push(br, bl, r1); push(br, r1, r2);
+            // Left hip (single triangle): bl→fl→r1
+            push(bl, fl, r1);
+            // Right hip (single triangle): fr→br→r2
+            push(fr, br, r2);
+        } else {
+            // Z-ridge: left/right are trapezoids, front/back are triangles
+            // Left slope: fl→bl→r2, fl→r2→r1
+            push(fl, bl, r2); push(fl, r2, r1);
+            // Right slope: br→fr→r1, br→r1→r2
+            push(br, fr, r1); push(br, r1, r2);
+            // Front hip (triangle): fl→fr→r1? No, we need normal facing -Z.
+            // fl=(−hw,−hd), fr=(+hw,−hd), r1=(0,+topY,−ridgeHalfLen). Winding: fr,fl,r1 → normal -Z
+            push(fr, fl, r1);
+            // Back hip: bl→br→r2
+            push(bl, br, r2);
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
+        geo.computeVertexNormals();
+        group.add(new THREE.Mesh(geo, this._matPBR(comp, color, 0.72)));
+
+        // Ridge beam
+        if (ridgeHalfLen > 0.02) {
+            const ridgeMat = this._matPBR(comp, color, 0.58);
+            const ridge = new THREE.Mesh(
+                ridgeRunsX
+                    ? new THREE.BoxGeometry(ridgeHalfLen * 2 + 0.03, 0.03, 0.045)
+                    : new THREE.BoxGeometry(0.045, 0.03, ridgeHalfLen * 2 + 0.03),
+                ridgeMat
+            );
+            ridge.position.set(0, topY + 0.005, 0);
+            group.add(ridge);
+        }
+
+        // Eave cornice around the perimeter (bottom edge of all 4 slopes)
+        const eaveMat = this._matPBR(comp, color, 0.8);
+        const perim = [[fl, fr], [fr, br], [br, bl], [bl, fl]];
+        for (const [a, b] of perim) {
+            const dx = b.x - a.x, dz = b.z - a.z;
+            const len = Math.hypot(dx, dz);
+            const eave = new THREE.Mesh(
+                new THREE.BoxGeometry(len, 0.022, 0.055),
+                eaveMat
+            );
+            eave.position.set((a.x + b.x) / 2, baseY - 0.005, (a.z + b.z) / 2);
+            eave.rotation.y = Math.atan2(-dz, dx);
+            group.add(eave);
+        }
+
+        return topY;
     }
 
     // Courtyard with impluvium pool
@@ -2807,59 +3792,137 @@ class WorldRenderer {
         return baseY + wallH;
     }
 
-    // Figure on pedestal
+    // Figure on pedestal — stepped pedestal with draped figure, obelisk, or equestrian
     _buildStatue(group, comp, baseY) {
         const totalH = comp.height || 0.5;
         const color = comp.color || "#c0b090";
         const pedColor = comp.pedestalColor || "#8a7e6e";
-        const pedH = totalH * 0.3;
-        const figH = totalH * 0.5;
-        const headR = totalH * 0.08;
-        const figMat = this._matPBR(comp, color, 0.45, 0.08);
+        const pedH = totalH * 0.35;
+        const figH = totalH * 0.6;
+        const figMat = this._matPBR(comp, color, 0.4, 0.08);
+        const pedMat = this._matPBR(comp, pedColor, 0.82);
+        const pedCapMat = this._matPBR(comp, pedColor, 0.72);
 
-        // Pedestal — varied shape based on optional comp.shape
-        const pedW = 0.12;
-        const ped = new THREE.Mesh(new THREE.BoxGeometry(pedW, pedH, pedW), this._matPBR(comp, pedColor, 0.82));
-        ped.position.y = baseY + pedH / 2;
-        group.add(ped);
-        // Pedestal cap
-        const pedCap = new THREE.Mesh(new THREE.BoxGeometry(pedW + 0.02, 0.01, pedW + 0.02), this._matPBR(comp, pedColor, 0.75));
-        pedCap.position.y = baseY + pedH;
-        group.add(pedCap);
+        // Stepped pedestal — three tiers
+        const pedBase = 0.16;
+        const pedMid = 0.13;
+        const pedTop = 0.115;
+        const tier1H = pedH * 0.25;
+        const tier2H = pedH * 0.6;
+        const tier3H = pedH * 0.15;
+        // Base block
+        const b1 = new THREE.Mesh(new THREE.BoxGeometry(pedBase, tier1H, pedBase), pedMat);
+        b1.position.y = baseY + tier1H / 2;
+        group.add(b1);
+        // Main die (inscription block)
+        const b2 = new THREE.Mesh(new THREE.BoxGeometry(pedMid, tier2H, pedMid), pedMat);
+        b2.position.y = baseY + tier1H + tier2H / 2;
+        group.add(b2);
+        // Cornice cap
+        const b3 = new THREE.Mesh(new THREE.BoxGeometry(pedBase, tier3H, pedBase), pedCapMat);
+        b3.position.y = baseY + tier1H + tier2H + tier3H / 2;
+        group.add(b3);
 
+        const figBaseY = baseY + pedH;
         const shape = comp.shape || "figure";
+
         if (shape === "obelisk" || shape === "column") {
-            // Tall tapered column/obelisk
+            // Tall tapered obelisk with pyramidal cap
+            const obH = figH * 1.4;
+            const obBot = 0.05;
+            const obTop = 0.028;
             const obelisk = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.025, 0.04, figH * 1.4, 4),
+                new THREE.CylinderGeometry(obTop, obBot, obH * 0.88, 4),
                 figMat
             );
-            obelisk.position.y = baseY + pedH + figH * 0.7;
+            obelisk.position.y = figBaseY + obH * 0.44;
             obelisk.rotation.y = Math.PI / 4;
             group.add(obelisk);
+            // Pyramidion (capstone)
+            const pyramidion = new THREE.Mesh(
+                new THREE.ConeGeometry(obTop * 1.1, obH * 0.12, 4),
+                this._matPBR(comp, "#DAA520", 0.3, 0.25)
+            );
+            pyramidion.position.y = figBaseY + obH * 0.88 + obH * 0.06;
+            pyramidion.rotation.y = Math.PI / 4;
+            group.add(pyramidion);
         } else if (shape === "equestrian") {
-            // Horse + rider silhouette (box body + cylinder legs)
-            const body = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.05, 0.04), figMat);
-            body.position.y = baseY + pedH + figH * 0.35;
+            // Horse + rider
+            const horseW = 0.12, horseH = 0.075, horseD = 0.05;
+            const body = new THREE.Mesh(new THREE.BoxGeometry(horseW, horseH, horseD), figMat);
+            body.position.y = figBaseY + figH * 0.35;
             group.add(body);
-            // Rider
-            const rider = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, figH * 0.4, 6), figMat);
-            rider.position.y = baseY + pedH + figH * 0.6;
+            // Horse neck/head
+            const neck = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.05, 0.04), figMat);
+            neck.position.set(horseW / 2 - 0.01, figBaseY + figH * 0.45, 0);
+            neck.rotation.z = -0.4;
+            group.add(neck);
+            const hHead = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.025, 0.03), figMat);
+            hHead.position.set(horseW / 2 + 0.015, figBaseY + figH * 0.55, 0);
+            group.add(hHead);
+            // Legs
+            for (const dx of [-horseW / 2 + 0.015, horseW / 2 - 0.015]) {
+                for (const dz of [-horseD / 2 + 0.008, horseD / 2 - 0.008]) {
+                    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, figH * 0.3, 4), figMat);
+                    leg.position.set(dx, figBaseY + figH * 0.15, dz);
+                    group.add(leg);
+                }
+            }
+            // Rider torso
+            const rider = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, figH * 0.32, 6), figMat);
+            rider.position.y = figBaseY + figH * 0.58;
             group.add(rider);
-            const rHead = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), figMat);
-            rHead.position.y = baseY + pedH + figH * 0.85;
+            // Rider head
+            const rHead = new THREE.Mesh(new THREE.SphereGeometry(totalH * 0.055, 8, 6), figMat);
+            rHead.position.y = figBaseY + figH * 0.78;
             group.add(rHead);
+            // Cape/cloak suggestion (angled slab behind rider)
+            const cape = new THREE.Mesh(new THREE.BoxGeometry(0.04, figH * 0.25, 0.01), figMat);
+            cape.position.set(-0.015, figBaseY + figH * 0.58, 0);
+            cape.rotation.z = 0.2;
+            group.add(cape);
         } else {
-            // Default standing figure
-            const body = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, figH, 8), figMat);
-            body.position.y = baseY + pedH + figH / 2;
-            group.add(body);
+            // Standing figure with draped toga — suggested by cylinders with varying radii
+            const legH = figH * 0.48;
+            const torsoH = figH * 0.32;
+            const headR = totalH * 0.07;
+            // Toga/robe (wider at base, narrower at torso — classical drapery shape)
+            const toga = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.035, 0.055, legH, 10),
+                figMat
+            );
+            toga.position.y = figBaseY + legH / 2;
+            group.add(toga);
+            // Torso
+            const torso = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.032, 0.038, torsoH, 8),
+                figMat
+            );
+            torso.position.y = figBaseY + legH + torsoH / 2;
+            group.add(torso);
             // Shoulders
-            const shoulders = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.02, 0.04), figMat);
-            shoulders.position.y = baseY + pedH + figH * 0.85;
+            const shoulders = new THREE.Mesh(new THREE.BoxGeometry(0.085, 0.018, 0.04), figMat);
+            shoulders.position.y = figBaseY + legH + torsoH - 0.015;
             group.add(shoulders);
-            const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 8, 6), figMat);
-            head.position.y = baseY + pedH + figH + headR;
+            // Arms hanging at sides
+            for (const side of [-1, 1]) {
+                const arm = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.008, 0.009, torsoH * 0.85, 6),
+                    figMat
+                );
+                arm.position.set(side * 0.038, figBaseY + legH + torsoH * 0.45, 0.005);
+                group.add(arm);
+            }
+            // Neck
+            const neck = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.014, 0.016, 0.02, 6),
+                figMat
+            );
+            neck.position.y = figBaseY + legH + torsoH + 0.01;
+            group.add(neck);
+            // Head
+            const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 10, 8), figMat);
+            head.position.y = figBaseY + legH + torsoH + 0.02 + headR;
             group.add(head);
         }
 
@@ -2928,29 +3991,74 @@ class WorldRenderer {
     // Shade canopy (decorative — does not advance Y)
     _buildAwning(group, comp, baseY, w, d) {
         const color = comp.color || "#cc3333";
+        const postColor = comp.postColor || "#6B4226";
+        const awningW = w * 0.85;
+        const awningD = d * 0.4;
+        const awningY = baseY - 0.05;
+        const extZ = -d / 2 - d * 0.15;
+
+        // Tilted fabric/canopy
         const awning = new THREE.Mesh(
-            new THREE.BoxGeometry(w * 0.85, 0.02, d * 0.4),
-            this._matPBR(comp, color, 0.75)
+            new THREE.BoxGeometry(awningW, 0.018, awningD),
+            this._matPBR(comp, color, 0.78)
         );
-        awning.position.set(0, baseY - 0.05, -d / 2 - d * 0.15);
-        awning.rotation.x = 0.15;
+        awning.position.set(0, awningY, extZ);
+        awning.rotation.x = 0.18;
         group.add(awning);
+
+        // Top trim (darker edge where awning meets wall)
+        const trim = new THREE.Mesh(
+            new THREE.BoxGeometry(awningW + 0.02, 0.012, 0.02),
+            this._matPBR(comp, color, 0.65)
+        );
+        trim.material.color.multiplyScalar(0.75);
+        trim.position.set(0, awningY + 0.01, extZ + awningD / 2 - 0.01);
+        group.add(trim);
+
+        // Support posts at the outer corners
+        const postH = Math.max(0.1, awningY - baseY + awningD * 0.2);
+        const postR = 0.012;
+        const postMat = this._matPBR(comp, postColor, 0.8);
+        const postZ = extZ - awningD / 2 + 0.02;
+        for (const side of [-1, 1]) {
+            const post = new THREE.Mesh(
+                new THREE.CylinderGeometry(postR, postR, postH, 6),
+                postMat
+            );
+            post.position.set(side * awningW / 2, baseY + postH / 2, postZ);
+            group.add(post);
+        }
         return baseY;
     }
 
-    // Crenellated wall top
+    // Crenellated wall top — runs around all four sides
     _buildBattlements(group, comp, baseY, w, d) {
         const color = comp.color || "#c8b88a";
         const merlonH = comp.height || 0.1;
         const merlonW = 0.06;
-        const numMerlons = Math.max(2, Math.floor(w / (merlonW * 2)));
-        const spacing = w / numMerlons;
+        const merlonT = 0.04;
+        const mat = this._matPBR(comp, color, 0.72);
 
-        for (let i = 0; i < numMerlons; i++) {
+        // Front + back faces (run along X)
+        const nX = Math.max(2, Math.floor(w / (merlonW * 2)));
+        const spacingX = w / nX;
+        for (let i = 0; i < nX; i++) {
             if (i % 2 === 0) {
-                for (const z of [-d / 2, d / 2]) {
-                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonW, merlonH, 0.04), this._matPBR(comp, color, 0.72));
-                    m.position.set(-w / 2 + spacing * (i + 0.5), baseY + merlonH / 2, z);
+                for (const z of [-d / 2 + merlonT / 2, d / 2 - merlonT / 2]) {
+                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonW, merlonH, merlonT), mat);
+                    m.position.set(-w / 2 + spacingX * (i + 0.5), baseY + merlonH / 2, z);
+                    group.add(m);
+                }
+            }
+        }
+        // Left + right faces (run along Z)
+        const nZ = Math.max(2, Math.floor(d / (merlonW * 2)));
+        const spacingZ = d / nZ;
+        for (let i = 0; i < nZ; i++) {
+            if (i % 2 === 0) {
+                for (const x of [-w / 2 + merlonT / 2, w / 2 - merlonT / 2]) {
+                    const m = new THREE.Mesh(new THREE.BoxGeometry(merlonT, merlonH, merlonW), mat);
+                    m.position.set(x, baseY + merlonH / 2, -d / 2 + spacingZ * (i + 0.5));
                     group.add(m);
                 }
             }
@@ -2958,19 +4066,53 @@ class WorldRenderer {
         return baseY + merlonH;
     }
 
-    // Amphitheater seating ring
+    // Amphitheater seating tier — elliptical bench with seating rows
     _buildTier(group, comp, baseY, w, d) {
         const h = comp.height || 0.15;
         const color = comp.color || "#c4a860";
-        const r = Math.min(w, d) * 0.42;
+        const mat = this._matPBR(comp, color, 0.68);
+        // Use the FULL footprint (elliptical) for proper amphitheater shape
+        const rx = w * 0.48;
+        const rz = d * 0.48;
+        const thickness = h * 0.18;  // structural ring depth
+        const rows = comp.rows || 3;
+        const rowStep = thickness / rows;
 
-        const tier = new THREE.Mesh(
-            new THREE.TorusGeometry(r, h / 2, 6, 24),
-            this._matPBR(comp, color, 0.68)
+        // Stack of concentric elliptical bands, each stepping up and slightly inward
+        for (let row = 0; row < rows; row++) {
+            const frac = row / rows;
+            const innerRx = rx - rowStep * (row + 1);
+            const innerRz = rz - rowStep * (row + 1);
+            const outerRx = rx - rowStep * row;
+            const outerRz = rz - rowStep * row;
+            const rowH = h / rows;
+            const rowY = baseY + row * rowH + rowH / 2;
+
+            // Approximate ellipse as a ring using RingGeometry, extruded via many tiny arcs
+            // Use TorusGeometry scaled to ellipse for efficiency
+            const avgOuter = (outerRx + outerRz) / 2;
+            const avgInner = (innerRx + innerRz) / 2;
+            const tubeR = (avgOuter - avgInner) / 2;
+            const centerR = (avgOuter + avgInner) / 2;
+            const torus = new THREE.Mesh(
+                new THREE.TorusGeometry(centerR, Math.max(0.012, tubeR), 6, 28),
+                mat
+            );
+            torus.rotation.x = Math.PI / 2;
+            torus.scale.set(avgOuter > 0 ? outerRx / avgOuter : 1, avgOuter > 0 ? outerRz / avgOuter : 1, 1);
+            torus.position.y = rowY;
+            group.add(torus);
+        }
+        // Darker shadow line under the tier (row riser)
+        const riser = new THREE.Mesh(
+            new THREE.TorusGeometry((rx + rz) / 2, h * 0.05, 4, 28),
+            this._matPBR(comp, color, 0.82)
         );
-        tier.rotation.x = Math.PI / 2;
-        tier.position.y = baseY + h / 2;
-        group.add(tier);
+        riser.material.color.multiplyScalar(0.7);
+        riser.rotation.x = Math.PI / 2;
+        riser.scale.set(1, rz / ((rx + rz) / 2), 1);
+        riser.position.y = baseY + h * 0.05;
+        group.add(riser);
 
         return baseY + h;
     }
@@ -2980,23 +4122,58 @@ class WorldRenderer {
         const doorW = comp.width || 0.1;
         const doorH = comp.height || 0.2;
         const color = comp.color || "#3a2510";
+        const frameColor = comp.frameColor || "#8a7e6e";
+        const frameT = Math.max(0.012, doorW * 0.14);
+        const x = comp.x || 0, z = comp.z || 0;
 
+        // Recessed door panel (slightly inset)
+        const doorMat = this._matPBR(comp, color, 0.55);
         const door = new THREE.Mesh(
-            new THREE.BoxGeometry(doorW, doorH, 0.02),
-            this._matPBR(comp, color, 0.55)
+            new THREE.BoxGeometry(doorW, doorH, 0.025),
+            doorMat
         );
-        door.position.set(comp.x || 0, baseY + doorH / 2, comp.z || 0);
+        door.position.set(x, baseY + doorH / 2, z);
         group.add(door);
 
-        // Arch above door
-        const archR = doorW * 0.6;
-        const arch = new THREE.Mesh(
-            new THREE.TorusGeometry(archR, 0.01, 6, 8, Math.PI),
-            this._matPBR(comp, comp.frameColor || "#8a7e6e", 0.45)
+        // Vertical plank line down the middle (double door look)
+        const plankLine = new THREE.Mesh(
+            new THREE.BoxGeometry(0.004, doorH * 0.92, 0.03),
+            this._matPBR(comp, color, 0.7)
         );
-        arch.rotation.x = -Math.PI / 2;
-        arch.position.set(comp.x || 0, baseY + doorH, comp.z || 0);
-        group.add(arch);
+        plankLine.material.color.multiplyScalar(0.7);
+        plankLine.position.set(x, baseY + doorH / 2, z);
+        group.add(plankLine);
+
+        // Door frame (lintel on top, jambs on sides)
+        const frameMat = this._matPBR(comp, frameColor, 0.55);
+        const lintel = new THREE.Mesh(
+            new THREE.BoxGeometry(doorW + frameT * 2, frameT, 0.04),
+            frameMat
+        );
+        lintel.position.set(x, baseY + doorH + frameT / 2, z);
+        group.add(lintel);
+
+        const jambL = new THREE.Mesh(
+            new THREE.BoxGeometry(frameT, doorH + frameT, 0.04),
+            frameMat
+        );
+        jambL.position.set(x - doorW / 2 - frameT / 2, baseY + (doorH + frameT) / 2, z);
+        group.add(jambL);
+
+        const jambR = new THREE.Mesh(
+            new THREE.BoxGeometry(frameT, doorH + frameT, 0.04),
+            frameMat
+        );
+        jambR.position.set(x + doorW / 2 + frameT / 2, baseY + (doorH + frameT) / 2, z);
+        group.add(jambR);
+
+        // Threshold stone at the base
+        const threshold = new THREE.Mesh(
+            new THREE.BoxGeometry(doorW + frameT * 2, 0.01, 0.045),
+            frameMat
+        );
+        threshold.position.set(x, baseY + 0.005, z);
+        group.add(threshold);
 
         return baseY;
     }
@@ -3006,16 +4183,65 @@ class WorldRenderer {
         const count = comp.count || 4;
         const h = comp.height || 0.5;
         const color = comp.color || "#e0d8c8";
-        const spacing = d / (count + 1);
+        const placement = comp.placement || "sides"; // "sides" | "front" | "all"
+        const pilW = comp.pilasterWidth || Math.max(0.035, h * 0.08);
+        const pilT = 0.045;
+        const shaftMat = this._matPBR(comp, color, 0.45);
+        const trimMat = this._matPBR(comp, color, 0.55);
+        trimMat.color.multiplyScalar(0.92);
 
-        for (const side of [-1, 1]) {
+        // Column-like proportions: base=8%, shaft=82%, capital=10% of height
+        const baseH = h * 0.08;
+        const capH = h * 0.1;
+        const shaftH = h - baseH - capH;
+
+        const addPilaster = (x, y, z, rotY) => {
+            const grp = new THREE.Group();
+            // Base (slightly wider)
+            const base = new THREE.Mesh(
+                new THREE.BoxGeometry(pilW + 0.012, baseH, pilT + 0.008),
+                trimMat
+            );
+            base.position.y = y + baseH / 2;
+            grp.add(base);
+            // Shaft
+            const shaft = new THREE.Mesh(
+                new THREE.BoxGeometry(pilW, shaftH, pilT),
+                shaftMat
+            );
+            shaft.position.y = y + baseH + shaftH / 2;
+            grp.add(shaft);
+            // Capital (wider, acts as top crown)
+            const cap = new THREE.Mesh(
+                new THREE.BoxGeometry(pilW + 0.02, capH, pilT + 0.015),
+                trimMat
+            );
+            cap.position.y = y + baseH + shaftH + capH / 2;
+            grp.add(cap);
+            grp.position.set(x, 0, z);
+            if (rotY) grp.rotation.y = rotY;
+            group.add(grp);
+        };
+
+        if (placement === "front" || placement === "all") {
+            // Pilasters on front AND back faces (if "all") or just front
+            const spacing = w / (count + 1);
             for (let i = 0; i < count; i++) {
-                const pil = new THREE.Mesh(
-                    new THREE.BoxGeometry(0.04, h, 0.05),
-                    this._matPBR(comp, color, 0.4)
-                );
-                pil.position.set(side * (w / 2 + 0.01), baseY + h / 2, -d / 2 + spacing * (i + 1));
-                group.add(pil);
+                const x = -w / 2 + spacing * (i + 1);
+                addPilaster(x, baseY, -d / 2 - 0.005, 0);
+                if (placement === "all") {
+                    addPilaster(x, baseY, d / 2 + 0.005, 0);
+                }
+            }
+        }
+        if (placement === "sides" || placement === "all") {
+            // Pilasters on left/right faces
+            const spacing = d / (count + 1);
+            for (const side of [-1, 1]) {
+                for (let i = 0; i < count; i++) {
+                    const z = -d / 2 + spacing * (i + 1);
+                    addPilaster(side * (w / 2 + 0.005), baseY, z, Math.PI / 2);
+                }
             }
         }
         return baseY;
@@ -3048,18 +4274,44 @@ class WorldRenderer {
         return baseY + vaultH;
     }
 
-    // Flat slab roof
+    // Flat slab roof with parapet edge
     _buildFlatRoof(group, comp, baseY, w, d) {
         const color = comp.color || "#c8b88a";
         const overhang = comp.overhang || 0.04;
         const thickness = 0.04;
+        const parapetH = comp.parapetHeight || 0.05;
+        const parapetT = 0.025;
+        const rw = w + overhang, rd = d + overhang;
 
+        // Main roof slab
         const roof = new THREE.Mesh(
-            new THREE.BoxGeometry(w + overhang, thickness, d + overhang),
+            new THREE.BoxGeometry(rw, thickness, rd),
             this._matPBR(comp, color, 0.72)
         );
         roof.position.y = baseY + thickness / 2;
         group.add(roof);
+
+        // Parapet walls around the perimeter (skip if explicitly disabled)
+        if (comp.parapet !== false) {
+            const parapetColor = comp.parapetColor || color;
+            const pMat = this._matPBR(comp, parapetColor, 0.8);
+            const py = baseY + thickness + parapetH / 2;
+            // Front + back
+            const pf = new THREE.Mesh(new THREE.BoxGeometry(rw, parapetH, parapetT), pMat);
+            pf.position.set(0, py, -rd / 2 + parapetT / 2);
+            group.add(pf);
+            const pb = new THREE.Mesh(new THREE.BoxGeometry(rw, parapetH, parapetT), pMat);
+            pb.position.set(0, py, rd / 2 - parapetT / 2);
+            group.add(pb);
+            // Left + right
+            const pl = new THREE.Mesh(new THREE.BoxGeometry(parapetT, parapetH, rd - parapetT * 2), pMat);
+            pl.position.set(-rw / 2 + parapetT / 2, py, 0);
+            group.add(pl);
+            const pr = new THREE.Mesh(new THREE.BoxGeometry(parapetT, parapetH, rd - parapetT * 2), pMat);
+            pr.position.set(rw / 2 - parapetT / 2, py, 0);
+            group.add(pr);
+            return baseY + thickness + parapetH;
+        }
 
         return baseY + thickness;
     }
@@ -3070,43 +4322,225 @@ class WorldRenderer {
         const cellaW = comp.width || w * 0.6;
         const cellaD = comp.depth || d * 0.7;
         const color = comp.color || "#e8e0d0";
+        const mat = this._matPBR(comp, color, 0.72);
+        const trimMat = this._matPBR(comp, color, 0.62);
+        trimMat.color.multiplyScalar(0.9);
 
-        const cella = new THREE.Mesh(
-            new THREE.BoxGeometry(cellaW, h, cellaD),
-            this._matPBR(comp, color, 0.72)
+        // Base moulding (wider band at bottom)
+        const baseMouldH = Math.min(0.025, h * 0.08);
+        const baseMould = new THREE.Mesh(
+            new THREE.BoxGeometry(cellaW + 0.02, baseMouldH, cellaD + 0.02),
+            trimMat
         );
-        cella.position.set(0, baseY + h / 2, 0);
-        group.add(cella);
+        baseMould.position.set(0, baseY + baseMouldH / 2, 0);
+        group.add(baseMould);
+
+        // Main wall block
+        const wallH = h - baseMouldH * 2;
+        const wall = new THREE.Mesh(
+            new THREE.BoxGeometry(cellaW, wallH, cellaD),
+            mat
+        );
+        wall.position.set(0, baseY + baseMouldH + wallH / 2, 0);
+        group.add(wall);
+
+        // Top cornice (projects slightly outward)
+        const topH = Math.min(0.03, h * 0.1);
+        const top = new THREE.Mesh(
+            new THREE.BoxGeometry(cellaW + 0.025, topH, cellaD + 0.025),
+            trimMat
+        );
+        top.position.set(0, baseY + h - topH / 2, 0);
+        group.add(top);
+
+        // Narrow entrance opening on the front face (decorative recess)
+        const doorW = cellaW * 0.22;
+        const doorH = wallH * 0.65;
+        const entrance = new THREE.Mesh(
+            new THREE.BoxGeometry(doorW, doorH, 0.01),
+            this._mat("#2a1810", 0.85, 0.02)
+        );
+        entrance.position.set(0, baseY + baseMouldH + doorH / 2, -cellaD / 2 - 0.002);
+        group.add(entrance);
 
         return baseY + h;
     }
 
-    // Perimeter walls
+    // Perimeter walls with base plinth and top cornice
     _buildWalls(group, comp, baseY, w, d) {
         const h = comp.height || 0.5;
         const t = comp.thickness || 0.06;
         const color = comp.color || "#d4a373";
+        const hasTrim = comp.trim !== false;
+        const plinthH = hasTrim ? Math.min(0.035, h * 0.12) : 0;
+        const corniceH = hasTrim ? Math.min(0.025, h * 0.08) : 0;
+        const wallH = h - plinthH - corniceH;
+        const wallY = baseY + plinthH;
 
-        const front = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._matPBR(comp, color, 0.72));
-        front.position.set(0, baseY + h / 2, -d / 2 + t / 2);
+        const wallMat = this._matPBR(comp, color, 0.72);
+
+        const front = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, t), wallMat);
+        front.position.set(0, wallY + wallH / 2, -d / 2 + t / 2);
         group.add(front);
 
-        const back = new THREE.Mesh(new THREE.BoxGeometry(w, h, t), this._matPBR(comp, color, 0.72));
-        back.position.set(0, baseY + h / 2, d / 2 - t / 2);
+        const back = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, t), wallMat);
+        back.position.set(0, wallY + wallH / 2, d / 2 - t / 2);
         group.add(back);
 
-        const left = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._matPBR(comp, color, 0.72));
-        left.position.set(-w / 2 + t / 2, baseY + h / 2, 0);
+        const left = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), wallMat);
+        left.position.set(-w / 2 + t / 2, wallY + wallH / 2, 0);
         group.add(left);
 
-        const right = new THREE.Mesh(new THREE.BoxGeometry(t, h, d), this._matPBR(comp, color, 0.72));
-        right.position.set(w / 2 - t / 2, baseY + h / 2, 0);
+        const right = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, d), wallMat);
+        right.position.set(w / 2 - t / 2, wallY + wallH / 2, 0);
         group.add(right);
+
+        if (hasTrim) {
+            // Base plinth — slightly wider, darker band at ground
+            const plinthMat = this._matPBR(comp, color, 0.85);
+            plinthMat.color.multiplyScalar(0.75);
+            // Front plinth
+            const pf = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, plinthH, t + 0.02), plinthMat);
+            pf.position.set(0, baseY + plinthH / 2, -d / 2 + t / 2);
+            group.add(pf);
+            // Back
+            const pb = new THREE.Mesh(new THREE.BoxGeometry(w + 0.02, plinthH, t + 0.02), plinthMat);
+            pb.position.set(0, baseY + plinthH / 2, d / 2 - t / 2);
+            group.add(pb);
+            // Left
+            const pl = new THREE.Mesh(new THREE.BoxGeometry(t + 0.02, plinthH, d + 0.02), plinthMat);
+            pl.position.set(-w / 2 + t / 2, baseY + plinthH / 2, 0);
+            group.add(pl);
+            // Right
+            const pr = new THREE.Mesh(new THREE.BoxGeometry(t + 0.02, plinthH, d + 0.02), plinthMat);
+            pr.position.set(w / 2 - t / 2, baseY + plinthH / 2, 0);
+            group.add(pr);
+
+            // Top cornice — projects slightly outward
+            const corniceMat = this._matPBR(comp, color, 0.68);
+            const cy = baseY + plinthH + wallH + corniceH / 2;
+            const cf = new THREE.Mesh(new THREE.BoxGeometry(w + 0.03, corniceH, t + 0.02), corniceMat);
+            cf.position.set(0, cy, -d / 2 + t / 2);
+            group.add(cf);
+            const cb = new THREE.Mesh(new THREE.BoxGeometry(w + 0.03, corniceH, t + 0.02), corniceMat);
+            cb.position.set(0, cy, d / 2 - t / 2);
+            group.add(cb);
+            const cl = new THREE.Mesh(new THREE.BoxGeometry(t + 0.02, corniceH, d + 0.03), corniceMat);
+            cl.position.set(-w / 2 + t / 2, cy, 0);
+            group.add(cl);
+            const cr = new THREE.Mesh(new THREE.BoxGeometry(t + 0.02, corniceH, d + 0.03), corniceMat);
+            cr.position.set(w / 2 - t / 2, cy, 0);
+            group.add(cr);
+        }
 
         return baseY + h;
     }
 
+    // External staircase — attached to the side of a building (insulae, domus)
+    _buildStaircase(group, comp, baseY, w, d) {
+        const totalH = comp.height || 0.5;
+        const color = comp.color || "#808080";
+        const steps = comp.steps || Math.max(6, Math.round(totalH / 0.04));
+        const stairW = comp.width || Math.min(0.15, w * 0.25);
+        const stairD = comp.depth || Math.min(0.3, d * 0.6);
+        const side = comp.side || "left"; // "left" | "right"
+        const stepH = totalH / steps;
+        const stepD = stairD / steps;
+        const mat = this._matPBR(comp, color, 0.78);
+        const xOff = side === "right" ? w / 2 + stairW / 2 + 0.005 : -w / 2 - stairW / 2 - 0.005;
+
+        // Individual treads rising from front to back
+        for (let i = 0; i < steps; i++) {
+            const tread = new THREE.Mesh(
+                new THREE.BoxGeometry(stairW, stepH * 0.6, stepD * 1.05),
+                mat
+            );
+            const sy = baseY + i * stepH + stepH * 0.3;
+            const sz = -stairD / 2 + stepD * (i + 0.5);
+            tread.position.set(xOff, sy, sz);
+            group.add(tread);
+        }
+
+        // Side wall (simple thin panel along the stair edge)
+        const wallH = totalH * 0.7;
+        const wallMat = this._matPBR(comp, color, 0.82);
+        const wallX = side === "right" ? xOff + stairW / 2 + 0.008 : xOff - stairW / 2 - 0.008;
+        const sideWall = new THREE.Mesh(
+            new THREE.BoxGeometry(0.02, wallH, stairD + 0.02),
+            wallMat
+        );
+        sideWall.position.set(wallX, baseY + wallH / 2, 0);
+        group.add(sideWall);
+
+        // Top landing platform
+        const landing = new THREE.Mesh(
+            new THREE.BoxGeometry(stairW + 0.04, 0.025, stepD * 1.5),
+            mat
+        );
+        landing.position.set(xOff, baseY + totalH - 0.012, stairD / 2);
+        group.add(landing);
+
+        return baseY; // decorative — does not advance Y
+    }
+
     // ─── Hover / Click ───
+
+    /**
+     * Set time of day (0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 1 = midnight).
+     * Adjusts sun position, color temperature, shadow intensity, and fog.
+     */
+    setTimeOfDay(t) {
+        this._timeOfDay = t;
+        const angle = (t - 0.25) * Math.PI; // 0.25=horizon, 0.5=zenith, 0.75=horizon
+        const sunY = Math.sin(angle);
+        const sunX = Math.cos(angle);
+        const sunAlt = Math.max(0, sunY); // 0 at horizon, 1 at noon
+
+        // Sun position orbits east to west
+        this._sunLight.position.set(sunX * 500, sunAlt * 600 + 20, 250);
+
+        // Sun intensity fades at dawn/dusk
+        this._sunLight.intensity = 0.15 + sunAlt * 0.85;
+
+        // Color temperature: warm at sunrise/sunset, neutral at noon
+        const warmth = 1 - sunAlt; // 1 at horizon, 0 at noon
+        const r = 1.0;
+        const g = 0.88 + sunAlt * 0.12; // 0.88-1.0
+        const b = 0.7 + sunAlt * 0.25 - warmth * 0.15; // warmer at edges
+        this._sunLight.color.setRGB(r, g, b);
+
+        // Ambient adapts: dimmer at night, bluer at night
+        const nightFactor = Math.max(0, -sunY); // >0 when sun below horizon
+        this._ambientLight.intensity = 0.15 + sunAlt * 0.25 + nightFactor * 0.08;
+        this._ambientLight.color.setRGB(
+            0.85 - nightFactor * 0.4,
+            0.88 - nightFactor * 0.2,
+            1.0
+        );
+
+        // Hemisphere light: sky blue shifts to deep blue at night
+        this._hemiLight.intensity = 0.2 + sunAlt * 0.3;
+
+        // Fill light: stronger at golden hour
+        this._fillLight.intensity = 0.05 + warmth * 0.15 * sunAlt;
+        this._fillLight.color.setRGB(1.0, 0.8 + warmth * 0.1, 0.6 + warmth * 0.1);
+
+        // Fog density increases at dawn/dusk (haze)
+        if (this.scene.fog) {
+            const baseDensity = this.scene.fog._baseDensity || this.scene.fog.density;
+            if (!this.scene.fog._baseDensity) this.scene.fog._baseDensity = baseDensity;
+            this.scene.fog.density = baseDensity * (1 + warmth * 0.6 + nightFactor * 0.3);
+            // Fog color: warm at golden hour, blue-gray at night
+            this.scene.fog.color.setRGB(
+                0.77 - nightFactor * 0.3 + warmth * 0.1,
+                0.71 - nightFactor * 0.25,
+                0.60 - nightFactor * 0.1 + warmth * 0.05
+            );
+        }
+
+        // Tone mapping exposure: slightly brighter at noon, darker at night
+        this.renderer3d.toneMappingExposure = 0.7 + sunAlt * 0.35 - nightFactor * 0.25;
+    }
 
     _getMeshList() {
         if (this._meshListDirty) {
@@ -3325,6 +4759,7 @@ class WorldRenderer {
 
         this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
         this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
+        const camPos = this.camera.position;
         this.buildingGroups.forEach((group) => {
             if (group.userData.cullRadius == null) return;
             this._cullCenter.set(
@@ -3333,7 +4768,34 @@ class WorldRenderer {
                 group.position.z
             );
             this._cullSphere.set(this._cullCenter, group.userData.cullRadius);
-            group.visible = this._frustum.intersectsSphere(this._cullSphere);
+            const inFrustum = this._frustum.intersectsSphere(this._cullSphere);
+            group.visible = inFrustum;
+            if (!inFrustum) return;
+
+            // Distance-based LOD — reduce quality for distant buildings
+            const dx = group.position.x - camPos.x;
+            const dz = group.position.z - camPos.z;
+            const distSq = dx * dx + dz * dz;
+            const LOD_MID = 600 * 600;    // Distance² where shadows turn off
+            const LOD_FAR = 1200 * 1200;  // Distance² where small meshes hide
+
+            group.traverse((child) => {
+                if (!child.isMesh) return;
+                if (distSq > LOD_FAR) {
+                    // Far: hide tiny decorative meshes (windows, frames, signs)
+                    if (child.geometry && child.geometry.boundingSphere) {
+                        child.visible = child.geometry.boundingSphere.radius > 0.06;
+                    }
+                    child.castShadow = false;
+                } else if (distSq > LOD_MID) {
+                    // Mid: disable shadow casting to reduce shadow map cost
+                    child.visible = true;
+                    child.castShadow = false;
+                } else {
+                    // Near: full detail + shadows
+                    child.visible = true;
+                }
+            });
         });
 
         this.renderer3d.render(this.scene, this.camera);

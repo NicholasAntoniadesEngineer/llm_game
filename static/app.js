@@ -35,9 +35,11 @@ function eternalCitiesWsUrl() {
 
 let ws = null;
 let renderer = null;
-/** Grid dimensions from last world_state (mini-map, UI). */
+/** Grid dimensions and origin from last world_state (mini-map, UI). */
 let worldGridWidth = 80;
 let worldGridHeight = 80;
+let worldMinX = 0;
+let worldMinY = 0;
 /** One automatic resume per full page load when server sends suggest_auto_resume (reconnect after pause). */
 let autoResumeOnceThisPageAttempted = false;
 let reconnectDelay = 1000;
@@ -366,6 +368,8 @@ function handleMessage(msg) {
         case "world_state":
             if (typeof msg.width === "number" && msg.width > 0) worldGridWidth = msg.width;
             if (typeof msg.height === "number" && msg.height > 0) worldGridHeight = msg.height;
+            if (typeof msg.min_x === "number") worldMinX = msg.min_x;
+            if (typeof msg.min_y === "number") worldMinY = msg.min_y;
             // Don't clear chat — dedup in appendChat() handles replay duplicates.
             // Chat is only cleared on explicit reset (see "reset" send path).
             renderer.init(msg);
@@ -436,7 +440,8 @@ function handleMessage(msg) {
         case "phase":
             appendPhaseAnnouncement(msg);
             if (msg.wave && msg.index && msg.total_districts) {
-                updateDistrict(`${msg.wave}: ${msg.district} (${msg.index}/${msg.total_districts})`);
+                const genLabel = msg.generation != null ? ` [Gen ${msg.generation}]` : "";
+                updateDistrict(`${msg.wave}: ${msg.district} (${msg.index}/${msg.total_districts})${genLabel}`);
             } else if (msg.index && msg.total_districts) {
                 updateDistrict(`${msg.district} (${msg.index}/${msg.total_districts})`);
             } else {
@@ -499,11 +504,9 @@ function handleMessage(msg) {
         case "complete":
             resetAllAgentStatus();
             hidePauseButton();
-            // Dedup: "complete" is stored in chat_history and replayed on reconnect.
             if (!_chatSeenHashes.has("complete")) {
                 _chatSeenHashes.add("complete");
                 appendSystemMessage("Build complete! The city stands in its glory.");
-                // Browser notification (if permitted) — useful since builds take minutes
                 try {
                     if (Notification.permission === "granted") {
                         new Notification("Eternal Cities", { body: "City build complete!", icon: "/static/favicon.svg" });
@@ -512,8 +515,17 @@ function handleMessage(msg) {
                     }
                 } catch (e) { /* ignore */ }
             }
-            // Update page title to signal completion
             document.title = "Done! — Eternal Cities";
+            break;
+
+        case "generation_complete":
+            appendSystemMessage(`Generation ${msg.generation} complete — preparing expansion...`);
+            document.title = `Gen ${msg.generation} — Eternal Cities`;
+            break;
+
+        case "expanding":
+            appendSystemMessage(`Expanding city — generation ${msg.generation}...`);
+            document.title = `Expanding Gen ${msg.generation} — Eternal Cities`;
             break;
 
         case "paused":
@@ -2471,6 +2483,23 @@ document.addEventListener("DOMContentLoaded", () => {
             if (renderer) renderer.cameraSpeedMultiplier = v;
             if (speedLabel) speedLabel.textContent = v + "x";
             localStorage.setItem("eternal_camera_speed", String(v));
+        });
+    }
+
+    // Time-of-day slider
+    const todSlider = document.getElementById("time-of-day-slider");
+    const todLabel = document.getElementById("time-of-day-label");
+    if (todSlider) {
+        const todNames = [
+            "12am", "1am", "2am", "3am", "4am", "5am", "6am", "7am",
+            "8am", "9am", "10am", "11am", "12pm", "1pm", "2pm", "3pm",
+            "4pm", "5pm", "6pm", "7pm", "8pm", "9pm", "10pm", "11pm"
+        ];
+        todSlider.addEventListener("input", () => {
+            const v = parseFloat(todSlider.value);
+            if (renderer && renderer.setTimeOfDay) renderer.setTimeOfDay(v);
+            const hour = Math.round(v * 24) % 24;
+            if (todLabel) todLabel.textContent = todNames[hour];
         });
     }
 
