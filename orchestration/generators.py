@@ -245,10 +245,30 @@ class Generators:
 
         # Build existing districts summary
         existing = []
+        existing_regions = []
         for d in self.districts:
             r = d.get("region", {})
             existing.append(f"  - {d['name']}: ({r.get('x1',0)},{r.get('y1',0)}) to ({r.get('x2',0)},{r.get('y2',0)})")
+            existing_regions.append(r)
         existing_str = "\n".join(existing) if existing else "  (none)"
+
+        # Collect occupied tile positions for overlap checking
+        occupied_tiles = set(self.world.tiles.keys())
+
+        # Build geography context from blueprint (if available)
+        bp = self.engine.blueprint
+        geo_context = ""
+        mat_context = ""
+        if bp:
+            geo = bp.get_geography_context()
+            if geo:
+                geo_context = f"GEOGRAPHY: {geo}"
+            mat = bp.get_material_palette_context()
+            if mat:
+                mat_context = f"MATERIALS: {mat}"
+
+        # Compute direction hint: prefer expanding toward least-developed edges
+        direction_hint = self._compute_expansion_direction_hint(existing_regions)
 
         from prompts import load_prompt
         w = self.world
@@ -262,6 +282,9 @@ class Generators:
             PERIOD=period,
             YEAR=year,
             EXISTING_DISTRICTS=existing_str,
+            GEO_CONTEXT=geo_context,
+            MAT_CONTEXT=mat_context,
+            DIRECTION_HINT=direction_hint,
         )
 
         await self._set_status("cartographus", "thinking")
@@ -281,27 +304,124 @@ class Generators:
             await self._set_status("cartographus", "idle")
             return False
 
-        # Validate: new districts must not overlap existing regions
+        # Validate new districts: no overlap with existing, no water regions
+        validated = []
         for nd in new_districts:
+            r = nd.get("region", {})
+            x1, y1 = r.get("x1", 0), r.get("y1", 0)
+            x2, y2 = r.get("x2", 0), r.get("y2", 0)
+
+            # Check overlap with existing district regions
+            overlaps = False
+            for er in existing_regions:
+                if (x1 <= er.get("x2", 0) and x2 >= er.get("x1", 0) and
+                        y1 <= er.get("y2", 0) and y2 >= er.get("y1", 0)):
+                    logger.warning("Expansion district %s overlaps existing district region — skipping",
+                                   nd.get("name", "?"))
+                    overlaps = True
+                    break
+            if overlaps:
+                continue
+
+            # Check overlap with already-placed tiles (> 25% overlap means bad placement)
+            region_tiles = set()
+            for rx in range(x1, x2 + 1):
+                for ry in range(y1, y2 + 1):
+                    region_tiles.add((rx, ry))
+            overlap_count = len(region_tiles & occupied_tiles)
+            if region_tiles and (overlap_count / len(region_tiles)) > 0.25:
+                logger.warning("Expansion district %s has >25%% tile overlap (%d/%d) — skipping",
+                               nd.get("name", "?"), overlap_count, len(region_tiles))
+                continue
+
+            # Check if region is mostly water (from blueprint)
+            if bp and bp.is_water_region(x1, y1, x2, y2, threshold=0.5):
+                logger.warning("Expansion district %s is mostly water — skipping",
+                               nd.get("name", "?"))
+                continue
+
+            validated.append(nd)
+
+        if not validated:
+            await self._chat("cartographus", "info", "All proposed expansion districts failed validation.")
+            await self._set_status("cartographus", "idle")
+            return False
+
+        for nd in validated:
             nd["expansion_generation"] = self.engine.generation + 1
             self.districts.append(nd)
 
         await self._chat("cartographus", "info",
-                         f"Discovered {len(new_districts)} new districts: "
-                         + ", ".join(d['name'] for d in new_districts))
+                         f"Discovered {len(validated)} new districts: "
+                         + ", ".join(d['name'] for d in validated))
         await self._set_status("cartographus", "idle")
 
         # Save expanded districts cache
         await asyncio.to_thread(save_districts_cache, self.districts, "")
 
         # Start surveys for new districts
-        self.engine._start_survey_tasks_from_index(self.engine.district_index, len(self.districts))
+        self.engine.tasks.start_survey_tasks_from_index(self.engine.district_index, len(self.districts))
 
-        logger.info(f"Expansion: +{len(new_districts)} districts, total now {len(self.districts)}")
+        logger.info(f"Expansion: +{len(validated)} districts, total now {len(self.districts)}")
 
         # Send updated world bounds so client can expand its grid
         await self.broadcast(self.world.to_dict())
+
+        # Broadcast updated terrain_data if blueprint exists so 3D terrain mesh
+        # extends to cover the new district regions
+        if bp and (bp.hills or bp.water):
+            # Apply elevation to any newly created tiles in expanded area
+            elev_count = bp.apply_elevation_to_world(self.world)
+            if elev_count:
+                logger.info("Expansion: applied elevation to %d new tiles", elev_count)
+            await self.broadcast({
+                "type": "terrain_data",
+                "hills": bp.hills,
+                "water": bp.water,
+            })
+
         return True
+
+    def _compute_expansion_direction_hint(self, existing_regions: list[dict]) -> str:
+        """Compute which direction has least development for expansion guidance.
+
+        Returns a compact hint string like 'EXPANSION HINT: Least developed: N,E'
+        or empty string if no clear preference.
+        """
+        if not existing_regions:
+            return ""
+
+        w = self.world
+        if not w.tiles:
+            return ""
+
+        cx = (w.min_x + w.max_x) / 2
+        cy = (w.min_y + w.max_y) / 2
+
+        # Count districts in each quadrant relative to center
+        direction_counts = {"N": 0, "S": 0, "E": 0, "W": 0}
+        for r in existing_regions:
+            mid_x = (r.get("x1", 0) + r.get("x2", 0)) / 2
+            mid_y = (r.get("y1", 0) + r.get("y2", 0)) / 2
+            if mid_y < cy:
+                direction_counts["N"] += 1
+            else:
+                direction_counts["S"] += 1
+            if mid_x > cx:
+                direction_counts["E"] += 1
+            else:
+                direction_counts["W"] += 1
+
+        if not any(direction_counts.values()):
+            return ""
+
+        min_count = min(direction_counts.values())
+        least_developed = [d for d, c in direction_counts.items() if c == min_count]
+
+        if len(least_developed) == 4:
+            return ""  # All equally developed — no hint
+
+        return f"EXPANSION HINT: Least developed direction(s): {','.join(least_developed)}. Prefer expanding this way."
 
     async def refine_map_description_background(self):
         """Phase-2 planner: long map_description while districts are being surveyed/built."""

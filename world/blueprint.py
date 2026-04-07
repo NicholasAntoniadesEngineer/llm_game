@@ -205,6 +205,80 @@ class CityBlueprint:
             return ""
         return "FACE:" + ",".join(f"{k}={v}" for k, v in facings.items())
 
+    def get_geography_context(self) -> str:
+        """Compact geography summary for expansion prompts (< 50 tokens).
+
+        Format: 'GEO:hills=Name(cx,cy,rR,hP),...;water=Name(type,[x0,y0]->[x1,y1])'
+        Returns empty string if no geography data exists.
+        """
+        parts = []
+        if self.hills:
+            hill_strs = []
+            for h in self.hills[:4]:  # Cap at 4 hills for token budget
+                name = h.get("name", "hill")
+                # Truncate name to 12 chars
+                name = name[:12] if len(name) > 12 else name
+                cx, cy = h.get("cx", 0), h.get("cy", 0)
+                r = h.get("radius", 1)
+                p = h.get("peak", 1.0)
+                hill_strs.append(f"{name}({cx},{cy},r{r},h{p})")
+            parts.append("hills=" + ",".join(hill_strs))
+        if self.water:
+            water_strs = []
+            for w in self.water[:3]:  # Cap at 3 water features
+                name = w.get("name", "water")
+                name = name[:12] if len(name) > 12 else name
+                wtype = w.get("type", "river")
+                pts = w.get("points", [])
+                if pts and len(pts) >= 2:
+                    p0, p1 = pts[0], pts[-1]
+                    # Points may be [x,y] lists or dicts
+                    if isinstance(p0, (list, tuple)):
+                        water_strs.append(f"{name}({wtype},[{p0[0]},{p0[1]}]->[{p1[0]},{p1[1]}])")
+                    elif isinstance(p0, dict):
+                        water_strs.append(f"{name}({wtype},[{p0.get('x',0)},{p0.get('y',0)}]->[{p1.get('x',0)},{p1.get('y',0)}])")
+                    else:
+                        water_strs.append(f"{name}({wtype})")
+                else:
+                    water_strs.append(f"{name}({wtype})")
+            parts.append("water=" + ",".join(water_strs))
+        if not parts:
+            return ""
+        return "GEO:" + ";".join(parts)
+
+    def is_water_region(self, x1: int, y1: int, x2: int, y2: int, threshold: float = 0.5) -> bool:
+        """Check if a region is mostly water based on water feature proximity.
+
+        Returns True if more than `threshold` fraction of tiles are near water.
+        Uses a simple distance check against water feature polylines.
+        """
+        if not self.water:
+            return False
+
+        total_tiles = max(1, (x2 - x1 + 1) * (y2 - y1 + 1))
+        water_tiles = 0
+        water_radius = 2  # tiles within 2 of a water polyline count as "water"
+
+        for x in range(x1, x2 + 1):
+            for y in range(y1, y2 + 1):
+                for w in self.water:
+                    pts = w.get("points", [])
+                    for pt in pts:
+                        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                            px, py = pt[0], pt[1]
+                        elif isinstance(pt, dict):
+                            px, py = pt.get("x", 0), pt.get("y", 0)
+                        else:
+                            continue
+                        if abs(x - px) <= water_radius and abs(y - py) <= water_radius:
+                            water_tiles += 1
+                            break
+                    else:
+                        continue
+                    break  # Already counted this tile
+
+        return (water_tiles / total_tiles) > threshold
+
     def build_context_line(self, world: WorldState, x: int, y: int, district_name: str) -> str:
         """Build the full compact context line for an Urbanista prompt.
 
