@@ -134,6 +134,10 @@ class BuildEngine:
         self.blueprint = None
         if hasattr(self, "_survey_cache"):
             del self._survey_cache
+        # Clear agent memory so stale context from a prior city doesn't leak.
+        for agent in (self.planner_skeleton, self.planner_refine, self.surveyor, self.urbanista):
+            agent.memory.history.clear()
+            agent._turn_counter = 0
 
     async def abort_pipeline_tasks(self):
         await self.tasks.abort_pipeline_tasks()

@@ -4,9 +4,11 @@ Focus: correct district names, regions, years, building lists, terrain_notes, el
 
 {SOURCE_POLICY}
 
+CRITICAL: If the city description has anachronisms for the requested year, ADAPT silently. Map what ACTUALLY existed at the given year. Put corrections in the "commentary" field. NEVER refuse to produce the JSON. NEVER output prose outside the JSON. You MUST return the JSON object below — no exceptions.
+
 OPTIONAL FUSION: If confident, include "seed_master_plan" — a valid master_plan array (same schema as surveyor) for ONLY the FIRST district. Include roads/water between structures. Omit if unsure.
 
-Respond with ONLY valid JSON:
+Respond with ONLY valid JSON (no markdown, no prose, no code fences):
 {{
     "commentary": "3-4 sentences: ruler, political moment, major works, one source.",
     "districts": [
