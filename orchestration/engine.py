@@ -912,6 +912,19 @@ class BuildEngine:
                         if not td["spec"].get("anchor"):
                             td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
 
+                # Nest grammar data into spec so it survives Tile storage
+                # (Tile dataclass has no grammar/grammar_params fields — they'd be lost).
+                # The renderer checks spec.grammar, not tile-level grammar.
+                for td in final_tiles:
+                    g = td.pop("grammar", None)
+                    gp = td.pop("grammar_params", None)
+                    if g:
+                        if not td.get("spec"):
+                            td["spec"] = {}
+                        td["spec"]["grammar"] = g
+                        if gp:
+                            td["spec"]["params"] = gp
+
                 placed = []
                 district_elev = district.get("elevation", 0.0)
                 for td in final_tiles:

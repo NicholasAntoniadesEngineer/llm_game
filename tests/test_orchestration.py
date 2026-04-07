@@ -860,5 +860,65 @@ class TestPhase4Validation:
             })
 
 
+# ---------------------------------------------------------------------------
+# Grammar tile handling
+# ---------------------------------------------------------------------------
+
+
+class TestGrammarTiles:
+    def test_grammar_tile_validates_ok(self):
+        """Grammar tiles with valid grammar id pass validation."""
+        validate_urbanista_arch_result({
+            "tiles": [{
+                "x": 10, "y": 5, "terrain": "building",
+                "grammar": "roman_temple",
+                "grammar_params": {"order": "corinthian", "cols": 8},
+            }],
+        })
+
+    def test_grammar_tile_invalid_id_rejected(self):
+        """Grammar tiles with unknown grammar id are rejected."""
+        with pytest.raises(UrbanistaValidationError, match="grammar must be one of"):
+            validate_urbanista_arch_result({
+                "tiles": [{
+                    "x": 10, "y": 5, "terrain": "building",
+                    "grammar": "flying_saucer",
+                }],
+            })
+
+    def test_grammar_tile_sanitize_sets_terrain(self):
+        """Sanitizer sets terrain='building' on grammar tiles."""
+        arch = {
+            "tiles": [{
+                "x": 10, "y": 5,
+                "grammar": "roman_temple",
+                "grammar_params": {"order": "ionic"},
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        assert result["tiles"][0].get("terrain") == "building"
+
+    def test_grammar_tile_skip_spec_validation(self):
+        """Grammar tiles skip spec validation (no components/template required)."""
+        # A grammar tile without spec should pass validation
+        validate_urbanista_arch_result({
+            "tiles": [{
+                "x": 10, "y": 5, "terrain": "building",
+                "grammar": "basilica",
+            }],
+        })
+
+    def test_grammar_params_must_be_object_if_present(self):
+        """grammar_params must be an object if present."""
+        with pytest.raises(UrbanistaValidationError, match="grammar_params must be an object"):
+            validate_urbanista_arch_result({
+                "tiles": [{
+                    "x": 10, "y": 5, "terrain": "building",
+                    "grammar": "roman_temple",
+                    "grammar_params": "not_an_object",
+                }],
+            })
+
+
 if __name__ == "__main__":
     unittest.main()

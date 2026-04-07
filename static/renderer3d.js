@@ -2300,12 +2300,15 @@ class WorldRenderer {
             }
 
             // Grammar engine integration — expand grammar specs into procedural parts
-            if (!resolvedComponents && spec.grammar && window.EternalCities?.GrammarEngine) {
+            // Grammar data may be in spec.grammar (canonical) or tile.grammar (legacy/direct)
+            const grammarId = spec.grammar || tile.grammar;
+            const grammarParams = spec.params || tile.grammar_params || {};
+            if (!resolvedComponents && grammarId && window.EternalCities?.GrammarEngine) {
                 try {
-                    const grammarShapes = window.EternalCities.GrammarEngine.expand(spec.grammar, spec.params || {});
+                    const grammarShapes = window.EternalCities.GrammarEngine.expand(grammarId, grammarParams);
                     const allShapes = grammarShapes.concat(spec.overrides || []);
-                    // Grammar shapes use {type, pos, size, color} format.
-                    // Convert to procedural parts: {shape, position, size/width/height/depth, color}
+                    // Grammar shapes already use {shape, position, size, color} format.
+                    // Normalize any legacy {type, pos} keys to {shape, position} for _buildProcedural.
                     const parts = allShapes.map(s => {
                         const part = { ...s };
                         if (s.type && !s.shape) { part.shape = s.type; delete part.type; }
@@ -2313,7 +2316,7 @@ class WorldRenderer {
                         return part;
                     });
                     // Wrap as a single procedural component for the builder system
-                    resolvedComponents = [{ type: "procedural", parts }];
+                    resolvedComponents = [{ type: "procedural", stack_role: "structural", parts }];
                 } catch (e) {
                     const msg = e && e.message ? e.message : String(e);
                     console.warn(`Grammar expansion failed for tile (${tile.x},${tile.y}): ${msg}`);
@@ -2331,7 +2334,7 @@ class WorldRenderer {
                             if (s.pos && !s.position) { part.position = s.pos; delete part.pos; }
                             return part;
                         });
-                        resolvedComponents = [{ type: "procedural", parts }];
+                        resolvedComponents = [{ type: "procedural", stack_role: "structural", parts }];
                     } catch (e) {
                         const msg = e && e.message ? e.message : String(e);
                         console.warn(`Dense shape expansion failed for tile (${tile.x},${tile.y}): ${msg}`);
