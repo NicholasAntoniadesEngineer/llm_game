@@ -1280,10 +1280,73 @@ class WorldRenderer {
         this._blueprintWater = water || [];
         if (this.grid) {
             this._cornerHeights = this._computeCornerHeightGrid();
-            if (this._terrainMesh) {
-                this._rebuildTerrainMesh();
+            this._rebuildTerrainMesh();
+        }
+    }
+
+    _rebuildTerrainMesh() {
+        const S = TILE_SIZE;
+        const H = this._cornerHeights;
+        if (!H || !H.length) return;
+
+        // Remove old terrain
+        if (this._terrainMesh) {
+            this.scene.remove(this._terrainMesh);
+            this._terrainMesh.geometry.dispose();
+        }
+        // Remove old water plane
+        if (this._riverWaterPlane) {
+            this.scene.remove(this._riverWaterPlane);
+            this._riverWaterPlane.geometry.dispose();
+        }
+
+        // Compute height range
+        let minH = Infinity, maxH = -Infinity;
+        for (const row of H) {
+            for (const h of row) {
+                if (h < minH) minH = h;
+                if (h > maxH) maxH = h;
             }
         }
+        if (!Number.isFinite(minH)) minH = 0;
+        if (!Number.isFinite(maxH)) maxH = 0;
+
+        // Rebuild terrain mesh
+        this._terrainMesh = this._buildTerrainHeightfieldMesh(S, 0x9a7b52, minH, maxH);
+        this.scene.add(this._terrainMesh);
+
+        // Add water plane at Y=0 if we have water features or negative elevation
+        const hasWater = (this._blueprintWater && this._blueprintWater.length > 0);
+        if (hasWater || minH < -0.1) {
+            const gw = this.width || 40;
+            const gh = this.height || 40;
+            const waterGeo = new THREE.PlaneGeometry(gw * S * 1.5, gh * S * 1.5);
+            waterGeo.rotateX(-Math.PI / 2);
+            const waterMat = new THREE.MeshStandardMaterial({
+                color: 0x2a6a8a,
+                roughness: 0.15,
+                metalness: 0.3,
+                transparent: true,
+                opacity: 0.7,
+            });
+            this._riverWaterPlane = new THREE.Mesh(waterGeo, waterMat);
+            this._riverWaterPlane.position.set(gw * S / 2, -0.05 * S, gh * S / 2);
+            this._riverWaterPlane.receiveShadow = true;
+            this._riverWaterPlane.userData.isWater = true;
+            this.scene.add(this._riverWaterPlane);
+        }
+
+        // Reposition existing buildings to match new terrain
+        this.buildingGroups.forEach((group, key) => {
+            const tile = group.userData && group.userData.tile;
+            if (tile) {
+                const newY = this._surfaceYAtWorldXZ(
+                    (tile.x + 0.5) * S, (tile.y + 0.5) * S
+                );
+                group.position.y = newY;
+                group.userData.baseY = newY;
+            }
+        });
     }
 
     _computeElevationFromHills(tileX, tileZ) {
