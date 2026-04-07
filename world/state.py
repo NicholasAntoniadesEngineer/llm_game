@@ -90,6 +90,9 @@ class WorldState:
         self._dirty_chunks.add((x // CHUNK_SIZE, y // CHUNK_SIZE))
 
         self.build_log.append({"turn": self.turn, "x": x, "y": y, **data})
+        # Cap build_log to prevent unbounded memory growth during long sessions
+        if len(self.build_log) > 5000:
+            self.build_log = self.build_log[-2500:]
         return True
 
     def get_tile(self, x: int, y: int) -> Tile | None:

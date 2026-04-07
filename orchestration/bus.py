@@ -38,6 +38,9 @@ class MessageBus:
 
     async def publish(self, message: BusMessage):
         self._messages.append(message)
+        # Cap stored messages to prevent unbounded memory growth
+        if len(self._messages) > 1000:
+            self._messages = self._messages[-500:]
         for q in self._subscribers:
             await q.put(message)
 

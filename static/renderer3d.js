@@ -4552,6 +4552,11 @@ class WorldRenderer {
     }
 
     _updateHover(e) {
+        // Throttle hover checks to 50ms to avoid excessive raycasting
+        const now = Date.now();
+        if (now - (this._lastHoverTime || 0) < 50) return;
+        this._lastHoverTime = now;
+
         const rect = this.renderer3d.domElement.getBoundingClientRect();
         this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
