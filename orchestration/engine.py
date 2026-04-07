@@ -3,10 +3,15 @@
 import asyncio
 import json
 import logging
+import os
 import time
 
 from world.state import WorldState
 from world.blueprint import CityBlueprint
+from agents.memory import StyleMemory
+from agents.tools import WorldQueryTools
+from orchestration.debate import DebateProtocol
+from orchestration.proposals import ProposalQueue, WorkProposal
 from orchestration.bus import MessageBus, BusMessage
 from orchestration.task_manager import TaskManager
 from core.run_log import log_event
@@ -97,6 +102,12 @@ class BuildEngine:
         self._fused_seed_master_plan: list | None = None
         self._survey_cache_lock = asyncio.Lock()
 
+        # Intelligence subsystems
+        self.style_memory = StyleMemory()
+        self.world_tools = WorldQueryTools(world)
+        self.debate = DebateProtocol()
+        self.proposals = ProposalQueue()
+
         # TaskManager owns running flag, task handles, semaphores, and save-throttling.
         # Note: survey_work_item_fn uses a lambda so it resolves self.generators at call time
         # (generators is created immediately after tasks).
@@ -138,6 +149,9 @@ class BuildEngine:
         for agent in (self.planner_skeleton, self.planner_refine, self.surveyor, self.urbanista):
             agent.memory.history.clear()
             agent._turn_counter = 0
+        # Clear intelligence subsystems
+        self.style_memory = StyleMemory()
+        self.proposals = ProposalQueue()
 
     async def abort_pipeline_tasks(self):
         await self.tasks.abort_pipeline_tasks()
@@ -634,13 +648,22 @@ class BuildEngine:
                     await self._pause_for_api_issue("unknown", str(exc), "urbanista")
                     return False
 
-            # ── Inject blueprint coherence context (~100 tokens) ──
+            # ── Inject coherence context (~100-150 tokens) ──
+            context_parts = []
             if self.blueprint:
                 ctx_line = self.blueprint.build_context_line(
                     self.world, anchor_x, anchor_y, district_key,
                 )
                 if ctx_line:
-                    prompt = ctx_line + "\n" + prompt
+                    context_parts.append(ctx_line)
+            style_ctx = self.style_memory.format_style_context()
+            if style_ctx:
+                context_parts.append(style_ctx)
+            spatial_ctx = self.world_tools.format_context_block(anchor_x, anchor_y, btype)
+            if spatial_ctx:
+                context_parts.append(spatial_ctx)
+            if context_parts:
+                prompt = "\n".join(context_parts) + "\n" + prompt
 
             urban_jobs.append({
                 "name": name,
@@ -878,6 +901,11 @@ class BuildEngine:
                             tile = self.world.get_tile(x, y)
                             if tile:
                                 placed.append(tile.to_dict())
+
+                # Record design in style memory for coherence tracking
+                for td_placed in placed:
+                    if td_placed.get("spec"):
+                        self.style_memory.record_design(td_placed.get("spec", {}))
 
                 logger.info("Placing %d tiles for %s", len(placed), name)
                 if placed:

@@ -405,9 +405,9 @@ class WorldRenderer {
             if (typeof THREE.UnrealBloomPass === "function") {
                 const bloomPass = new THREE.UnrealBloomPass(
                     new THREE.Vector2(w, h),
-                    0.25,  // strength
-                    0.4,   // radius
-                    0.85   // threshold
+                    0.12,  // strength (subtle)
+                    0.3,   // radius
+                    0.92   // threshold (only brightest surfaces)
                 );
                 this.composer.addPass(bloomPass);
                 this._bloomPass = bloomPass;
@@ -417,8 +417,8 @@ class WorldRenderer {
             const ColorGradeShader = {
                 uniforms: {
                     tDiffuse: { value: null },
-                    shadowTint: { value: new THREE.Vector3(1.04, 0.97, 0.90) },  // slight orange in shadows
-                    highlightTint: { value: new THREE.Vector3(1.06, 1.02, 0.88) }, // golden highlights
+                    shadowTint: { value: new THREE.Vector3(1.01, 0.98, 0.94) },  // very subtle warm shadows
+                    highlightTint: { value: new THREE.Vector3(1.0, 0.99, 0.95) }, // neutral highlights
                 },
                 vertexShader: `
                     varying vec2 vUv;
@@ -5170,8 +5170,8 @@ class WorldRenderer {
             );
         }
 
-        // Tone mapping exposure: slightly brighter at noon, darker at night
-        this.renderer3d.toneMappingExposure = 0.7 + sunAlt * 0.35 - nightFactor * 0.25;
+        // Tone mapping exposure: controlled range to avoid washout
+        this.renderer3d.toneMappingExposure = 0.75 + sunAlt * 0.15 - nightFactor * 0.2;
 
         // Update dynamic Sky shader if present
         this._updateSkyForTimeOfDay(t);
