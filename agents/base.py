@@ -6,6 +6,7 @@ instructions as compact strings (<100 tokens) before each LLM call, and
 interaction summaries are recorded after each response.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -19,6 +20,19 @@ from core.run_log import log_event
 from core.errors import AgentGenerationError, classify_agent_failure
 
 logger = logging.getLogger("eternal.agents")
+
+
+def _broadcast_prompt_event(msg: dict):
+    """Fire-and-forget broadcast of prompt/response data to WebSocket clients."""
+    try:
+        from server.state import broadcast_fn
+        if not broadcast_fn:
+            return
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(broadcast_fn(msg))
+    except Exception:
+        pass  # Never let UI broadcasting break agent calls
 
 
 def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
@@ -168,6 +182,16 @@ class BaseAgent:
                 len(prompt),
             )
             logger.info("LLM query instruction preview [%s]:\n%s", self.role, inst_preview)
+            # Broadcast prompt to UI
+            _broadcast_prompt_event({
+                "type": "agent_prompt",
+                "agent": self.role,
+                "agent_key": self.llm_agent_key,
+                "model": model,
+                "system_prompt_len": len(self.system_prompt),
+                "instruction": instruction[:2000],
+                "timestamp": time.time(),
+            })
             _t0 = time.monotonic()
             raw = await provider.complete(
                 role=self.role,
@@ -224,6 +248,17 @@ class BaseAgent:
                 provider_kind=provider_kind,
             )
             logger.info(f"[{self.role}] parsed: {list(result.keys())}")
+            # Broadcast response to UI
+            _broadcast_prompt_event({
+                "type": "agent_response",
+                "agent": self.role,
+                "agent_key": self.llm_agent_key,
+                "response_preview": raw[:2000],
+                "parse_success": True,
+                "elapsed_ms": _elapsed_ms,
+                "tokens": total_tokens,
+                "timestamp": time.time(),
+            })
             return result
 
         except AgentGenerationError:

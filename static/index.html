@@ -87,6 +87,16 @@
         <button type="button" class="popup-bottom-close" onclick="closeMapOverlay()">Close</button>
     </div>
 
+    <!-- Prompt viewer overlay -->
+    <div class="log-overlay" id="prompt-overlay" style="display:none;border-color:#9b59b6;">
+        <div class="map-overlay-header">
+            <h3 style="color:#9b59b6;">Agent Prompts</h3>
+            <button type="button" style="margin-left:auto;background:none;border:none;color:#aaa;cursor:pointer;font-size:0.8rem;" onclick="document.getElementById('prompt-content').innerHTML=''">Clear</button>
+            <button type="button" class="popup-close-btn" onclick="document.getElementById('prompt-overlay').style.display='none'" aria-label="Close">&times;</button>
+        </div>
+        <div class="log-content" id="prompt-content" style="font-family:monospace;font-size:0.75rem;"></div>
+    </div>
+
     <!-- Log viewer overlay -->
     <div class="log-overlay" id="log-overlay">
         <button type="button" class="popup-close-btn" onclick="closeLogOverlay()" aria-label="Close">&times;</button>
@@ -106,6 +116,7 @@
                 <div class="floating-tools-actions">
                     <button type="button" class="map-btn" id="map-btn" onclick="toggleMapOverlay()" title="View historical reference map">MAP</button>
                     <button type="button" class="map-btn" id="log-btn" onclick="toggleLogOverlay()" title="View agent logs">LOGS</button>
+                    <button type="button" class="map-btn" id="prompt-btn" onclick="togglePromptOverlay()" title="View agent prompts and responses in real time" style="border-color:#9b59b6;color:#9b59b6;">PROMPTS</button>
                     <button type="button" class="map-btn" id="llm-settings-btn" onclick="toggleLlmSettingsOverlay()" title="AI Settings (provider/model per agent)">AI Settings</button>
                     <button type="button" class="map-btn" id="reload-code-btn" onclick="reloadClientCode()" title="Reload this page (JavaScript/CSS). Does not restart Python or delete saves.">Reload code</button>
                     <button type="button" class="map-btn" id="restart-server-btn" onclick="restartServerFromUi()" title="Restart the Python process (needs ETERNAL_CITIES_RELOAD=1). Persists the world first; keeps planning caches.">Restart server</button>

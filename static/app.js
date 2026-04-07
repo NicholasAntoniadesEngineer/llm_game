@@ -463,6 +463,14 @@ function handleMessage(msg) {
             if (msg.status !== "thinking") hideLoading();
             break;
 
+        case "agent_prompt":
+            appendPromptEntry(msg);
+            break;
+
+        case "agent_response":
+            updatePromptResponse(msg);
+            break;
+
         case "loading":
             showLoading(msg.agent, msg.message);
             setAgentStatus(msg.agent, "thinking");
@@ -1943,6 +1951,71 @@ function toggleLogOverlay() {
 
 function closeLogOverlay() {
     document.getElementById("log-overlay").classList.remove("visible");
+}
+
+// --- Prompt Viewer ---
+
+function togglePromptOverlay() {
+    const el = document.getElementById("prompt-overlay");
+    if (!el) return;
+    el.style.display = el.style.display === "none" ? "" : "none";
+    el.classList.toggle("visible");
+}
+
+function appendPromptEntry(msg) {
+    const el = document.getElementById("prompt-content");
+    if (!el) return;
+    const ts = new Date(msg.timestamp * 1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    const agentColors = {cartographus:"#3498db", urbanista:"#e67e22", historicus:"#9b59b6", faber:"#27ae60", civis:"#e74c3c"};
+    const color = agentColors[msg.agent] || "#888";
+    const detail = document.createElement("details");
+    detail.className = "prompt-entry";
+    detail.dataset.agent = msg.agent;
+    detail.dataset.key = msg.agent_key;
+    detail.innerHTML = `
+        <summary style="cursor:pointer;padding:4px 6px;border-bottom:1px solid #333;display:flex;gap:8px;align-items:center;">
+            <span style="color:${color};font-weight:bold;min-width:100px;">${(msg.agent||"").toUpperCase()}</span>
+            <span style="color:#888;font-size:0.7rem;">${msg.model||""}</span>
+            <span style="color:#666;font-size:0.7rem;">${ts}</span>
+            <span style="color:#666;font-size:0.7rem;">sys:${msg.system_prompt_len||0}ch</span>
+            <span class="prompt-status" style="margin-left:auto;color:#888;">⏳</span>
+        </summary>
+        <div style="padding:6px;background:#1a1a2e;border-bottom:1px solid #333;">
+            <div style="color:#aaa;font-size:0.65rem;margin-bottom:4px;">INSTRUCTION:</div>
+            <pre style="white-space:pre-wrap;word-break:break-word;color:#ccc;font-size:0.7rem;max-height:300px;overflow-y:auto;margin:0;">${escapeHtml(msg.instruction||"")}</pre>
+        </div>`;
+    el.appendChild(detail);
+    el.scrollTop = el.scrollHeight;
+    // Cap at 50 entries
+    while (el.children.length > 50) el.removeChild(el.firstChild);
+}
+
+function updatePromptResponse(msg) {
+    const el = document.getElementById("prompt-content");
+    if (!el) return;
+    // Find last entry for this agent
+    const entries = el.querySelectorAll(`details[data-agent="${msg.agent}"]`);
+    const last = entries[entries.length - 1];
+    if (!last) return;
+    const status = last.querySelector(".prompt-status");
+    if (status) {
+        status.textContent = msg.parse_success ? "✓" : "✗";
+        status.style.color = msg.parse_success ? "#2ecc71" : "#e74c3c";
+    }
+    const summary = last.querySelector("summary");
+    if (summary && msg.tokens) {
+        const tokSpan = document.createElement("span");
+        tokSpan.style.cssText = "color:#888;font-size:0.7rem;";
+        tokSpan.textContent = `${(msg.tokens/1000).toFixed(1)}k tok ${msg.elapsed_ms}ms`;
+        summary.insertBefore(tokSpan, status);
+    }
+    // Add response preview
+    const responseDiv = document.createElement("div");
+    responseDiv.style.cssText = "padding:6px;background:#1a1a20;border-bottom:1px solid #333;";
+    responseDiv.innerHTML = `
+        <div style="color:#aaa;font-size:0.65rem;margin-bottom:4px;">RESPONSE${msg.parse_success?"":" (PARSE FAILED)"}:</div>
+        <pre style="white-space:pre-wrap;word-break:break-word;color:${msg.parse_success?"#8f8":"#f88"};font-size:0.7rem;max-height:300px;overflow-y:auto;margin:0;">${escapeHtml(msg.response_preview||"")}</pre>`;
+    last.appendChild(responseDiv);
 }
 
 // --- Utility ---
