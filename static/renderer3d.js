@@ -1273,16 +1273,71 @@ class WorldRenderer {
      * Per-corner elevation (0..1) from adjacent tile elevations — smooth heightfield.
      * Corner (i,j) in world sits at (i*S, j*S); each tile has one nominal elevation.
      */
+    // ─── Terrain Data from Blueprint (hills/water) ───
+
+    setTerrainData(hills, water) {
+        this._blueprintHills = hills || [];
+        this._blueprintWater = water || [];
+        if (this.grid) {
+            this._cornerHeights = this._computeCornerHeightGrid();
+            if (this._terrainMesh) {
+                this._rebuildTerrainMesh();
+            }
+        }
+    }
+
+    _computeElevationFromHills(tileX, tileZ) {
+        let elev = 0;
+        for (const hill of (this._blueprintHills || [])) {
+            const dx = tileX - hill.cx;
+            const dz = tileZ - hill.cy;
+            const distSq = dx * dx + dz * dz;
+            const sigma = hill.radius || 5;
+            elev += (hill.peak || 2) * Math.exp(-distSq / (2 * sigma * sigma));
+        }
+        // Carve rivers
+        for (const w of (this._blueprintWater || [])) {
+            if (w.type === "river" && w.points && w.points.length >= 2) {
+                const dist = this._distToPolyline(tileX, tileZ, w.points);
+                const riverWidth = 1.5;
+                if (dist < riverWidth * 3) {
+                    elev -= 1.5 * Math.exp(-dist * dist / (2 * riverWidth * riverWidth));
+                }
+            }
+        }
+        return elev;
+    }
+
+    _distToPolyline(px, pz, points) {
+        let minDist = Infinity;
+        for (let i = 0; i < points.length - 1; i++) {
+            const [ax, ay] = points[i];
+            const [bx, by] = points[i + 1];
+            const dx = bx - ax, dy = by - ay;
+            const lenSq = dx * dx + dy * dy;
+            let t = lenSq > 0 ? ((px - ax) * dx + (pz - ay) * dy) / lenSq : 0;
+            t = Math.max(0, Math.min(1, t));
+            const cx = ax + t * dx, cy = ay + t * dy;
+            const d = Math.sqrt((px - cx) ** 2 + (pz - cy) ** 2);
+            if (d < minDist) minDist = d;
+        }
+        return minDist;
+    }
+
     _computeCornerHeightGrid() {
         const gw = this.width;
         const gh = this.height;
+        const hasHills = (this._blueprintHills && this._blueprintHills.length > 0);
         const H = [];
         for (let j = 0; j <= gh; j++) {
             const row = [];
             for (let i = 0; i <= gw; i++) {
-                let sum = 0;
-                let n = 0;
-                let maxBuildingElev = null; // Track if any adjacent tile is a building
+                // Base elevation from blueprint hills (if available)
+                let baseElev = hasHills ? this._computeElevationFromHills(i, j) : 0;
+
+                // Check tile data for overrides
+                let sum = 0, n = 0;
+                let maxBuildingElev = null;
                 for (const [tx, ty] of [[i - 1, j - 1], [i, j - 1], [i - 1, j], [i, j]]) {
                     if (tx >= 0 && ty >= 0 && tx < gw && ty < gh) {
                         const t = this.grid[ty][tx];
@@ -1290,8 +1345,6 @@ class WorldRenderer {
                         if (Number.isFinite(e)) {
                             sum += e;
                             n++;
-                            // Building tiles force the terrain up to their elevation
-                            // so the ground forms a flat platform under the building
                             if (t.terrain === "building") {
                                 if (maxBuildingElev === null || e > maxBuildingElev) {
                                     maxBuildingElev = e;
@@ -1300,12 +1353,15 @@ class WorldRenderer {
                         }
                     }
                 }
-                // If any adjacent tile is a building, raise this corner to the building's
-                // elevation — creates a flat platform the building sits on naturally
+                // Buildings get flat platforms at their elevation
                 if (maxBuildingElev !== null) {
                     row.push(maxBuildingElev);
+                } else if (n > 0 && !hasHills) {
+                    // No hills data: use tile averages (original behavior)
+                    row.push(sum / n);
                 } else {
-                    row.push(n ? sum / n : 0);
+                    // Hills data: use gaussian elevation
+                    row.push(baseElev);
                 }
             }
             H.push(row);
@@ -1349,10 +1405,14 @@ class WorldRenderer {
         const idx = (i, j) => j * (gw + 1) + i;
         const uvs = [];
         const colors = [];
-        const baseCol = new THREE.Color(earthColor);
-        const colorLow = baseCol.clone().multiplyScalar(0.78).lerp(new THREE.Color(0x5a7a88), 0.12);
-        const colorHigh = baseCol.clone().multiplyScalar(1.14).lerp(new THREE.Color(0xd8c898), 0.18);
-        const hSpan = maxH > minH ? maxH - minH : 1;
+        // Elevation-band vertex coloring
+        const colWater = new THREE.Color(0x2a5a6a);
+        const colLowland = new THREE.Color(0x5a7a4a);
+        const colMidGreen = new THREE.Color(0x7a9a5a);
+        const colHillBrown = new THREE.Color(0x9a7b52);
+        const colPeak = new THREE.Color(0xb0a080);
+        const colBase = new THREE.Color(earthColor);
+        const hasHills = (this._blueprintHills && this._blueprintHills.length > 0);
         const tmpCol = new THREE.Color();
         for (let j = 0; j <= gh; j++) {
             for (let i = 0; i <= gw; i++) {
@@ -1360,8 +1420,29 @@ class WorldRenderer {
                 const y = hTile * S;
                 positions.push(i * S, y, j * S);
                 uvs.push(i / Math.max(1, gw), j / Math.max(1, gh));
-                const t = Math.max(0, Math.min(1, (hTile - minH) / hSpan));
-                tmpCol.copy(colorLow).lerp(colorHigh, t);
+                if (hasHills) {
+                    // Elevation-band coloring when terrain data available
+                    if (hTile < -0.3) {
+                        tmpCol.copy(colWater);
+                    } else if (hTile < 0.5) {
+                        const t = Math.max(0, (hTile + 0.3) / 0.8);
+                        tmpCol.copy(colWater).lerp(colLowland, t);
+                    } else if (hTile < 2.0) {
+                        const t = (hTile - 0.5) / 1.5;
+                        tmpCol.copy(colLowland).lerp(colMidGreen, t);
+                    } else if (hTile < 4.0) {
+                        const t = (hTile - 2.0) / 2.0;
+                        tmpCol.copy(colMidGreen).lerp(colHillBrown, t);
+                    } else {
+                        const t = Math.min(1, (hTile - 4.0) / 3.0);
+                        tmpCol.copy(colHillBrown).lerp(colPeak, t);
+                    }
+                } else {
+                    // Fallback: simple two-color blend (original behavior)
+                    const hSpan = maxH > minH ? maxH - minH : 1;
+                    const t = Math.max(0, Math.min(1, (hTile - minH) / hSpan));
+                    tmpCol.copy(colBase).multiplyScalar(0.78 + t * 0.36);
+                }
                 colors.push(tmpCol.r, tmpCol.g, tmpCol.b);
             }
         }
@@ -2155,22 +2236,39 @@ class WorldRenderer {
                 resolvedComponents = spec.components;
             }
 
-            // Grammar engine integration — expand grammar specs into components
+            // Grammar engine integration — expand grammar specs into procedural parts
             if (!resolvedComponents && spec.grammar && window.EternalCities?.GrammarEngine) {
                 try {
                     const grammarShapes = window.EternalCities.GrammarEngine.expand(spec.grammar, spec.params || {});
-                    resolvedComponents = grammarShapes.concat(spec.overrides || []);
+                    const allShapes = grammarShapes.concat(spec.overrides || []);
+                    // Grammar shapes use {type, pos, size, color} format.
+                    // Convert to procedural parts: {shape, position, size/width/height/depth, color}
+                    const parts = allShapes.map(s => {
+                        const part = { ...s };
+                        if (s.type && !s.shape) { part.shape = s.type; delete part.type; }
+                        if (s.pos && !s.position) { part.position = s.pos; delete part.pos; }
+                        return part;
+                    });
+                    // Wrap as a single procedural component for the builder system
+                    resolvedComponents = [{ type: "procedural", parts }];
                 } catch (e) {
                     const msg = e && e.message ? e.message : String(e);
                     console.warn(`Grammar expansion failed for tile (${tile.x},${tile.y}): ${msg}`);
                 }
             }
 
-            // Dense array format — expand via grammar engine
+            // Dense array format — expand via grammar engine, wrap as procedural
             if (!resolvedComponents && spec.shapes && Array.isArray(spec.shapes) && spec.shapes.length > 0 && Array.isArray(spec.shapes[0])) {
                 if (window.EternalCities?.GrammarEngine?.expandDenseShapes) {
                     try {
-                        resolvedComponents = window.EternalCities.GrammarEngine.expandDenseShapes(spec.shapes);
+                        const denseShapes = window.EternalCities.GrammarEngine.expandDenseShapes(spec.shapes);
+                        const parts = denseShapes.map(s => {
+                            const part = { ...s };
+                            if (s.type && !s.shape) { part.shape = s.type; delete part.type; }
+                            if (s.pos && !s.position) { part.position = s.pos; delete part.pos; }
+                            return part;
+                        });
+                        resolvedComponents = [{ type: "procedural", parts }];
                     } catch (e) {
                         const msg = e && e.message ? e.message : String(e);
                         console.warn(`Dense shape expansion failed for tile (${tile.x},${tile.y}): ${msg}`);

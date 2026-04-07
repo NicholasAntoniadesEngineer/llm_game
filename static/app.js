@@ -400,6 +400,12 @@ function handleMessage(msg) {
             applyTokenUsageSummary(msg.by_ui_agent);
             break;
 
+        case "terrain_data":
+            if (renderer && renderer.setTerrainData) {
+                renderer.setTerrainData(msg.hills || [], msg.water || []);
+            }
+            break;
+
         case "tile_update":
             if (!Array.isArray(msg.tiles)) break;
             renderer.updateTiles(msg.tiles);

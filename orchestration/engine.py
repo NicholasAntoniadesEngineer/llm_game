@@ -213,6 +213,12 @@ class BuildEngine:
                     elev_count = self.blueprint.populate_elevation(self.world)
                     if road_count or elev_count:
                         logger.info("Blueprint applied: %d road tiles, %d elevation tiles", road_count, elev_count)
+                        # Broadcast terrain data (hills/water) for 3D terrain mesh
+                        await self.broadcast({
+                            "type": "terrain_data",
+                            "hills": self.blueprint.hills,
+                            "water": self.blueprint.water,
+                        })
                         # Broadcast the road tiles so clients see them immediately
                         road_tiles = [t.to_dict() for t in self.world.tiles.values()
                                       if t.terrain == "road" and t.building_type == "road"]
