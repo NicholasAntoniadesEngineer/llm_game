@@ -175,6 +175,12 @@ class WorldRenderer {
         this._dustParticles = null;
         this._dustVelocities = null;
 
+        // District label sprites — floating text above each district center
+        this._districtLabelsGroup = new THREE.Group();
+        this._districtLabelsGroup.name = "districtLabels";
+        this.scene.add(this._districtLabelsGroup);
+        this._districtLabelsVisible = true;
+
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
         this.cameraPitch = 0.5;
@@ -254,6 +260,12 @@ class WorldRenderer {
         window.addEventListener("keydown", e => {
             // Don't capture if user is typing in an input
             if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+            // Shift+L: toggle district labels
+            if (e.shiftKey && e.key.toLowerCase() === "l") {
+                this.toggleDistrictLabels();
+                e.preventDefault();
+                return;
+            }
             const nk = _normKey(e);
             if (nk === "space") e.preventDefault();
             this._keysDown.add(nk);
@@ -1251,6 +1263,10 @@ class WorldRenderer {
         // Clean up particles
         this._dustParticles = null;
         this._dustVelocities = null;
+        // District labels group was removed with scene children — recreate
+        this._districtLabelsGroup = new THREE.Group();
+        this._districtLabelsGroup.name = "districtLabels";
+        this.scene.add(this._districtLabelsGroup);
     }
 
     _disposeGroupResources(group) {
@@ -5673,6 +5689,119 @@ class WorldRenderer {
         this._flyFrom = { x: this.cameraTarget.x, z: this.cameraTarget.z };
         this._flyDistTarget = targetDist;
         this._flyDistFrom = this.cameraDistance;
+    }
+
+    // ─── District Labels ───
+
+    /**
+     * Create a floating text sprite label for a district.
+     * @param {string} name  — district display name
+     * @param {object} region — {x1, y1, x2, y2} in tile coordinates
+     */
+    addDistrictLabel(name, region) {
+        if (!name || !region) return;
+        // Avoid duplicate labels for the same district
+        for (const child of this._districtLabelsGroup.children) {
+            if (child.userData && child.userData.districtName === name) return;
+        }
+
+        const S = TILE_SIZE;
+        // Center of the region in world coordinates
+        const cx = ((region.x1 + region.x2) / 2 + 0.5) * S;
+        const cz = ((region.y1 + region.y2) / 2 + 0.5) * S;
+        // Elevation at center + offset above buildings
+        const groundY = this._surfaceYAtWorldXZ ? this._surfaceYAtWorldXZ(cx, cz) : 0;
+        const labelY = groundY + S * 6;
+
+        // Canvas text texture
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        const fontSize = 48;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        const textWidth = ctx.measureText(name).width;
+        const padding = 24;
+        canvas.width = textWidth + padding * 2;
+        canvas.height = fontSize + padding * 2;
+
+        // Semi-transparent dark background
+        ctx.fillStyle = "rgba(15, 15, 30, 0.7)";
+        const radius = 12;
+        this._roundRect(ctx, 0, 0, canvas.width, canvas.height, radius);
+        ctx.fill();
+
+        // Border
+        ctx.strokeStyle = "rgba(200, 180, 120, 0.5)";
+        ctx.lineWidth = 2;
+        this._roundRect(ctx, 1, 1, canvas.width - 2, canvas.height - 2, radius);
+        ctx.stroke();
+
+        // Text
+        ctx.font = `bold ${fontSize}px sans-serif`;
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(name, canvas.width / 2, canvas.height / 2);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+
+        const spriteMat = new THREE.SpriteMaterial({
+            map: texture,
+            transparent: true,
+            depthTest: false,
+            sizeAttenuation: true,
+        });
+        const sprite = new THREE.Sprite(spriteMat);
+        sprite.position.set(cx, labelY, cz);
+
+        // Scale: proportional to region size so labels are readable at city-wide zoom
+        const regionSpan = Math.max(
+            (region.x2 - region.x1) * S,
+            (region.y2 - region.y1) * S,
+            S * 6
+        );
+        const aspect = canvas.width / canvas.height;
+        const baseScale = regionSpan * 0.4;
+        sprite.scale.set(baseScale * aspect, baseScale, 1);
+
+        sprite.userData = { districtName: name, region };
+        sprite.renderOrder = 999;
+
+        this._districtLabelsGroup.add(sprite);
+    }
+
+    /** Helper: draw a rounded rectangle path on a canvas 2D context. */
+    _roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    /** Toggle visibility of all district labels (Shift+L). */
+    toggleDistrictLabels() {
+        this._districtLabelsVisible = !this._districtLabelsVisible;
+        this._districtLabelsGroup.visible = this._districtLabelsVisible;
+    }
+
+    /** Remove all district labels (called on scene clear / reset). */
+    clearDistrictLabels() {
+        while (this._districtLabelsGroup.children.length > 0) {
+            const child = this._districtLabelsGroup.children[0];
+            if (child.material) {
+                if (child.material.map) child.material.map.dispose();
+                child.material.dispose();
+            }
+            this._districtLabelsGroup.remove(child);
+        }
     }
 
     _animate() {

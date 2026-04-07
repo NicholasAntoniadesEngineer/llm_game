@@ -305,6 +305,7 @@ class BuildEngine:
                 self.world.current_year = district.get("year", -44)
 
                 scenery = self._district_scenery_summaries.get(district_name, "")
+                region = district.get("region", {})
                 await self.broadcast({
                     "type": "phase",
                     "district": district_name,
@@ -314,6 +315,12 @@ class BuildEngine:
                     "total_districts": len(self.districts),
                     "wave": wave_label,
                     "generation": self.generation,
+                    "region": {
+                        "x1": region.get("x1", 0),
+                        "y1": region.get("y1", 0),
+                        "x2": region.get("x2", 0),
+                        "y2": region.get("y2", 0),
+                    },
                 })
                 await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
 

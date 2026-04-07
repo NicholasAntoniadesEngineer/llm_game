@@ -110,6 +110,41 @@ let isPaused = false;
 /** Track last manual camera interaction — flyTo respects user control. */
 let lastManualCameraMs = 0;
 
+/** District tracking for minimap overlays and 3D labels. */
+let _knownDistricts = [];
+/** Current district progress — updated by phase and build_progress messages. */
+let _currentDistrictIndex = 0;
+let _currentDistrictTotal = 0;
+let _currentBuildingDone = 0;
+let _currentBuildingTotal = 0;
+let _currentDistrictName = "";
+
+/** Color palette for district overlays on the minimap. */
+const DISTRICT_COLORS = [
+    "rgba(230, 126, 34, 0.25)",  // orange
+    "rgba(46, 204, 113, 0.25)",  // green
+    "rgba(52, 152, 219, 0.25)",  // blue
+    "rgba(155, 89, 182, 0.25)",  // purple
+    "rgba(231, 76, 60, 0.25)",   // red
+    "rgba(241, 196, 15, 0.25)",  // yellow
+    "rgba(26, 188, 156, 0.25)",  // teal
+    "rgba(243, 156, 18, 0.25)",  // amber
+    "rgba(142, 68, 173, 0.25)",  // violet
+    "rgba(39, 174, 96, 0.25)",   // emerald
+];
+const DISTRICT_BORDER_COLORS = [
+    "rgba(230, 126, 34, 0.6)",
+    "rgba(46, 204, 113, 0.6)",
+    "rgba(52, 152, 219, 0.6)",
+    "rgba(155, 89, 182, 0.6)",
+    "rgba(231, 76, 60, 0.6)",
+    "rgba(241, 196, 15, 0.6)",
+    "rgba(26, 188, 156, 0.6)",
+    "rgba(243, 156, 18, 0.6)",
+    "rgba(142, 68, 173, 0.6)",
+    "rgba(39, 174, 96, 0.6)",
+];
+
 /** Stable run start for UI clock across refresh if server omits started_at_s (localStorage; cleared on reset). */
 const RUN_START_LOCAL_KEY = "eternal_cities_run_started_ms";
 
@@ -375,6 +410,8 @@ function handleMessage(msg) {
             renderer.init(msg);
             // Populate minimap from initial world state tiles
             miniMapClear();
+            // Reset district tracking — phase messages will repopulate on replay
+            _knownDistricts = [];
             if (Array.isArray(msg.tiles)) {
                 miniMapAddTiles(msg.tiles);
             }
@@ -433,6 +470,9 @@ function handleMessage(msg) {
         case "build_progress":
             if (!msg.done || !msg.total) break;
             updateBuildProgress(msg);
+            _currentBuildingDone = msg.done;
+            _currentBuildingTotal = msg.total;
+            updateDistrictProgress();
             break;
 
         case "chat":
@@ -453,6 +493,29 @@ function handleMessage(msg) {
             } else {
                 updateDistrict(msg.district);
             }
+            // Track district for minimap overlays and 3D labels
+            if (msg.district && msg.region) {
+                const already = _knownDistricts.find(d => d.name === msg.district);
+                if (!already) {
+                    _knownDistricts.push({
+                        name: msg.district,
+                        region: msg.region,
+                        colorIndex: _knownDistricts.length % DISTRICT_COLORS.length,
+                    });
+                }
+                // Create 3D floating label sprite
+                if (renderer && renderer.addDistrictLabel) {
+                    renderer.addDistrictLabel(msg.district, msg.region);
+                }
+                drawMiniMap();
+            }
+            // Update progress tracking
+            _currentDistrictIndex = msg.index || _currentDistrictIndex;
+            _currentDistrictTotal = msg.total_districts || _currentDistrictTotal;
+            _currentDistrictName = msg.district || _currentDistrictName;
+            _currentBuildingDone = 0;
+            _currentBuildingTotal = 0;
+            updateDistrictProgress();
             hideLoading();
             break;
 
@@ -1373,6 +1436,38 @@ function updateProgressBar() {
     label.textContent = totalStructures > 0 ? `${builtStructures} / ${totalStructures} structures` : "";
 }
 
+// --- District progress indicator ---
+
+function updateDistrictProgress() {
+    let el = document.getElementById("district-progress");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "district-progress";
+        el.style.cssText = "position:fixed;bottom:12px;left:50%;transform:translateX(-50%);" +
+            "color:#e8dcc8;font-size:0.75rem;z-index:999;font-family:inherit;letter-spacing:0.5px;" +
+            "background:rgba(15,15,30,0.8);padding:4px 14px;border-radius:6px;border:1px solid rgba(200,180,120,0.3);" +
+            "pointer-events:none;white-space:nowrap;";
+        document.body.appendChild(el);
+    }
+    let text = "";
+    if (_currentDistrictTotal > 0) {
+        text = `District ${_currentDistrictIndex}/${_currentDistrictTotal}`;
+        if (_currentDistrictName) {
+            text += ` \u2014 ${_currentDistrictName}`;
+        }
+        if (_currentBuildingTotal > 0) {
+            text += ` \u2014 Building ${_currentBuildingDone}/${_currentBuildingTotal}`;
+        }
+    }
+    el.textContent = text;
+    el.style.display = text ? "block" : "none";
+}
+
+function removeDistrictProgress() {
+    const el = document.getElementById("district-progress");
+    if (el) el.remove();
+}
+
 // --- Tile detail popup ---
 
 function showTileDetail(tile) {
@@ -1602,6 +1697,13 @@ function resetWorld() {
     totalStructures = 0;
     builtStructures = 0;
     totalTilesPlaced = 0;
+    _knownDistricts = [];
+    _currentDistrictIndex = 0;
+    _currentDistrictTotal = 0;
+    _currentBuildingDone = 0;
+    _currentBuildingTotal = 0;
+    _currentDistrictName = "";
+    removeDistrictProgress();
     runStartedAtMs = null;
     updateRunLength();
     const runWrap = document.getElementById("timeline-run-wrap");
@@ -1815,6 +1917,39 @@ function drawMiniMap() {
     ctx.lineWidth = 0.5;
     ctx.strokeRect(ox, oy, gW * s, gH * s);
 
+    // --- District overlay rectangles (drawn first, underneath everything) ---
+    for (const dist of _knownDistricts) {
+        const r = dist.region;
+        if (!r) continue;
+        const dx = r.x1 * s + ox;
+        const dy = r.y1 * s + oy;
+        const dw = (r.x2 - r.x1) * s;
+        const dh = (r.y2 - r.y1) * s;
+        // Semi-transparent fill
+        ctx.fillStyle = DISTRICT_COLORS[dist.colorIndex];
+        ctx.fillRect(dx, dy, dw, dh);
+        // Border
+        ctx.strokeStyle = DISTRICT_BORDER_COLORS[dist.colorIndex];
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(dx, dy, dw, dh);
+        // District name label at center
+        const labelFontSize = Math.max(7, Math.min(14, s * 0.8));
+        ctx.font = `bold ${labelFontSize}px sans-serif`;
+        const labelX = dx + dw / 2;
+        const labelY = dy + dh / 2;
+        if (labelX > 0 && labelY > 0 && labelX < W && labelY < H) {
+            ctx.fillStyle = "rgba(10, 12, 24, 0.7)";
+            const tw = ctx.measureText(dist.name).width;
+            ctx.fillRect(labelX - tw / 2 - 3, labelY - labelFontSize / 2 - 2, tw + 6, labelFontSize + 4);
+            ctx.fillStyle = "#fff";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(dist.name, labelX, labelY);
+            ctx.textAlign = "start";
+            ctx.textBaseline = "alphabetic";
+        }
+    }
+
     const typeColors = {
         temple: "#ffd700", basilica: "#deb887", road: "#808080", forum: "#d4c67a",
         insula: "#cd853f", domus: "#d2691e", market: "#deb887", water: "#3498db",
@@ -1824,22 +1959,71 @@ function drawMiniMap() {
         building: "#d4a373",
     };
 
-    // Draw ALL placed tiles from the world (accumulated across all districts)
+    // --- Building type dot colors for the indicator layer ---
+    const buildingDotColors = {
+        temple: "#ffd700",       // gold
+        basilica: "#ffd700",
+        insula: "#8b6914",       // brown
+        domus: "#8b6914",
+        market: "#27ae60",       // green
+        taberna: "#27ae60",
+        road: "#888888",         // grey
+        forum: "#888888",
+        wall: "#888888",
+        gate: "#888888",
+        bridge: "#888888",
+    };
+
+    // Draw ALL placed tiles — roads first as thin lines for road network
     for (const t of _miniMapTiles) {
         const terrain = t.terrain || t.building_type || "building";
+        if (terrain === "road") {
+            ctx.fillStyle = "#666";
+            const px = t.x * s + ox;
+            const py = t.y * s + oy;
+            if (px + s < 0 || py + s < 0 || px > W || py > H) continue;
+            ctx.fillRect(px, py, Math.max(1, s - 0.3), Math.max(1, s - 0.3));
+        }
+    }
+
+    // Non-road tiles
+    for (const t of _miniMapTiles) {
+        const terrain = t.terrain || t.building_type || "building";
+        if (terrain === "road") continue;
         ctx.fillStyle = t.color || typeColors[terrain] || "#d4a373";
         const px = t.x * s + ox;
         const py = t.y * s + oy;
-        if (px + s < 0 || py + s < 0 || px > W || py > H) continue; // Off-screen cull
+        if (px + s < 0 || py + s < 0 || px > W || py > H) continue;
         ctx.fillRect(px, py, Math.max(1, s - 0.3), Math.max(1, s - 0.3));
     }
 
-    // Also draw current master plan (survey preview — not yet built)
+    // Building type indicator dots (small circles at building centers)
+    if (s >= 3) {
+        const dotRadius = Math.max(1.5, s * 0.22);
+        const dotted = new Set();
+        for (const t of _miniMapTiles) {
+            const bname = t.building_name;
+            const btype = t.building_type || t.terrain || "building";
+            if (!bname || dotted.has(bname) || btype === "road" || btype === "grass") continue;
+            dotted.add(bname);
+            const dotColor = buildingDotColors[btype];
+            if (!dotColor) continue;
+            const px = t.x * s + ox + s * 0.5;
+            const py = t.y * s + oy + s * 0.5;
+            if (px < 0 || py < 0 || px > W || py > H) continue;
+            ctx.beginPath();
+            ctx.arc(px, py, dotRadius, 0, Math.PI * 2);
+            ctx.fillStyle = dotColor;
+            ctx.fill();
+        }
+    }
+
+    // Also draw current master plan (survey preview -- not yet built)
     if (currentMasterPlan) {
         for (const item of currentMasterPlan) {
             const color = typeColors[item.building_type] || "#d4a373";
             ctx.fillStyle = color;
-            ctx.globalAlpha = 0.35; // Dimmer for planned-but-not-built
+            ctx.globalAlpha = 0.35;
             for (const t of (item.tiles || [])) {
                 ctx.fillRect(t.x * s + ox, t.y * s + oy, Math.max(1, s - 0.3), Math.max(1, s - 0.3));
             }
@@ -1866,6 +2050,39 @@ function drawMiniMap() {
                 ctx.fillStyle = "#ddd";
                 ctx.fillText(name, lx, ly);
             }
+        }
+    }
+
+    // --- Minimap legend (bottom-right corner) ---
+    if (s >= 3 && _miniMapTiles.length > 0) {
+        const legendItems = [
+            { label: "Temple", color: "#ffd700" },
+            { label: "Residential", color: "#8b6914" },
+            { label: "Commercial", color: "#27ae60" },
+            { label: "Infrastructure", color: "#888888" },
+        ];
+        const legendFontSize = 8;
+        const legendPad = 4;
+        const legendLineH = legendFontSize + 3;
+        const legendH = legendItems.length * legendLineH + legendPad * 2;
+        const legendW = 80;
+        const legendX = W - legendW - 6;
+        const legendY = H - legendH - 6;
+        ctx.fillStyle = "rgba(10, 12, 24, 0.8)";
+        ctx.fillRect(legendX, legendY, legendW, legendH);
+        ctx.strokeStyle = "rgba(200, 180, 120, 0.3)";
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(legendX, legendY, legendW, legendH);
+        ctx.font = `${legendFontSize}px sans-serif`;
+        for (let i = 0; i < legendItems.length; i++) {
+            const item = legendItems[i];
+            const iy = legendY + legendPad + i * legendLineH + legendFontSize;
+            ctx.beginPath();
+            ctx.arc(legendX + legendPad + 4, iy - 3, 3, 0, Math.PI * 2);
+            ctx.fillStyle = item.color;
+            ctx.fill();
+            ctx.fillStyle = "#ccc";
+            ctx.fillText(item.label, legendX + legendPad + 12, iy);
         }
     }
 }
