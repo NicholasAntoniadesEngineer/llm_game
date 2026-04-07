@@ -8,6 +8,7 @@ interaction summaries are recorded after each response.
 
 import json
 import logging
+import re
 import time
 
 from agents import llm_routing as llm_agents
@@ -31,16 +32,42 @@ def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
 
 
 def _try_decode_json_object(text: str) -> dict | None:
-    """If the model added prose before/after JSON, decode the first top-level object."""
-    i = text.find("{")
-    if i < 0:
+    """Extract the first JSON object from text that may contain prose, markdown fences, etc."""
+    if not text or not text.strip():
         return None
-    dec = json.JSONDecoder()
+    # Stage 1: Strip markdown code fences
+    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text).strip()
+    # Stage 2: Try direct parse
     try:
-        obj, _end = dec.raw_decode(text, i)
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict):
+                    return item
     except json.JSONDecodeError:
-        return None
-    return obj if isinstance(obj, dict) else None
+        pass
+    # Stage 3: Find first { to last } and try parsing
+    i = cleaned.find("{")
+    j = cleaned.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            obj = json.loads(cleaned[i:j + 1])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    # Stage 4: Try raw_decode from first {
+    if i >= 0:
+        dec = json.JSONDecoder()
+        try:
+            obj, _end = dec.raw_decode(cleaned, i)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 class BaseAgent:
@@ -55,7 +82,11 @@ class BaseAgent:
     ):
         self.role = role
         self.display_name = display_name
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt + (
+            "\n\nIMPORTANT: ALWAYS respond with ONLY valid JSON. "
+            "No markdown fences, no prose before or after. "
+            "Start with '{' and end with '}'."
+        )
         self.llm_agent_key = llm_agent_key
         spec = llm_agents.get_agent_llm_spec(llm_agent_key)
         self.model = spec["model"]

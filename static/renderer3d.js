@@ -5121,8 +5121,8 @@ class WorldRenderer {
         // Sun position orbits east to west
         this._sunLight.position.set(sunX * 500, sunAlt * 600 + 20, 250);
 
-        // Sun intensity fades at dawn/dusk
-        this._sunLight.intensity = 0.15 + sunAlt * 0.85;
+        // Sun intensity: maintain decent minimum for visibility
+        this._sunLight.intensity = Math.max(0.3, 0.2 + sunAlt * 0.8);
 
         // Color temperature: warm at sunrise/sunset, neutral at noon
         const warmth = 1 - sunAlt; // 1 at horizon, 0 at noon
@@ -5133,7 +5133,7 @@ class WorldRenderer {
 
         // Ambient adapts: dimmer at night, bluer at night
         const nightFactor = Math.max(0, -sunY); // >0 when sun below horizon
-        this._ambientLight.intensity = 0.15 + sunAlt * 0.25 + nightFactor * 0.08;
+        this._ambientLight.intensity = Math.max(0.2, 0.2 + sunAlt * 0.2 + nightFactor * 0.05);
         this._ambientLight.color.setRGB(
             0.85 - nightFactor * 0.4,
             0.88 - nightFactor * 0.2,
@@ -5170,8 +5170,8 @@ class WorldRenderer {
             );
         }
 
-        // Tone mapping exposure: controlled range to avoid washout
-        this.renderer3d.toneMappingExposure = 0.75 + sunAlt * 0.15 - nightFactor * 0.2;
+        // Tone mapping exposure: tight range to avoid both washout and too-dark
+        this.renderer3d.toneMappingExposure = Math.max(0.6, Math.min(0.95, 0.8 + sunAlt * 0.1 - nightFactor * 0.15));
 
         // Update dynamic Sky shader if present
         this._updateSkyForTimeOfDay(t);
