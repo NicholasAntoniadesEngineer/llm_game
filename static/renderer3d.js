@@ -2477,42 +2477,214 @@ class WorldRenderer {
         };
     }
 
+    /** Parse road type from tile.description (format: "Name (via|vicus|semita)"). */
+    _parseRoadType(tile) {
+        const desc = tile.description || "";
+        const m = desc.match(/\((via|vicus|semita)\)\s*$/i);
+        return m ? m[1].toLowerCase() : "vicus";
+    }
+
+    /** Check if a neighbor tile at (gx,gy) is a road or forum. */
+    _isRoadNeighbor(gx, gy) {
+        const t = this._tileAt(gx, gy);
+        return t && (t.terrain === "road" || t.terrain === "forum");
+    }
+
     _buildTerrain(g, tile, spec) {
         const terrain = tile.terrain;
         const sc = this._sceneryFromSpec(spec);
         const tseed = tile.x * 131 + tile.y * 97;
         if (terrain === "road") {
-            const road = new THREE.Mesh(new THREE.BoxGeometry(0.98, 0.05, 0.98), this._mat(spec.color || "#606060", 0.9));
-            road.position.y = 0.025;
-            g.add(road);
-            const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.45;
-            const nStone = Math.min(14, Math.floor(1 + pave * 10) + (tseed % 3));
-            for (let i = 0; i < nStone; i++) {
-                const w = 0.06 + this._terrainRand01(tseed, i, 1) * 0.08;
-                const d = 0.06 + this._terrainRand01(tseed, i, 2) * 0.08;
-                const stone = new THREE.Mesh(new THREE.BoxGeometry(w, 0.01, d), this._mat("#7a7a7a"));
-                stone.position.set(
-                    -0.3 + this._terrainRand01(tseed, i, 3) * 0.6,
-                    0.055,
-                    -0.3 + this._terrainRand01(tseed, i, 4) * 0.6
+            const roadType = this._parseRoadType(tile);
+            const hasName = !!(tile.building_name && tile.building_name.length > 0);
+
+            // ── VIA — major thoroughfare: lighter stone slabs, curbs, drainage channel ──
+            if (roadType === "via") {
+                const baseColor = hasName ? "#AAA8A0" : "#A0A0A0";
+                const road = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.98, 0.06, 0.98),
+                    this._mat(baseColor, 0.82)
                 );
-                g.add(stone);
+                road.position.y = 0.03;
+                g.add(road);
+
+                // Large stone slabs in a 2x2 grid pattern (max 4 slabs)
+                const slabCols = 2, slabRows = 2;
+                const slabW = 0.40, slabD = 0.40, slabH = 0.012;
+                const gapW = (0.90 - slabCols * slabW) / (slabCols + 1);
+                const gapD = (0.90 - slabRows * slabD) / (slabRows + 1);
+                for (let r = 0; r < slabRows; r++) {
+                    for (let c = 0; c < slabCols; c++) {
+                        const si = r * slabCols + c;
+                        // Subtle shade variation per slab
+                        const shade = 0xA0 + Math.floor((this._terrainRand01(tseed, si, 50) - 0.5) * 20);
+                        const hex = "#" + shade.toString(16) + shade.toString(16) + (shade - 8).toString(16);
+                        const slab = new THREE.Mesh(
+                            new THREE.BoxGeometry(slabW - 0.01, slabH, slabD - 0.01),
+                            this._mat(hex, 0.78)
+                        );
+                        const sx = -0.45 + gapW + slabW / 2 + c * (slabW + gapW);
+                        const sz = -0.45 + gapD + slabD / 2 + r * (slabD + gapD);
+                        slab.position.set(sx, 0.06 + slabH / 2, sz);
+                        g.add(slab);
+                    }
+                }
+
+                // Central drainage channel — thin dark groove running along Z axis
+                const drain = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.04, 0.008, 0.92),
+                    this._mat("#4a4a4a", 0.95)
+                );
+                drain.position.set(0, 0.061, 0);
+                g.add(drain);
+
+                // Raised curb stones on edges where road meets non-road (max 2 curbs
+                // — only on the 2 longest non-road edges to stay within mesh budget)
+                const curbH = 0.035, curbW = 0.06, curbD = 0.98;
+                const neighbors = [
+                    { dx: -1, dy: 0, px: -0.47, pz: 0, rw: curbW, rd: curbD },  // west
+                    { dx: 1,  dy: 0, px: 0.47,  pz: 0, rw: curbW, rd: curbD },  // east
+                    { dx: 0,  dy: -1, px: 0, pz: -0.47, rw: curbD, rd: curbW }, // north
+                    { dx: 0,  dy: 1,  px: 0, pz: 0.47,  rw: curbD, rd: curbW }, // south
+                ];
+                let curbCount = 0;
+                for (const nb of neighbors) {
+                    if (curbCount >= 2) break;  // max 2 curbs to cap total meshes at 8
+                    if (!this._isRoadNeighbor(tile.x + nb.dx, tile.y + nb.dy)) {
+                        const curb = new THREE.Mesh(
+                            new THREE.BoxGeometry(nb.rw, curbH, nb.rd),
+                            this._mat("#B8B0A8", 0.8)
+                        );
+                        curb.position.set(nb.px, 0.06 + curbH / 2, nb.pz);
+                        g.add(curb);
+                        curbCount++;
+                    }
+                }
+
+            // ── VICUS — secondary street: cobblestones with per-stone color variation ──
+            } else if (roadType === "vicus") {
+                const baseColor = hasName ? "#8C8880" : "#808080";
+                const road = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.96, 0.05, 0.96),
+                    this._mat("#504840", 0.92)  // dark mortar visible between stones
+                );
+                road.position.y = 0.025;
+                g.add(road);
+
+                // Cobblestone pattern: 4-6 stones in a scattered grid
+                const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.5;
+                const nStone = Math.min(6, Math.max(4, Math.floor(3 + pave * 3) + (tseed % 2)));
+                for (let i = 0; i < nStone; i++) {
+                    // Each stone: slight size and color variation
+                    const sw = 0.14 + this._terrainRand01(tseed, i, 1) * 0.10;
+                    const sd = 0.14 + this._terrainRand01(tseed, i, 2) * 0.10;
+                    const sh = 0.012 + this._terrainRand01(tseed, i, 8) * 0.006;
+                    const grey = 0x70 + Math.floor(this._terrainRand01(tseed, i, 9) * 0x28);
+                    const hex = "#" + grey.toString(16) + grey.toString(16) + grey.toString(16);
+                    const stone = new THREE.Mesh(
+                        new THREE.BoxGeometry(sw, sh, sd),
+                        this._mat(hex, 0.85)
+                    );
+                    // Arrange in a loose grid with jitter
+                    const col = i % 3, row = Math.floor(i / 3);
+                    const bx = -0.30 + col * 0.28 + (this._terrainRand01(tseed, i, 3) - 0.5) * 0.08;
+                    const bz = -0.30 + row * 0.28 + (this._terrainRand01(tseed, i, 4) - 0.5) * 0.08;
+                    stone.position.set(bx, 0.05 + sh / 2, bz);
+                    // Slight random rotation for organic feel
+                    stone.rotation.y = (this._terrainRand01(tseed, i, 5) - 0.5) * 0.15;
+                    g.add(stone);
+                }
+
+            // ── SEMITA — narrow path: packed earth, irregular surface ──
+            } else {
+                const baseColor = hasName ? "#A09478" : "#9A8A70";
+                const road = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.80, 0.04, 0.80),
+                    this._mat(baseColor, 0.92)
+                );
+                road.position.y = 0.02;
+                g.add(road);
+
+                // A few irregular earth patches/ruts for texture
+                const nPatch = 2 + (tseed % 3);
+                for (let i = 0; i < nPatch; i++) {
+                    const pw = 0.12 + this._terrainRand01(tseed, i, 20) * 0.16;
+                    const pd = 0.08 + this._terrainRand01(tseed, i, 21) * 0.10;
+                    const brownShift = Math.floor(this._terrainRand01(tseed, i, 22) * 20);
+                    const rc = 0x8A + brownShift, gc = 0x7A + brownShift, bc = 0x60 + brownShift;
+                    const hex = "#" + rc.toString(16) + gc.toString(16) + bc.toString(16);
+                    const patch = new THREE.Mesh(
+                        new THREE.BoxGeometry(pw, 0.005, pd),
+                        this._mat(hex, 0.95)
+                    );
+                    patch.position.set(
+                        (this._terrainRand01(tseed, i, 23) - 0.5) * 0.5,
+                        0.043,
+                        (this._terrainRand01(tseed, i, 24) - 0.5) * 0.5
+                    );
+                    patch.rotation.y = this._terrainRand01(tseed, i, 25) * Math.PI;
+                    g.add(patch);
+                }
+
+                // Occasional loose stones on packed earth
+                const nLoose = 1 + (tseed % 2);
+                for (let i = 0; i < nLoose; i++) {
+                    const ls = 0.04 + this._terrainRand01(tseed, i, 30) * 0.04;
+                    const looseStone = new THREE.Mesh(
+                        new THREE.BoxGeometry(ls, 0.008, ls * 0.8),
+                        this._mat("#7a7060", 0.9)
+                    );
+                    looseStone.position.set(
+                        (this._terrainRand01(tseed, i, 31) - 0.5) * 0.55,
+                        0.045,
+                        (this._terrainRand01(tseed, i, 32) - 0.5) * 0.55
+                    );
+                    looseStone.rotation.y = this._terrainRand01(tseed, i, 33) * Math.PI;
+                    g.add(looseStone);
+                }
             }
+
         } else if (terrain === "forum") {
-            g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.03, 0.96), this._mat(spec.color || "#d4c67a")));
-            const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.25;
-            const nSlab = Math.min(8, Math.floor(pave * 7));
-            for (let i = 0; i < nSlab; i++) {
-                const sw = 0.08 + this._terrainRand01(tseed, i, 11) * 0.12;
-                const slab = new THREE.Mesh(new THREE.BoxGeometry(sw, 0.008, sw * 0.9), this._mat("#c8b898", 0.75));
-                slab.position.set(
-                    -0.32 + this._terrainRand01(tseed, i, 12) * 0.64,
-                    0.022,
-                    -0.32 + this._terrainRand01(tseed, i, 13) * 0.64
-                );
-                g.add(slab);
+            // ── FORUM — marble-paved public space with regular slab grid ──
+            const baseGround = new THREE.Mesh(
+                new THREE.BoxGeometry(0.98, 0.04, 0.98),
+                this._mat(spec.color || "#E8DCC8", 0.7)  // cream/white marble base
+            );
+            baseGround.position.y = 0.02;
+            g.add(baseGround);
+
+            // Regular grid of marble slabs (2 cols x 3 rows = 6 slabs max)
+            const pave = sc.pavement_detail != null ? sc.pavement_detail : 0.6;
+            const nCols = 2, nRows = Math.min(3, Math.max(2, Math.floor(2 + pave)));
+            const colSpan = 0.88 / nCols, rowSpan = 0.88 / nRows;
+            const slabGap = 0.015;
+            let slabIdx = 0;
+            for (let r = 0; r < nRows; r++) {
+                for (let c = 0; c < nCols; c++) {
+                    // Alternating cream/white shades for a polished look
+                    const shade = (r + c) % 2 === 0 ? "#DDD4C4" : "#E5DDD0";
+                    const variation = Math.floor((this._terrainRand01(tseed, slabIdx, 40) - 0.5) * 10);
+                    const rv = parseInt(shade.slice(1, 3), 16) + variation;
+                    const gv = parseInt(shade.slice(3, 5), 16) + variation;
+                    const bv = parseInt(shade.slice(5, 7), 16) + variation;
+                    const hex = "#" + Math.min(255, rv).toString(16).padStart(2, "0")
+                                    + Math.min(255, gv).toString(16).padStart(2, "0")
+                                    + Math.min(255, bv).toString(16).padStart(2, "0");
+                    const sw = colSpan - slabGap, sd = rowSpan - slabGap;
+                    const slab = new THREE.Mesh(
+                        new THREE.BoxGeometry(sw, 0.01, sd),
+                        this._mat(hex, 0.6, 0.03)
+                    );
+                    const sx = -0.44 + colSpan / 2 + c * colSpan;
+                    const sz = -0.44 + rowSpan / 2 + r * rowSpan;
+                    slab.position.set(sx, 0.04 + 0.005, sz);
+                    g.add(slab);
+                    slabIdx++;
+                }
             }
+
         } else if (terrain === "water") {
+            // ── WATER — transparent blue with edge foam ──
             const murk = sc.water_murk != null ? sc.water_murk : 0.35;
             const opacity = 0.55 + murk * 0.38;
             const water = new THREE.Mesh(
@@ -2522,6 +2694,29 @@ class WorldRenderer {
             water.position.y = -0.03;
             water.userData.isWater = true;
             g.add(water);
+
+            // Foam edges where water meets land (check cardinal neighbors)
+            const foamNeighbors = [
+                { dx: -1, dy: 0, px: -0.46, pz: 0, fw: 0.06, fd: 0.90 },
+                { dx: 1,  dy: 0, px: 0.46,  pz: 0, fw: 0.06, fd: 0.90 },
+                { dx: 0,  dy: -1, px: 0, pz: -0.46, fw: 0.90, fd: 0.06 },
+                { dx: 0,  dy: 1,  px: 0, pz: 0.46,  fw: 0.90, fd: 0.06 },
+            ];
+            for (const nb of foamNeighbors) {
+                const nt = this._tileAt(tile.x + nb.dx, tile.y + nb.dy);
+                if (nt && nt.terrain !== "water") {
+                    const foam = new THREE.Mesh(
+                        new THREE.BoxGeometry(nb.fw, 0.01, nb.fd),
+                        new THREE.MeshStandardMaterial({
+                            color: 0xc8dde8, transparent: true, opacity: 0.45, roughness: 0.2
+                        })
+                    );
+                    foam.position.set(nb.px, 0.0, nb.pz);
+                    foam.userData.isWater = true;
+                    g.add(foam);
+                }
+            }
+
         } else if (terrain === "garden" || terrain === "grass") {
             const groundColor = spec.color || (terrain === "garden" ? "#4a8c3f" : "#6b8c4f");
             g.add(new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.04, 0.96), this._mat(groundColor, 0.85)));
