@@ -1,10 +1,15 @@
-"""Construct per-building prompts for Urbanista and terrain agents."""
+"""Construct per-building prompts for Urbanista and terrain agents.
+
+Uses compact notation to minimize token usage while preserving all essential
+information the LLM needs to produce valid building specs.
+"""
 
 import hashlib
 import json
 
 from agents.golden_specs import get_golden_example_for_culture
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
+from orchestration.schema import format_compact_neighbors as _fmt_compact_nb
 from prompts import format_pbr_hint, format_composition_directive
 
 
@@ -34,42 +39,28 @@ def build_terrain_prompt(
     if len(tiles) > 40:
         sample_tiles = tiles[:5] + tiles[-5:] if len(tiles) > 10 else tiles[:5]
         terrain_tiles_str = (
-            f"Bounding box: ({anchor_x},{anchor_y}) to ({max(xs)},{max(ys)}) — "
-            f"{len(tiles)} tiles total.\n"
-            f"Sample tiles: {json.dumps(sample_tiles)}\n"
-            f"Output a SINGLE representative tile with color/scenery, plus `commentary`. "
-            f"The engine replicates it to all {len(tiles)} coordinates."
+            f"Bounds: ({anchor_x},{anchor_y})-({max(xs)},{max(ys)}) {len(tiles)} tiles.\n"
+            f"Samples: {json.dumps(sample_tiles, separators=(',',':'))}\n"
+            f"Output ONE representative tile; engine replicates to all {len(tiles)} coords."
         )
     else:
-        terrain_tiles_str = f"Survey tile list (coordinates and elevations): {json.dumps(tiles)}"
+        terrain_tiles_str = f"Tiles: {json.dumps(tiles, separators=(',',':'))}"
 
     prompt = (
-        f"OPEN SPACE / SCENERY (not a building): {name}\n"
-        f"Surface type: {btype}\n"
-        f"City: {city_loc}, {period}\n"
-        f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
-        f"Reference corner tile: ({anchor_x}, {anchor_y}), mean elevation: {avg_elevation}\n"
-        f"{terrain_tiles_str}\n\n"
-        f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
+        f"TERRAIN: {name} | {btype} | {city_loc}, {period}\n"
+        f"Size: {tile_w}x{tile_d}={footprint_w}x{footprint_d}wu | anchor:({anchor_x},{anchor_y}) elev:{avg_elevation}\n"
+        f"{terrain_tiles_str}\n"
+        f"{neighbor_desc}\n"
     )
     if env_note:
-        prompt += f"SURVEYOR `environment_note`:\n{env_note}\n\n"
+        prompt += f"ENV: {env_note}\n"
     prompt += (
-        f"SITE BRIEF (Historian + evidence):\n{physical_desc}\n\n"
-        f"OUTPUT REQUIREMENTS:\n"
-        f"- Return JSON with `tiles` — one entry per survey coordinate above.\n"
-        f"- Each tile MUST set `terrain` to the literal string \"{btype}\".\n"
-        f"- Each tile MAY include `spec`: {{ \"color\": \"#RRGGBB\", \"scenery\": {{ "
-        f"\"vegetation_density\": 0..1 (garden/grass), \"pavement_detail\": 0..1 (road/forum), "
-        f"\"water_murk\": 0..1 (water) }} }}.\n"
-        f"- Do NOT emit spec.components, spec.template, or spec.anchor — the client uses procedural meshes.\n"
-        f"- Rich `description` on every tile; substantive `commentary` and `reference` (paving, hydrology, planting).\n"
-        f"- Match elevations to the survey (mean {avg_elevation}).\n"
+        f"BRIEF: {physical_desc}\n\n"
+        f"OUTPUT: JSON with tiles[]. Each: terrain=\"{btype}\", optional spec:{{color:\"#hex\",scenery:{{vegetation_density:0-1,pavement_detail:0-1,water_murk:0-1}}}}. "
+        f"No components/template/anchor. Description per tile. elev~{avg_elevation}."
     )
 
-    # Inject survey-suggested palette
     prompt += _palette_suffix(district_palette)
-
     return prompt
 
 
@@ -105,62 +96,81 @@ def build_building_prompt(
     ref_db_block = format_reference_for_prompt(ref_entry)
     ref_db_section = ""
     if ref_db_block:
-        ref_db_section = (
-            f"MEASURED REFERENCE (curated database — numeric ranges for proportion_rules / sanity checks; "
-            f"use when they align with the site brief):\n{ref_db_block}\n\n"
-        )
+        ref_db_section = f"MEASURED REF: {ref_db_block}\n"
 
     # For large buildings (>30 tiles), simplify tile list to bounding box
     if len(tiles) > 30:
         tiles_str = (
-            f"Bounding box: ({anchor_x},{anchor_y}) to ({max(xs)},{max(ys)}) — "
-            f"{len(tiles)} tiles total. Output ONLY the anchor tile ({anchor_x},{anchor_y}) "
-            f"with full spec.components. The engine auto-fills secondary tiles."
+            f"Bounds: ({anchor_x},{anchor_y})-({max(xs)},{max(ys)}) {len(tiles)} tiles. "
+            f"Output anchor ({anchor_x},{anchor_y}) only; engine auto-fills secondary."
         )
     else:
-        tiles_str = f"All tiles: {json.dumps(tiles)}"
+        tiles_str = f"Tiles: {json.dumps(tiles, separators=(',',':'))}"
+
+    max_h = round(max(footprint_w, footprint_d) * 1.2, 2)
+    col_r = round(footprint_w / 60, 3)
+    h_lo = round(footprint_w * 0.7, 2)
+    h_hi = round(footprint_w * 1.1, 2)
+
+    # Build size hint
+    size_hint = ""
+    if footprint_w < 2.0 or footprint_d < 2.0:
+        size_hint = "SMALL(<2.0): 3-6 components, shorter columns. "
+    elif footprint_w > 5.0 or footprint_d > 5.0:
+        size_hint = "LARGE(>5.0): 8-14 components, add procedural details. "
 
     prompt = (
-        f"Design: {name}\nType: {btype}\n"
-        f"City: {city_loc}, {period}\n"
-        f"Footprint: {tile_w}x{tile_d} tiles = {footprint_w}x{footprint_d} world units\n"
-        f"Anchor tile: ({anchor_x}, {anchor_y}), elevation: {avg_elevation}\n"
-        f"{tiles_str}\n\n"
-        f"NEARBY STRUCTURES:\n{neighbor_desc}\n\n"
+        f"Design: {name} | Type: {btype} | {city_loc}, {period}\n"
+        f"Footprint: {tile_w}x{tile_d}={footprint_w}x{footprint_d}wu | anchor:({anchor_x},{anchor_y}) elev:{avg_elevation}\n"
+        f"{tiles_str}\n"
+        f"{neighbor_desc}\n"
         f"{ref_db_section}"
-        f"REFERENCE EXAMPLE (proportion + layering guide only — same building_type, scaled to this footprint):\n{golden_example_str}\n"
-        f"Use the reference example for proportion/stacking only; derive your design from the site brief (do not paste).\n\n"
-        f"SITE BRIEF (from survey — match this closely):\n{physical_desc}\n"
-        + (f"\nDISTRICT SCENERY (circulation, hydrology, green/blue network — orient facades and entrances accordingly):\n{district_scenery}\n\n" if district_scenery else "\n")
-        + f"IMPORTANT: Scale all component dimensions to fit a {footprint_w}x{footprint_d} footprint.\n"
-        f"- Max total building height: {round(max(footprint_w, footprint_d) * 1.2, 2)} world units\n"
-        + (f"- For small buildings (footprint < 2.0): use fewer components (3-6), shorter columns\n" if footprint_w < 2.0 or footprint_d < 2.0 else "")
-        + (f"- For large buildings (footprint > 5.0): use more components (8-14), add procedural details\n" if footprint_w > 5.0 or footprint_d > 5.0 else "")
-        + f"- Column/post radius should be ~{round(footprint_w / 60, 3)} for proportional supports\n"
-        f"- Total height should be {round(footprint_w * 0.7, 2)} to {round(footprint_w * 1.1, 2)}\n"
-        f"- Set elevation={avg_elevation} on all tiles\n"
-        f"- Set spec.anchor on EVERY tile to {{\"x\":{anchor_x},\"y\":{anchor_y}}}"
+        f"REF EXAMPLE (proportion guide, do not paste):\n{golden_example_str}\n\n"
+        f"BRIEF: {physical_desc}\n"
+    )
+    if district_scenery:
+        prompt += f"SCENERY: {district_scenery}\n"
+
+    prompt += (
+        f"\nSCALE: fit {footprint_w}x{footprint_d}wu. {size_hint}"
+        f"max_h={max_h} col_r~{col_r} height={h_lo}-{h_hi} "
+        f"elev={avg_elevation} anchor={{x:{anchor_x},y:{anchor_y}}}"
     )
 
     # PBR material guidance
     hint = format_pbr_hint(btype)
-    prompt += f"\n- MATERIAL QUALITY: {hint}"
+    prompt += f"\nMATERIAL: {hint}"
 
     # Generative uniqueness seed
     seed_hash = int(hashlib.md5(f"{anchor_x},{anchor_y},{name}".encode()).hexdigest()[:8], 16)
     directive = format_composition_directive(seed_hash)
-    prompt += f"\n\n\U0001f3b2 UNIQUENESS DIRECTIVE (seed {seed_hash & 0xFFFF:04x}): {directive}"
+    prompt += f"\nUNIQUE({seed_hash & 0xFFFF:04x}): {directive}"
 
     if env_note:
-        prompt += (
-            f"\n\nSURVEYOR `environment_note` (edges, planting, circulation — use for facades and setting):\n"
-            f"{env_note}\n"
-        )
+        prompt += f"\nENV: {env_note}"
 
-    # Inject survey-suggested palette
     prompt += _palette_suffix(district_palette)
 
+    # Encourage dense format usage
+    prompt += (
+        "\n\nPREFER dense shape arrays in procedural parts to save tokens: "
+        "[\"b\",[x,y,z],[w,h,d],\"material\"] — see system prompt for codes."
+    )
+
     return prompt
+
+
+def build_compact_neighbor_desc(neighbors: list[dict]) -> str:
+    """Convert structured neighbor data into compact NB: format for prompts.
+
+    Input: list of neighbor dicts with direction, name, building_type, color, height.
+    Output: "NB:N:Temple(temple,#f0ece4,h=12);E:Via Sacra(road)"
+
+    Falls back to returning the input as-is if it's already a string.
+    """
+    if isinstance(neighbors, str):
+        return neighbors
+    return _fmt_compact_nb(neighbors)
 
 
 def _palette_suffix(district_palette: dict | None) -> str:
@@ -173,5 +183,5 @@ def _palette_suffix(district_palette: dict | None) -> str:
         if isinstance(c, str) and c.startswith("#"):
             parts.append(f"{role}={c}")
     if parts:
-        return f"\n- DISTRICT PALETTE (from surveyor): {', '.join(parts)}. Use these as your base materials; vary per building \u00b110% lightness for uniqueness."
+        return f"\nPALETTE: {', '.join(parts)} (\u00b110% lightness per building)"
     return ""

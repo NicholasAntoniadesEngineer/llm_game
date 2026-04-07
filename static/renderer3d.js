@@ -125,10 +125,17 @@ class WorldRenderer {
         });
         container.appendChild(this.renderer3d.domElement);
 
+        // Post-processing pipeline — graceful degradation if addons fail to load
+        this.composer = null;
+        this._setupPostProcessing();
+
         this._setupIblAndBackground();
         const terrainDetail = this._createTerrainDetailMaps();
         this._terrainRoughnessMap = terrainDetail.roughnessMap;
         this._terrainNormalMap = terrainDetail.normalMap;
+
+        // Procedural canvas texture cache
+        this._canvasTextureCache = new Map();
 
         // Dynamic lighting system — supports time-of-day via setTimeOfDay(0-1)
         this._ambientLight = new THREE.AmbientLight(0xfff5e6, 0.36);
@@ -136,9 +143,9 @@ class WorldRenderer {
         const sun = new THREE.DirectionalLight(0xfff0d0, 0.92);
         sun.position.set(400, 500, 250);
         sun.castShadow = true;
-        sun.shadow.mapSize.set(2048, 2048);
-        sun.shadow.normalBias = 0.028;
-        sun.shadow.bias = -0.00065;
+        sun.shadow.mapSize.set(4096, 4096);
+        sun.shadow.normalBias = 0.04;
+        sun.shadow.bias = -0.0004;
         const sc = sun.shadow.camera;
         sc.near = 1;
         sc.far = 8000;
@@ -153,11 +160,20 @@ class WorldRenderer {
         this._fillLight = new THREE.DirectionalLight(0xffd4a0, 0.1);
         this._fillLight.position.set(-200, 50, -100);
         this.scene.add(this._fillLight);
+        // Secondary fill from opposite side — softens harsh shadow areas
+        this._fillLight2 = new THREE.DirectionalLight(0xc8d8f0, 0.08);
+        this._fillLight2.position.set(300, 80, -200);
+        this._fillLight2.castShadow = false;
+        this.scene.add(this._fillLight2);
         const rimLight = new THREE.DirectionalLight(0xe8e2f8, 0.13);
         rimLight.position.set(-380, 120, -420);
         rimLight.castShadow = false;
         this.scene.add(rimLight);
         this._timeOfDay = 0.35; // Default: late morning
+
+        // Particle system — dust motes for atmosphere
+        this._dustParticles = null;
+        this._dustVelocities = null;
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
@@ -351,6 +367,296 @@ class WorldRenderer {
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
         this.renderer3d.setSize(w, h);
+        if (this.composer) {
+            this.composer.setSize(w, h);
+            // Update FXAA resolution uniform
+            if (this._fxaaPass && this._fxaaPass.material && this._fxaaPass.material.uniforms) {
+                const pixelRatio = this.renderer3d.getPixelRatio();
+                this._fxaaPass.material.uniforms['resolution'].value.set(
+                    1 / (w * pixelRatio), 1 / (h * pixelRatio)
+                );
+            }
+        }
+    }
+
+    // ─── Post-Processing Pipeline ───
+
+    _setupPostProcessing() {
+        if (this._failed || !this.renderer3d) return;
+        // Graceful degradation: skip if addons did not load
+        if (typeof THREE.EffectComposer !== "function" ||
+            typeof THREE.RenderPass !== "function" ||
+            typeof THREE.ShaderPass !== "function") {
+            console.warn("Post-processing addons not loaded — rendering without post-processing");
+            return;
+        }
+        try {
+            const w = this.container.clientWidth;
+            const h = this.container.clientHeight;
+            const pixelRatio = this.renderer3d.getPixelRatio();
+
+            this.composer = new THREE.EffectComposer(this.renderer3d);
+
+            // 1. RenderPass — base scene
+            const renderPass = new THREE.RenderPass(this.scene, this.camera);
+            this.composer.addPass(renderPass);
+
+            // 2. UnrealBloomPass — subtle glow on sunlit marble and bronze
+            if (typeof THREE.UnrealBloomPass === "function") {
+                const bloomPass = new THREE.UnrealBloomPass(
+                    new THREE.Vector2(w, h),
+                    0.25,  // strength
+                    0.4,   // radius
+                    0.85   // threshold
+                );
+                this.composer.addPass(bloomPass);
+                this._bloomPass = bloomPass;
+            }
+
+            // 3. Custom color grading ShaderPass — warm Mediterranean tint
+            const ColorGradeShader = {
+                uniforms: {
+                    tDiffuse: { value: null },
+                    shadowTint: { value: new THREE.Vector3(1.04, 0.97, 0.90) },  // slight orange in shadows
+                    highlightTint: { value: new THREE.Vector3(1.06, 1.02, 0.88) }, // golden highlights
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform vec3 shadowTint;
+                    uniform vec3 highlightTint;
+                    varying vec2 vUv;
+                    void main() {
+                        vec4 texel = texture2D(tDiffuse, vUv);
+                        float luminance = dot(texel.rgb, vec3(0.299, 0.587, 0.114));
+                        // Blend between shadow tint (dark areas) and highlight tint (bright areas)
+                        vec3 tint = mix(shadowTint, highlightTint, smoothstep(0.2, 0.7, luminance));
+                        gl_FragColor = vec4(texel.rgb * tint, texel.a);
+                    }
+                `,
+            };
+            const colorGradePass = new THREE.ShaderPass(ColorGradeShader);
+            this.composer.addPass(colorGradePass);
+            this._colorGradePass = colorGradePass;
+
+            // 4. Vignette ShaderPass — subtle radial darkening at edges
+            const VignetteShader = {
+                uniforms: {
+                    tDiffuse: { value: null },
+                    darkness: { value: 0.35 },
+                    offset: { value: 1.2 },
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform float darkness;
+                    uniform float offset;
+                    varying vec2 vUv;
+                    void main() {
+                        vec4 texel = texture2D(tDiffuse, vUv);
+                        vec2 uv = (vUv - vec2(0.5)) * vec2(offset);
+                        float vignette = 1.0 - dot(uv, uv);
+                        vignette = clamp(vignette, 0.0, 1.0);
+                        texel.rgb *= mix(1.0 - darkness, 1.0, vignette);
+                        gl_FragColor = texel;
+                    }
+                `,
+            };
+            const vignettePass = new THREE.ShaderPass(VignetteShader);
+            this.composer.addPass(vignettePass);
+            this._vignettePass = vignettePass;
+
+            // 5. FXAA — anti-aliasing (final pass)
+            if (typeof THREE.FXAAShader !== "undefined") {
+                const fxaaPass = new THREE.ShaderPass(THREE.FXAAShader);
+                fxaaPass.material.uniforms['resolution'].value.set(
+                    1 / (w * pixelRatio), 1 / (h * pixelRatio)
+                );
+                this.composer.addPass(fxaaPass);
+                this._fxaaPass = fxaaPass;
+            }
+
+            console.log("Post-processing pipeline initialized");
+        } catch (e) {
+            console.warn("Post-processing setup failed — falling back to direct render:", e);
+            this.composer = null;
+        }
+    }
+
+    // ─── Procedural Canvas Textures ───
+
+    /**
+     * Generate a canvas texture for architectural surface types.
+     * @param {"stone"|"marble"|"brick"|"terracotta"|"wood"} type
+     * @param {string} baseColor - hex color string
+     * @param {number} [size=256]
+     * @returns {THREE.CanvasTexture}
+     */
+    _generateTexture(type, baseColor, size) {
+        size = size || 256;
+        const cacheKey = `tex:${type}:${baseColor}:${size}`;
+        if (this._canvasTextureCache && this._canvasTextureCache.has(cacheKey)) {
+            return this._canvasTextureCache.get(cacheKey);
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const base = new THREE.Color(baseColor);
+        const r = Math.floor(base.r * 255);
+        const g = Math.floor(base.g * 255);
+        const b = Math.floor(base.b * 255);
+
+        // Seed-based pseudo-random for deterministic textures
+        let seed = 0;
+        for (let i = 0; i < cacheKey.length; i++) seed = ((seed << 5) - seed + cacheKey.charCodeAt(i)) | 0;
+        const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+
+        if (type === "stone") {
+            // Random noise in beige spectrum with subtle vein lines
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+            const imgData = ctx.getImageData(0, 0, size, size);
+            const d = imgData.data;
+            for (let i = 0; i < d.length; i += 4) {
+                const noise = (rand() - 0.5) * 30;
+                d[i] = Math.max(0, Math.min(255, r + noise));
+                d[i + 1] = Math.max(0, Math.min(255, g + noise * 0.9));
+                d[i + 2] = Math.max(0, Math.min(255, b + noise * 0.7));
+            }
+            ctx.putImageData(imgData, 0, 0);
+            // Subtle vein lines
+            ctx.strokeStyle = `rgba(${r * 0.7}, ${g * 0.7}, ${b * 0.6}, 0.15)`;
+            ctx.lineWidth = 1;
+            for (let v = 0; v < 5; v++) {
+                ctx.beginPath();
+                let vx = rand() * size, vy = rand() * size;
+                ctx.moveTo(vx, vy);
+                for (let s = 0; s < 6; s++) {
+                    vx += (rand() - 0.5) * size * 0.3;
+                    vy += (rand() - 0.3) * size * 0.2;
+                    ctx.lineTo(vx, vy);
+                }
+                ctx.stroke();
+            }
+        } else if (type === "marble") {
+            // White with gray/blue veins
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+            const imgData = ctx.getImageData(0, 0, size, size);
+            const d = imgData.data;
+            for (let i = 0; i < d.length; i += 4) {
+                const noise = (rand() - 0.5) * 12;
+                d[i] = Math.max(0, Math.min(255, r + noise));
+                d[i + 1] = Math.max(0, Math.min(255, g + noise));
+                d[i + 2] = Math.max(0, Math.min(255, b + noise * 1.2));
+            }
+            ctx.putImageData(imgData, 0, 0);
+            // Gray/blue veins
+            for (let v = 0; v < 4; v++) {
+                ctx.strokeStyle = `rgba(${120 + rand() * 40}, ${125 + rand() * 40}, ${140 + rand() * 50}, ${0.1 + rand() * 0.15})`;
+                ctx.lineWidth = 0.5 + rand() * 1.5;
+                ctx.beginPath();
+                let vx = rand() * size, vy = rand() * size;
+                ctx.moveTo(vx, vy);
+                for (let s = 0; s < 8; s++) {
+                    vx += (rand() - 0.5) * size * 0.25;
+                    vy += (rand() - 0.3) * size * 0.15;
+                    ctx.quadraticCurveTo(
+                        vx + (rand() - 0.5) * 20, vy + (rand() - 0.5) * 20,
+                        vx, vy
+                    );
+                }
+                ctx.stroke();
+            }
+        } else if (type === "brick") {
+            // Grid pattern with per-brick color variation
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+            const brickH = Math.floor(size / 8);
+            const brickW = Math.floor(size / 4);
+            const mortarW = 2;
+            ctx.fillStyle = `rgba(${r * 0.6}, ${g * 0.6}, ${b * 0.5}, 1)`;
+            ctx.fillRect(0, 0, size, size); // mortar base
+            for (let row = 0; row < 8; row++) {
+                const offset = (row % 2) * (brickW / 2);
+                for (let col = -1; col < 5; col++) {
+                    const bx = col * brickW + offset;
+                    const by = row * brickH;
+                    const variation = (rand() - 0.5) * 35;
+                    ctx.fillStyle = `rgb(${Math.max(0, Math.min(255, r + variation))}, ${Math.max(0, Math.min(255, g + variation * 0.7))}, ${Math.max(0, Math.min(255, b + variation * 0.5))})`;
+                    ctx.fillRect(bx + mortarW, by + mortarW, brickW - mortarW * 2, brickH - mortarW * 2);
+                }
+            }
+        } else if (type === "terracotta") {
+            // Warm orange with slight surface variation
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+            const imgData = ctx.getImageData(0, 0, size, size);
+            const d = imgData.data;
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const i = (y * size + x) * 4;
+                    const noise = (rand() - 0.5) * 20;
+                    // Subtle horizontal streaks
+                    const streak = Math.sin(y * 0.3 + rand() * 0.5) * 8;
+                    d[i] = Math.max(0, Math.min(255, r + noise + streak));
+                    d[i + 1] = Math.max(0, Math.min(255, g + noise * 0.8 + streak * 0.6));
+                    d[i + 2] = Math.max(0, Math.min(255, b + noise * 0.5));
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+        } else if (type === "wood") {
+            // Brown with horizontal grain lines
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+            const imgData = ctx.getImageData(0, 0, size, size);
+            const d = imgData.data;
+            for (let y = 0; y < size; y++) {
+                const grainBase = Math.sin(y * 0.15) * 15 + Math.sin(y * 0.4) * 8;
+                for (let x = 0; x < size; x++) {
+                    const i = (y * size + x) * 4;
+                    const grain = grainBase + (rand() - 0.5) * 12;
+                    d[i] = Math.max(0, Math.min(255, r + grain));
+                    d[i + 1] = Math.max(0, Math.min(255, g + grain * 0.8));
+                    d[i + 2] = Math.max(0, Math.min(255, b + grain * 0.4));
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            // Occasional knot
+            for (let k = 0; k < 2; k++) {
+                const kx = rand() * size, ky = rand() * size;
+                const kr = 3 + rand() * 6;
+                ctx.beginPath();
+                ctx.arc(kx, ky, kr, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${r * 0.6}, ${g * 0.5}, ${b * 0.4}, 0.3)`;
+                ctx.fill();
+            }
+        } else {
+            // Fallback: just fill base color with subtle noise
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, size, size);
+        }
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(2, 2);
+        tex.needsUpdate = true;
+        if (this._canvasTextureCache) this._canvasTextureCache.set(cacheKey, tex);
+        return tex;
     }
 
     /**
@@ -366,6 +672,19 @@ class WorldRenderer {
             r.physicallyCorrectLights = true;
         }
 
+        // Try Three.js Sky shader for dynamic sky
+        if (typeof THREE.Sky === "function") {
+            try {
+                this._setupDynamicSky(r);
+                return; // Dynamic sky handles PMREM and background
+            } catch (e) {
+                console.warn("Dynamic Sky setup failed — falling back to procedural texture:", e);
+                // Clean up partial sky setup
+                if (this._sky) { this.scene.remove(this._sky); this._sky = null; }
+            }
+        }
+
+        // Fallback: procedural equirect sky texture
         const skyTex = this._createProceduralSkyTexture();
         const aniso = r.capabilities && r.capabilities.getMaxAnisotropy
             ? Math.min(16, r.capabilities.getMaxAnisotropy())
@@ -399,6 +718,77 @@ class WorldRenderer {
 
         this.scene.background = skyTex;
         // Fog is set in init() after scene scale is known
+    }
+
+    /** Set up Three.js Sky shader with PMREM environment map. */
+    _setupDynamicSky(renderer) {
+        const sky = new THREE.Sky();
+        sky.scale.setScalar(10000);
+        this.scene.add(sky);
+        this._sky = sky;
+
+        this._sunPosition = new THREE.Vector3();
+
+        // Configure sky uniforms for Mediterranean atmosphere
+        const skyUniforms = sky.material.uniforms;
+        skyUniforms['turbidity'].value = 4;
+        skyUniforms['rayleigh'].value = 1.5;
+        skyUniforms['mieCoefficient'].value = 0.005;
+        skyUniforms['mieDirectionalG'].value = 0.85;
+
+        // PMREM for environment reflections
+        if (typeof THREE.PMREMGenerator === "function") {
+            if (this._pmremGenerator) {
+                try { this._pmremGenerator.dispose(); } catch (e) { /* ignore */ }
+            }
+            this._pmremGenerator = new THREE.PMREMGenerator(renderer);
+            this._pmremGenerator.compileEquirectangularShader();
+        }
+
+        // Apply default time of day (late morning)
+        this._updateSkyForTimeOfDay(this._timeOfDay || 0.35);
+    }
+
+    /** Update Sky shader, PMREM environment, and scene background for given time. */
+    _updateSkyForTimeOfDay(t) {
+        if (!this._sky) return;
+
+        const angle = (t - 0.25) * Math.PI; // 0.25=horizon east, 0.5=zenith, 0.75=horizon west
+        const sunY = Math.sin(angle);
+        const sunX = Math.cos(angle);
+        const sunAlt = Math.max(0, sunY);
+
+        // Sun position for sky shader — phi from zenith, theta around Y axis
+        const phi = Math.PI / 2 - Math.asin(Math.max(-0.05, sunY)); // Allow slight below-horizon
+        const theta = Math.atan2(sunX, 0.3); // Slight Z offset for dramatic angle
+        this._sunPosition.setFromSphericalCoords(1, phi, theta);
+
+        const skyUniforms = this._sky.material.uniforms;
+        skyUniforms['sunPosition'].value.copy(this._sunPosition);
+
+        // Adjust sky parameters based on time
+        const warmth = 1 - sunAlt;
+        skyUniforms['turbidity'].value = 3 + warmth * 6; // Hazier at dawn/dusk
+        skyUniforms['rayleigh'].value = 1.0 + sunAlt * 1.0; // Bluer at noon
+        skyUniforms['mieCoefficient'].value = 0.003 + warmth * 0.012; // More scattering at horizon
+
+        // Regenerate environment map from sky (throttled — expensive)
+        this._regenerateSkyEnvironment();
+    }
+
+    /** Regenerate PMREM from current sky state. Throttled to avoid frame drops. */
+    _regenerateSkyEnvironment() {
+        if (!this._pmremGenerator || !this._sky) return;
+        try {
+            if (this._pmremRenderTarget) {
+                this._pmremRenderTarget.dispose();
+            }
+            const rt = this._pmremGenerator.fromScene(this.scene, 0, 0.1, 10000);
+            this.scene.environment = rt.texture;
+            this._pmremRenderTarget = rt;
+        } catch (e) {
+            // Silently continue — environment map is nice-to-have
+        }
     }
 
     /** Warm dusty horizon + soft sun + wispy clouds for ancient city atmosphere. */
@@ -662,7 +1052,31 @@ class WorldRenderer {
 
     // ─── Materials (cached for performance) ───
     /** roughness/metalness 0..1; cache key stable to avoid float churn */
-    _mat(color, roughness = 0.7, metalness = 0.02) {
+    _mat(colorOrDescriptor, roughness = 0.7, metalness = 0.02) {
+        // Handle material descriptor objects: {color, roughness, metalness, texture}
+        if (colorOrDescriptor && typeof colorOrDescriptor === "object" && !Array.isArray(colorOrDescriptor)) {
+            const desc = colorOrDescriptor;
+            const col = desc.color || "#888888";
+            const rVal = desc.roughness != null ? desc.roughness : roughness;
+            const mVal = desc.metalness != null ? desc.metalness : metalness;
+            const texType = desc.texture || null;
+            return this._matFromDescriptor(col, rVal, mVal, texType);
+        }
+
+        let color = colorOrDescriptor;
+
+        // Material name resolution — look up in grammar engine
+        if (typeof color === "string" && !color.startsWith("#") && !/^0x/i.test(color) && !/^\d/.test(color)) {
+            const matDef = window.EternalCities?.GrammarEngine?.getMaterial?.(color);
+            if (matDef) {
+                const rVal = matDef.roughness != null ? matDef.roughness : roughness;
+                const mVal = matDef.metalness != null ? matDef.metalness : metalness;
+                const texType = matDef.texture || null;
+                return this._matFromDescriptor(matDef.color || "#888888", rVal, mVal, texType);
+            }
+            // Not found in grammar engine — treat as hex color fallback
+        }
+
         const r = Math.max(0.05, Math.min(1, Number(roughness)));
         const m = Math.max(0, Math.min(1, Number(metalness)));
         const key = `${color}:${r.toFixed(3)}:${m.toFixed(3)}`;
@@ -674,6 +1088,31 @@ class WorldRenderer {
                 metalness: m,
                 envMapIntensity: 0.78,
             });
+            mat._cached = true;
+            this._matCache.set(key, mat);
+        }
+        return this._matCache.get(key);
+    }
+
+    /** Internal: create material from resolved descriptor values, optionally with canvas texture. */
+    _matFromDescriptor(color, roughness, metalness, textureType) {
+        const r = Math.max(0.05, Math.min(1, Number(roughness)));
+        const m = Math.max(0, Math.min(1, Number(metalness)));
+        const texKey = textureType || "none";
+        const key = `desc:${color}:${r.toFixed(3)}:${m.toFixed(3)}:${texKey}`;
+        if (!this._matCache) this._matCache = new Map();
+        if (!this._matCache.has(key)) {
+            const opts = {
+                color: new THREE.Color(color),
+                roughness: r,
+                metalness: m,
+                envMapIntensity: 0.78,
+            };
+            if (textureType && typeof this._generateTexture === "function") {
+                const tex = this._generateTexture(textureType, color, 256);
+                if (tex) opts.map = tex;
+            }
+            const mat = new THREE.MeshStandardMaterial(opts);
             mat._cached = true;
             this._matCache.set(key, mat);
         }
@@ -778,10 +1217,11 @@ class WorldRenderer {
             this.scene.background.dispose();
             this.scene.background = null;
         }
-        // Remove all dynamic objects (buildings, ground, grid) but keep lights and camera
+        // Remove all dynamic objects (buildings, ground, grid) but keep lights, camera, and Sky
         const keep = new Set();
         this.scene.children.forEach(child => {
             if (child.isLight || child.isCamera || child === this.camera) keep.add(child);
+            if (this._sky && child === this._sky) keep.add(child);
         });
         const toRemove = this.scene.children.filter(child => !keep.has(child));
         for (const obj of toRemove) {
@@ -800,6 +1240,9 @@ class WorldRenderer {
         this._waterMeshes = [];
         this._animatingGroups.clear();
         this._cornerHeights = null;
+        // Clean up particles
+        this._dustParticles = null;
+        this._dustVelocities = null;
     }
 
     _disposeGroupResources(group) {
@@ -1032,7 +1475,7 @@ class WorldRenderer {
             sc.bottom = -half;
             sc.far = Math.max(6000, diagonal * 3.5);
             sc.updateProjectionMatrix();
-            const shadowMapSize = diagonal > 1400 ? 4096 : 2048;
+            const shadowMapSize = 4096; // Always high-quality shadow maps
             if (this._sunLight.shadow.map) {
                 this._sunLight.shadow.map.dispose();
                 this._sunLight.shadow.map = null;
@@ -1113,6 +1556,51 @@ class WorldRenderer {
                 }
             }
         // Errors are returned per tile and emitted as world-render-error; no silent fallbacks.
+
+        // Create atmospheric dust mote particles
+        this._createDustParticles(mapW, mapH, midY);
+    }
+
+    // ─── Particle System (Dust Motes) ───
+
+    /** Create lightweight particle system for atmospheric dust motes. */
+    _createDustParticles(mapW, mapH, midY) {
+        const count = 250;
+        const positions = new Float32Array(count * 3);
+        const velocities = new Float32Array(count * 3);
+
+        for (let i = 0; i < count; i++) {
+            positions[i * 3] = Math.random() * mapW;
+            positions[i * 3 + 1] = midY + Math.random() * 80 + 10;
+            positions[i * 3 + 2] = Math.random() * mapH;
+            // Slow brownian drift velocities
+            velocities[i * 3] = (Math.random() - 0.5) * 0.15;
+            velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.05;
+            velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.15;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+            color: 0xffe8b0,        // warm golden
+            size: 1.5,
+            transparent: true,
+            opacity: 0.0,           // starts invisible; setTimeOfDay controls visibility
+            depthWrite: false,
+            sizeAttenuation: true,
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.frustumCulled = false;
+        points.visible = false; // Controlled by setTimeOfDay
+        this.scene.add(points);
+
+        this._dustParticles = points;
+        this._dustVelocities = velocities;
+        this._dustBoundsW = mapW;
+        this._dustBoundsH = mapH;
+        this._dustMidY = midY;
     }
 
     updateTiles(tiles) {
@@ -1657,6 +2145,29 @@ class WorldRenderer {
                 }
             } else if (Array.isArray(spec.components) && spec.components.length > 0) {
                 resolvedComponents = spec.components;
+            }
+
+            // Grammar engine integration — expand grammar specs into components
+            if (!resolvedComponents && spec.grammar && window.EternalCities?.GrammarEngine) {
+                try {
+                    const grammarShapes = window.EternalCities.GrammarEngine.expand(spec.grammar, spec.params || {});
+                    resolvedComponents = grammarShapes.concat(spec.overrides || []);
+                } catch (e) {
+                    const msg = e && e.message ? e.message : String(e);
+                    console.warn(`Grammar expansion failed for tile (${tile.x},${tile.y}): ${msg}`);
+                }
+            }
+
+            // Dense array format — expand via grammar engine
+            if (!resolvedComponents && spec.shapes && Array.isArray(spec.shapes) && spec.shapes.length > 0 && Array.isArray(spec.shapes[0])) {
+                if (window.EternalCities?.GrammarEngine?.expandDenseShapes) {
+                    try {
+                        resolvedComponents = window.EternalCities.GrammarEngine.expandDenseShapes(spec.shapes);
+                    } catch (e) {
+                        const msg = e && e.message ? e.message : String(e);
+                        console.warn(`Dense shape expansion failed for tile (${tile.x},${tile.y}): ${msg}`);
+                    }
+                }
             }
         }
 
@@ -2660,6 +3171,117 @@ class WorldRenderer {
                     group.add(bar);
                 }
                 maxTop = Math.max(maxTop, anchorY + py + lh);
+                mesh = null;
+            } else if (p.shape === "wedge") {
+                // Triangular prism — for pediments, ramps, gable ends
+                // params: width, height, depth
+                const ww = Number(p.width || 0.3);
+                const wh = Number(p.height || 0.15);
+                const wd = Number(p.depth || 0.3);
+                // Triangular cross-section along Z: base at bottom, apex at top center
+                const verts = new Float32Array([
+                    // Front triangle
+                    -ww/2, 0, -wd/2,   ww/2, 0, -wd/2,   0, wh, -wd/2,
+                    // Back triangle
+                    -ww/2, 0, wd/2,    0, wh, wd/2,       ww/2, 0, wd/2,
+                    // Left slope
+                    -ww/2, 0, -wd/2,   0, wh, -wd/2,     0, wh, wd/2,
+                    -ww/2, 0, -wd/2,   0, wh, wd/2,      -ww/2, 0, wd/2,
+                    // Right slope
+                    ww/2, 0, -wd/2,    0, wh, wd/2,       0, wh, -wd/2,
+                    ww/2, 0, -wd/2,    ww/2, 0, wd/2,     0, wh, wd/2,
+                    // Bottom
+                    -ww/2, 0, -wd/2,   -ww/2, 0, wd/2,    ww/2, 0, wd/2,
+                    -ww/2, 0, -wd/2,    ww/2, 0, wd/2,    ww/2, 0, -wd/2,
+                ]);
+                const wGeo = new THREE.BufferGeometry();
+                wGeo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+                wGeo.computeVertexNormals();
+                mesh = new THREE.Mesh(wGeo, mat);
+                mesh.position.set(px, anchorY + py, pz);
+                maxTop = Math.max(maxTop, anchorY + py + wh);
+            } else if (p.shape === "stairs") {
+                // Procedural stepped boxes — for staircases, temple steps
+                // params: width, depth, height, steps, direction (front|back|left|right)
+                const stW = Number(p.width || 0.3);
+                const stD = Number(p.depth || 0.3);
+                const stH = Number(p.height || 0.2);
+                const nSteps = Math.max(2, Math.min(20, Math.round(p.steps || 5)));
+                const stepH = stH / nSteps;
+                const stepD = stD / nSteps;
+                for (let si = 0; si < nSteps; si++) {
+                    const sw = stW;
+                    const sd = stepD;
+                    const step = new THREE.Mesh(
+                        new THREE.BoxGeometry(sw, stepH, sd), mat
+                    );
+                    step.position.set(
+                        px,
+                        anchorY + py + si * stepH + stepH / 2,
+                        pz - stD / 2 + si * stepD + stepD / 2
+                    );
+                    step.castShadow = true;
+                    step.receiveShadow = true;
+                    group.add(step);
+                }
+                maxTop = Math.max(maxTop, anchorY + py + stH);
+                mesh = null;
+            } else if (p.shape === "ring") {
+                // Annular cylinder — two concentric cylinders for ring walls, wells, amphitheaters
+                // params: outerRadius, innerRadius, height, segments
+                const outerR = Number(p.outerRadius || p.radius || 0.2);
+                const innerR = Number(p.innerRadius || outerR * 0.7);
+                const ringH = Number(p.height || 0.1);
+                const rSegs = capSeg(p.segments ?? 24, 8, 48);
+                // Outer cylinder
+                const outerGeo = new THREE.CylinderGeometry(outerR, outerR, ringH, rSegs, 1, true);
+                const outerMesh = new THREE.Mesh(outerGeo, mat);
+                outerMesh.position.set(px, anchorY + py + ringH / 2, pz);
+                outerMesh.castShadow = true;
+                group.add(outerMesh);
+                // Inner cylinder (inverted normals for inside view)
+                const innerGeo = new THREE.CylinderGeometry(innerR, innerR, ringH, rSegs, 1, true);
+                // Flip normals for inner surface
+                const innerPositions = innerGeo.getAttribute("position");
+                const innerNormals = innerGeo.getAttribute("normal");
+                if (innerNormals) {
+                    for (let ni = 0; ni < innerNormals.count; ni++) {
+                        innerNormals.setXYZ(ni,
+                            -innerNormals.getX(ni),
+                            -innerNormals.getY(ni),
+                            -innerNormals.getZ(ni)
+                        );
+                    }
+                    innerNormals.needsUpdate = true;
+                }
+                // Reverse face winding
+                const innerIdx = innerGeo.index;
+                if (innerIdx) {
+                    const arr = innerIdx.array;
+                    for (let fi = 0; fi < arr.length; fi += 3) {
+                        const tmp = arr[fi];
+                        arr[fi] = arr[fi + 2];
+                        arr[fi + 2] = tmp;
+                    }
+                    innerIdx.needsUpdate = true;
+                }
+                const innerMesh = new THREE.Mesh(innerGeo, mat);
+                innerMesh.position.set(px, anchorY + py + ringH / 2, pz);
+                group.add(innerMesh);
+                // Top ring (annulus)
+                const topGeo = new THREE.RingGeometry(innerR, outerR, rSegs);
+                const topMesh = new THREE.Mesh(topGeo, mat);
+                topMesh.rotation.x = -Math.PI / 2;
+                topMesh.position.set(px, anchorY + py + ringH, pz);
+                topMesh.castShadow = true;
+                group.add(topMesh);
+                // Bottom ring
+                const botGeo = new THREE.RingGeometry(innerR, outerR, rSegs);
+                const botMesh = new THREE.Mesh(botGeo, mat);
+                botMesh.rotation.x = Math.PI / 2;
+                botMesh.position.set(px, anchorY + py, pz);
+                group.add(botMesh);
+                maxTop = Math.max(maxTop, anchorY + py + ringH);
                 mesh = null;
             } else {
                 throw new Error(`procedural.parts[${i}]: unknown shape ${JSON.stringify(p.shape)}`);
@@ -4520,6 +5142,16 @@ class WorldRenderer {
 
         // Hemisphere light: sky blue shifts to deep blue at night
         this._hemiLight.intensity = 0.2 + sunAlt * 0.3;
+        this._hemiLight.color.setRGB(
+            0.66 + sunAlt * 0.2 - nightFactor * 0.3,
+            0.78 + sunAlt * 0.1 - nightFactor * 0.2,
+            0.94 - nightFactor * 0.2
+        );
+        this._hemiLight.groundColor.setRGB(
+            0.48 + warmth * 0.15,
+            0.43 + warmth * 0.08,
+            0.32 - nightFactor * 0.1
+        );
 
         // Fill light: stronger at golden hour
         this._fillLight.intensity = 0.05 + warmth * 0.15 * sunAlt;
@@ -4540,6 +5172,19 @@ class WorldRenderer {
 
         // Tone mapping exposure: slightly brighter at noon, darker at night
         this.renderer3d.toneMappingExposure = 0.7 + sunAlt * 0.35 - nightFactor * 0.25;
+
+        // Update dynamic Sky shader if present
+        this._updateSkyForTimeOfDay(t);
+
+        // Update dust particle visibility — only visible near golden hour
+        if (this._dustParticles) {
+            const goldenHourFactor = Math.max(0,
+                1 - Math.abs(t - 0.3) * 5, // morning golden hour ~0.25-0.35
+                1 - Math.abs(t - 0.7) * 5  // evening golden hour ~0.65-0.75
+            );
+            this._dustParticles.material.opacity = goldenHourFactor * 0.4;
+            this._dustParticles.visible = goldenHourFactor > 0.05;
+        }
     }
 
     _getMeshList() {
@@ -4762,6 +5407,38 @@ class WorldRenderer {
             }
         }
 
+        // Animate dust particles — slow brownian drift
+        if (this._dustParticles && this._dustParticles.visible && this._dustVelocities) {
+            const posAttr = this._dustParticles.geometry.getAttribute("position");
+            const pos = posAttr.array;
+            const vel = this._dustVelocities;
+            const bw = this._dustBoundsW || 500;
+            const bh = this._dustBoundsH || 500;
+            const my = this._dustMidY || 0;
+            for (let i = 0; i < pos.length; i += 3) {
+                // Add small random jitter to velocity (brownian motion)
+                vel[i] += (Math.random() - 0.5) * 0.02;
+                vel[i + 1] += (Math.random() - 0.5) * 0.01;
+                vel[i + 2] += (Math.random() - 0.5) * 0.02;
+                // Dampen velocity
+                vel[i] *= 0.98;
+                vel[i + 1] *= 0.98;
+                vel[i + 2] *= 0.98;
+                // Update position
+                pos[i] += vel[i];
+                pos[i + 1] += vel[i + 1];
+                pos[i + 2] += vel[i + 2];
+                // Wrap around bounds
+                if (pos[i] < 0) pos[i] = bw;
+                if (pos[i] > bw) pos[i] = 0;
+                if (pos[i + 2] < 0) pos[i + 2] = bh;
+                if (pos[i + 2] > bh) pos[i + 2] = 0;
+                if (pos[i + 1] < my + 5) pos[i + 1] = my + 80;
+                if (pos[i + 1] > my + 90) pos[i + 1] = my + 10;
+            }
+            posAttr.needsUpdate = true;
+        }
+
         this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
         this._frustum.setFromProjectionMatrix(this._projScreenMatrix);
         const camPos = this.camera.position;
@@ -4803,6 +5480,11 @@ class WorldRenderer {
             });
         });
 
-        this.renderer3d.render(this.scene, this.camera);
+        // Use post-processing composer if available, otherwise direct render
+        if (this.composer) {
+            this.composer.render();
+        } else {
+            this.renderer3d.render(this.scene, this.camera);
+        }
     }
 }

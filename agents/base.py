@@ -1,10 +1,17 @@
-"""Base agent — LLM completion via pluggable provider (see llm_agents.py + agents/provider.py)."""
+"""Base agent — LLM completion via pluggable provider (see llm_agents.py + agents/provider.py).
+
+Includes lightweight memory integration: each agent accumulates a rolling
+ConversationMemory and a KnowledgeBase. Memory context is prepended to
+instructions as compact strings (<100 tokens) before each LLM call, and
+interaction summaries are recorded after each response.
+"""
 
 import json
 import logging
 import time
 
 from agents import llm_routing as llm_agents
+from agents.memory import ConversationMemory, KnowledgeBase
 from agents.providers import LlmProvider, build_provider_from_spec
 from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text
 from core.run_log import log_event
@@ -54,9 +61,56 @@ class BaseAgent:
         self.model = spec["model"]
         self._provider_override = provider
 
+        # Memory subsystems — lightweight, token-efficient.
+        self.memory = ConversationMemory(max_entries=10)
+        self.knowledge = KnowledgeBase()
+        self._turn_counter = 0
+
     async def generate(self, instruction: str) -> dict:
-        """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure."""
-        return await self._single_generate(instruction)
+        """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure.
+
+        Memory integration:
+        - Before the call, conversation memory context is prepended to the instruction.
+        - After a successful call, both the instruction summary and response keys are recorded.
+        """
+        # Prepend memory context (compact, <100 tokens)
+        enriched = self._prepend_memory_context(instruction)
+
+        # Record the outgoing instruction in conversation memory
+        self._turn_counter += 1
+        self.memory.add("user", instruction, self._turn_counter)
+
+        result = await self._single_generate(enriched)
+
+        # Record the response summary in conversation memory
+        response_keys = ",".join(sorted(result.keys())[:6])
+        commentary = (result.get("commentary") or "")[:100]
+        response_summary = f"keys={response_keys}"
+        if commentary:
+            response_summary += f"|{commentary}"
+        self.memory.add("assistant", response_summary, self._turn_counter)
+
+        return result
+
+    def _prepend_memory_context(self, instruction: str) -> str:
+        """Prepend compact memory context to an instruction if available.
+
+        Only injects context when memory has content. The injected block is
+        always <100 tokens to avoid inflating prompt costs.
+
+        Args:
+            instruction: The original instruction string.
+
+        Returns:
+            Instruction with memory context prepended (or unchanged if no memory).
+        """
+        parts = []
+        mem_ctx = self.memory.format_context()
+        if mem_ctx:
+            parts.append(mem_ctx)
+        if parts:
+            return "\n".join(parts) + "\n\n" + instruction
+        return instruction
 
     async def _single_generate(self, instruction: str) -> dict:
         """Call LLM once. Raises AgentGenerationError if the process or JSON output is invalid."""

@@ -40,9 +40,9 @@ def load_data(name: str) -> object:
 
 
 def format_building_types() -> str:
-    """Format building_types.json into a prompt-ready string."""
+    """Format building_types.json into a compact prompt-ready string."""
     types = load_data("building_types")
-    return "\n".join(f"  {t['type']:15s} — {t['description']}" for t in types)
+    return " | ".join(f"{t['type']}={t['description']}" for t in types)
 
 
 def format_material_palette() -> str:
@@ -66,3 +66,19 @@ def format_composition_directive(seed: int) -> str:
     """Select a composition directive based on a seed value."""
     directives = load_data("composition_directives")
     return directives[seed % len(directives)]
+
+
+def format_compact_neighbors(neighbors: list[dict]) -> str:
+    """Format neighbor structures into compact NB: notation for prompt injection.
+
+    Input: list of dicts with keys: direction, name, building_type, color, height
+    Output: "NB:N:Temple(temple,#f0ece4,h=12);E:Via Sacra(road)"
+    """
+    from orchestration.schema import format_compact_neighbors as _fmt
+    return _fmt(neighbors)
+
+
+def format_dense_shape_legend() -> str:
+    """Return a compact legend of dense shape type codes for prompt injection."""
+    from orchestration.schema import DENSE_SHAPE_CODES
+    return " ".join(f"{code}={name}" for code, name in sorted(DENSE_SHAPE_CODES.items(), key=lambda x: x[1]))

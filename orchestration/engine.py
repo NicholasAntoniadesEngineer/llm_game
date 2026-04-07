@@ -6,6 +6,7 @@ import logging
 import time
 
 from world.state import WorldState
+from world.blueprint import CityBlueprint
 from orchestration.bus import MessageBus, BusMessage
 from orchestration.task_manager import TaskManager
 from core.run_log import log_event
@@ -49,7 +50,7 @@ from orchestration.validation import (
 from core.errors import UrbanistaValidationError
 from orchestration.placement import check_functional_placement, log_functional_placement_warnings
 from orchestration.prompt_builder import build_terrain_prompt, build_building_prompt
-from core.persistence import save_state, load_districts_cache
+from core.persistence import save_state, load_districts_cache, save_blueprint, load_blueprint
 from orchestration.generators import Generators
 
 logger = logging.getLogger("eternal.engine")
@@ -90,6 +91,7 @@ class BuildEngine:
         self.urbanista = BaseAgent("urbanista", "Urbanista", load_prompt("urbanista", BUILDING_TYPES=format_building_types(), KEY_COLORS=format_material_palette()), llm_agent_key=KEY_URBANISTA)
         self._source_policy = _source_policy
         self.generation = 0
+        self.blueprint: CityBlueprint | None = None
         self._district_scenery_summaries: dict[str, str] = {}
         self._district_palettes: dict[str, dict] = {}  # {district_name: {primary, secondary, accent}}
         self._fused_seed_master_plan: list | None = None
@@ -129,6 +131,7 @@ class BuildEngine:
         self._district_scenery_summaries.clear()
         self._district_palettes.clear()
         self._fused_seed_master_plan = None
+        self.blueprint = None
         if hasattr(self, "_survey_cache"):
             del self._survey_cache
 
@@ -172,6 +175,34 @@ class BuildEngine:
                     if not map_desc:
                         self.tasks._map_refine_task = asyncio.create_task(self.generators.refine_map_description_background())
                     asyncio.create_task(self.generators.find_map_image())
+
+            # ─── BLUEPRINT: create city coherence data ───
+            if self.blueprint is None:
+                # Try loading persisted blueprint first
+                bp_data = load_blueprint()
+                if bp_data:
+                    self.blueprint = CityBlueprint.from_dict(bp_data)
+                    logger.info("Blueprint restored from disk")
+                else:
+                    self.blueprint = self._create_blueprint()
+                    if self.blueprint:
+                        # Persist for resumption
+                        await asyncio.to_thread(save_blueprint, self.blueprint.to_dict())
+                if self.blueprint:
+                    # Pre-rasterize roads as immutable infrastructure
+                    road_count = self.blueprint.rasterize_roads(self.world)
+                    # Apply elevation from hills data
+                    elev_count = self.blueprint.populate_elevation(self.world)
+                    if road_count or elev_count:
+                        logger.info("Blueprint applied: %d road tiles, %d elevation tiles", road_count, elev_count)
+                        # Broadcast the road tiles so clients see them immediately
+                        road_tiles = [t.to_dict() for t in self.world.tiles.values()
+                                      if t.terrain == "road" and t.building_type == "road"]
+                        if road_tiles:
+                            await self.broadcast({
+                                "type": "tile_update", "tiles": road_tiles,
+                                "turn": self.world.turn,
+                            })
 
             await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts, self.generation)
 
@@ -330,6 +361,56 @@ class BuildEngine:
                 f"{context}: no valid in-bounds tiles after validation (duplicates or out of grid).",
             )
         return cleaned
+
+    def _create_blueprint(self) -> CityBlueprint | None:
+        """Create a CityBlueprint from known city data or from district planner output."""
+        import json as _json
+        from pathlib import Path
+
+        scenario = config_module.SCENARIO
+        if not scenario:
+            return None
+
+        city_name = scenario.get("location", "")
+        bp = None
+
+        # Try loading from known_cities.json first
+        known_cities_path = Path(__file__).resolve().parent.parent / "data" / "known_cities.json"
+        if known_cities_path.exists():
+            try:
+                known = _json.loads(known_cities_path.read_text(encoding="utf-8"))
+                if city_name in known:
+                    bp = CityBlueprint.from_known_city(known[city_name])
+                    logger.info("Blueprint loaded from known_cities.json for %s", city_name)
+            except Exception as exc:
+                logger.warning("Failed to load known_cities.json: %s", exc)
+
+        # Fall back to inferring from discovered districts
+        if bp is None and self.districts:
+            bp = CityBlueprint.from_districts(self.districts)
+            logger.info("Blueprint inferred from %d districts", len(self.districts))
+
+        # Enrich district_characters from discovered districts regardless of source
+        if bp and self.districts:
+            for d in self.districts:
+                dname = d.get("name", "")
+                if dname and dname not in bp.district_characters:
+                    # Infer character from district data
+                    char: dict = {}
+                    desc = d.get("description", "").lower()
+                    elev = d.get("elevation", 0.0)
+                    if any(w in desc for w in ("monumental", "sacred", "temple", "imperial", "forum")):
+                        char = {"style": "monumental", "wealth": 9, "height_range": [2, 4]}
+                    elif any(w in desc for w in ("market", "commerce", "trade")):
+                        char = {"style": "commercial", "wealth": 6, "height_range": [1, 3]}
+                    elif any(w in desc for w in ("residential", "insula", "domus")):
+                        char = {"style": "residential", "wealth": 4, "height_range": [1, 3]}
+                    elif any(w in desc for w in ("military", "barracks", "wall")):
+                        char = {"style": "military", "wealth": 5, "height_range": [1, 2]}
+                    if char:
+                        bp.district_characters[dname] = char
+
+        return bp
 
     async def _build_district(self, district: dict, master_plan: list) -> bool:
         district_key = district.get("name", "unknown")
@@ -548,6 +629,14 @@ class BuildEngine:
                 except ValueError as exc:
                     await self._pause_for_api_issue("unknown", str(exc), "urbanista")
                     return False
+
+            # ── Inject blueprint coherence context (~100 tokens) ──
+            if self.blueprint:
+                ctx_line = self.blueprint.build_context_line(
+                    self.world, anchor_x, anchor_y, district_key,
+                )
+                if ctx_line:
+                    prompt = ctx_line + "\n" + prompt
 
             urban_jobs.append({
                 "name": name,

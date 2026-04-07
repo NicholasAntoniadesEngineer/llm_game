@@ -1,4 +1,8 @@
-"""Validate survey master plans and Urbanista output against the grid and renderer contract."""
+"""Validate survey master plans and Urbanista output against the grid and renderer contract.
+
+Supports both verbose (dict) and dense (array) formats.  Dense data is expanded
+to verbose form *before* validation so the rest of the pipeline is format-agnostic.
+"""
 
 from __future__ import annotations
 
@@ -14,21 +18,35 @@ from orchestration.schema import (
     _PHASE4_HEX_KEYS,
     _PHASE4_NUM_KEYS,
     _STACK_ROLE_ORDER,
+    GRAMMAR_IDS,
+    MATERIAL_NAMES,
     MAX_PROCEDURAL_PARTS,
     PARAMETRIC_TEMPLATE_IDS,
     PROCEDURAL_SHAPES,
     RENDERER_COMPONENT_TYPES,
     STACK_ROLES,
+    expand_dense_shapes_in_result,
+    resolve_color,
 )
 
 logger = logging.getLogger("eternal.validation")
 
 
+def _is_valid_color(c: str) -> bool:
+    """Accept #RRGGBB hex, named colors, or material names."""
+    if not isinstance(c, str):
+        return False
+    s = c.strip()
+    if _HEX_COLOR.match(s):
+        return True
+    lower = s.lower()
+    return lower in _NAMED_COLOR_MAP or lower in MATERIAL_NAMES
+
 
 def _require_color(part: dict, ctx: str) -> None:
     c = part.get("color")
-    if not isinstance(c, str) or not _HEX_COLOR.match(c):
-        raise UrbanistaValidationError(f"{ctx}: each procedural part requires color as #RRGGBB hex")
+    if not isinstance(c, str) or not _is_valid_color(c):
+        raise UrbanistaValidationError(f"{ctx}: each procedural part requires color as #RRGGBB hex or named material")
 
 
 def _validate_optional_pbr(comp: dict, ctx: str) -> None:
@@ -204,9 +222,9 @@ def _validate_component(comp: dict, ctx: str) -> None:
         return
     if ct == "colonnade":
         st = comp.get("style")
-        if not isinstance(st, str) or st.lower() not in ("doric", "ionic", "corinthian"):
+        if not isinstance(st, str) or st.lower() not in ("doric", "ionic", "corinthian", "tuscan", "composite"):
             raise UrbanistaValidationError(
-                f"{ctx}: colonnade requires style as one of doric, ionic, corinthian"
+                f"{ctx}: colonnade requires style as one of doric, ionic, corinthian, tuscan, composite"
             )
         for req in ("columns", "height", "radius"):
             if comp.get(req) is None:
@@ -230,9 +248,20 @@ def _validate_component(comp: dict, ctx: str) -> None:
 
 
 def sanitize_urbanista_output(arch_result: dict) -> dict:
-    """Auto-correct common Urbanista errors before validation. Returns a cleaned copy."""
+    """Auto-correct common Urbanista errors before validation. Returns a cleaned copy.
+
+    Handles:
+    1. Dense format expansion (arrays -> dicts, short keys -> verbose keys)
+    2. Material/color name resolution to #RRGGBB hex
+    3. Missing stack_role / parts on procedural components
+    4. Grammar reference passthrough
+    """
     if not isinstance(arch_result, dict):
         return arch_result
+
+    # Step 1: Expand any dense format data to verbose dicts
+    arch_result = expand_dense_shapes_in_result(arch_result)
+
     fixes = 0
     tiles = arch_result.get("tiles")
     if not isinstance(tiles, list):
@@ -240,6 +269,12 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
     for td in tiles:
         if not isinstance(td, dict):
             continue
+
+        # Grammar tiles are valid — mark terrain and pass through
+        if td.get("grammar"):
+            td.setdefault("terrain", "building")
+            fixes += 1
+
         spec = td.get("spec")
         if not isinstance(spec, dict):
             continue
@@ -249,9 +284,9 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
                 continue
             c = comp.get("color")
             if isinstance(c, str) and not c.startswith("#"):
-                mapped = _NAMED_COLOR_MAP.get(c.lower().strip())
-                if mapped:
-                    comp["color"] = mapped
+                resolved = resolve_color(c)
+                if resolved != "#808080" or c.lower().strip() in _NAMED_COLOR_MAP or c.lower().strip() in MATERIAL_NAMES:
+                    comp["color"] = resolved
                     fixes += 1
             # Fix procedural with missing parts
             if comp.get("type") == "procedural" and not comp.get("parts"):
@@ -263,7 +298,7 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
             if comp.get("type") == "procedural" and not comp.get("stack_role"):
                 comp["stack_role"] = "structural"
                 fixes += 1
-        # Fix color names in procedural parts
+        # Fix color names / material names in procedural parts
         for comp in spec.get("components", []):
             if not isinstance(comp, dict):
                 continue
@@ -272,9 +307,9 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
                     continue
                 c = part.get("color")
                 if isinstance(c, str) and not c.startswith("#"):
-                    mapped = _NAMED_COLOR_MAP.get(c.lower().strip())
-                    if mapped:
-                        part["color"] = mapped
+                    resolved = resolve_color(c)
+                    if resolved != "#808080" or c.lower().strip() in _NAMED_COLOR_MAP or c.lower().strip() in MATERIAL_NAMES:
+                        part["color"] = resolved
                         fixes += 1
     if fixes:
         logger.info("Sanitized Urbanista output: %d auto-corrections applied", fixes)
@@ -284,8 +319,12 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
 def validate_urbanista_arch_result(arch_result: dict) -> dict:
     """
     Validate building specs: each anchor tile must have spec.components OR spec.template
-    (mutually exclusive). Template ids match static/parametric_templates.js. Secondary
-    multi-tile cells may carry only spec.anchor. Raises UrbanistaValidationError on violation.
+    OR a grammar reference (mutually exclusive). Template ids match
+    static/parametric_templates.js. Grammar tiles carry "grammar" + optional
+    "grammar_params". Secondary multi-tile cells may carry only spec.anchor.
+    Raises UrbanistaValidationError on violation.
+
+    Assumes dense format has already been expanded by sanitize_urbanista_output.
     """
     if not isinstance(arch_result, dict):
         raise UrbanistaValidationError("Urbanista result must be a JSON object")
@@ -298,6 +337,22 @@ def validate_urbanista_arch_result(arch_result: dict) -> dict:
     for td in tiles_in:
         if not isinstance(td, dict):
             continue
+
+        # Grammar tiles are valid with just grammar + grammar_params
+        grammar = td.get("grammar")
+        if grammar is not None:
+            if not isinstance(grammar, str) or grammar not in GRAMMAR_IDS:
+                raise UrbanistaValidationError(
+                    f"tile ({td.get('x')},{td.get('y')}): grammar must be one of {sorted(GRAMMAR_IDS)}, got {grammar!r}"
+                )
+            gparams = td.get("grammar_params")
+            if gparams is not None and not isinstance(gparams, dict):
+                raise UrbanistaValidationError(
+                    f"tile ({td.get('x')},{td.get('y')}): grammar_params must be an object"
+                )
+            # Grammar tiles skip spec validation — the grammar engine handles expansion
+            continue
+
         spec = td.get("spec")
         if not isinstance(spec, dict):
             continue

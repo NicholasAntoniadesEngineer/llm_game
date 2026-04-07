@@ -20,6 +20,7 @@ CHUNKS_DIR = SAVES_DIR / "chunks"
 INDEX_FILE = SAVES_DIR / "index.json"
 DISTRICTS_CACHE = SAVES_DIR / "districts_cache.json"
 SURVEYS_CACHE = SAVES_DIR / "surveys_cache.json"
+BLUEPRINT_FILE = SAVES_DIR / "blueprint.json"
 LLM_SETTINGS_FILE = _PROJECT_ROOT / "data" / "llm_settings.json"
 
 
@@ -203,6 +204,29 @@ def load_surveys_cache() -> dict:
         if not isinstance(v, list):
             raise ValueError(f"Survey cache entry {k} is not a list")
     return data
+
+
+# ─── Blueprint ─────────────────────────────────────────────────────
+
+def save_blueprint(blueprint_dict: dict):
+    """Save city blueprint data to disk."""
+    _ensure_dirs()
+    _atomic_write(BLUEPRINT_FILE, json.dumps(blueprint_dict, indent=2))
+    logger.info("Blueprint saved")
+
+
+def load_blueprint() -> dict | None:
+    """Load city blueprint data from disk. Returns dict or None."""
+    if not BLUEPRINT_FILE.exists():
+        return None
+    try:
+        data = json.loads(BLUEPRINT_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            logger.info("Blueprint loaded from disk")
+            return data
+    except Exception as exc:
+        logger.warning("Failed to load blueprint: %s", exc)
+    return None
 
 
 # ─── LLM Settings ──────────────────────────────────────────────────
