@@ -387,42 +387,61 @@ class BuildEngine:
         return cleaned
 
     def _create_blueprint(self) -> CityBlueprint | None:
-        """Create a CityBlueprint from known city data or from district planner output."""
-        import json as _json
-        from pathlib import Path
+        """Create a CityBlueprint from AI-generated geography in the planner response.
+        Falls back to known_cities.json only as a reference seed, not as the primary source.
+        The AI RESEARCHES the geography — it's never hardcoded."""
 
         scenario = config_module.SCENARIO
         if not scenario:
             return None
 
-        city_name = scenario.get("location", "")
-        bp = None
+        bp = CityBlueprint()
 
-        # Try loading from known_cities.json first
-        known_cities_path = Path(__file__).resolve().parent.parent / "data" / "known_cities.json"
-        if known_cities_path.exists():
-            try:
-                known = _json.loads(known_cities_path.read_text(encoding="utf-8"))
-                if city_name in known:
-                    bp = CityBlueprint.from_known_city(known[city_name])
-                    logger.info("Blueprint loaded from known_cities.json for %s", city_name)
-            except Exception as exc:
-                logger.warning("Failed to load known_cities.json: %s", exc)
+        # PRIMARY: Use AI-researched geography from the planner's response
+        # The skeleton planner returns a "geography" field with hills, water, materials
+        skeleton_result = getattr(self.generators, '_last_skeleton_result', None)
+        if self.districts and skeleton_result:
+            geo = skeleton_result.get("geography", {})
+            if isinstance(geo, dict):
+                if isinstance(geo.get("hills"), list):
+                    bp.hills = geo["hills"]
+                    logger.info("AI researched %d geographic features (hills/peaks)", len(bp.hills))
+                if isinstance(geo.get("water"), list):
+                    bp.water = geo["water"]
+                    logger.info("AI researched %d water features", len(bp.water))
+                bp.primary_stone = geo.get("primary_stone", "travertine")
+                bp.secondary_stone = geo.get("secondary_stone", "tufa")
+                bp.roof_material = geo.get("roof_material", "terracotta")
 
-        # Fall back to inferring from discovered districts
-        if bp is None and self.districts:
-            bp = CityBlueprint.from_districts(self.districts)
-            logger.info("Blueprint inferred from %d districts", len(self.districts))
+        # FALLBACK: If the AI didn't provide geography, try known_cities.json as a seed
+        if not bp.hills and not bp.water:
+            import json as _json
+            from pathlib import Path
+            city_name = scenario.get("location", "")
+            known_cities_path = Path(__file__).resolve().parent.parent / "data" / "known_cities.json"
+            if known_cities_path.exists():
+                try:
+                    known = _json.loads(known_cities_path.read_text(encoding="utf-8"))
+                    if city_name in known:
+                        seed = known[city_name]
+                        bp.hills = seed.get("hills", [])
+                        bp.water = seed.get("water", [])
+                        mats = seed.get("default_materials", {})
+                        bp.primary_stone = mats.get("primary_stone", bp.primary_stone)
+                        bp.secondary_stone = mats.get("secondary_stone", bp.secondary_stone)
+                        bp.roof_material = mats.get("roof_material", bp.roof_material)
+                        logger.info("Geography fallback from known_cities.json for %s (%d hills, %d water)",
+                                    city_name, len(bp.hills), len(bp.water))
+                except Exception as exc:
+                    logger.warning("Failed to load known_cities.json: %s", exc)
 
-        # Enrich district_characters from discovered districts regardless of source
-        if bp and self.districts:
+        # Enrich district_characters from discovered districts
+        if self.districts:
             for d in self.districts:
                 dname = d.get("name", "")
                 if dname and dname not in bp.district_characters:
-                    # Infer character from district data
                     char: dict = {}
                     desc = d.get("description", "").lower()
-                    elev = d.get("elevation", 0.0)
                     if any(w in desc for w in ("monumental", "sacred", "temple", "imperial", "forum")):
                         char = {"style": "monumental", "wealth": 9, "height_range": [2, 4]}
                     elif any(w in desc for w in ("market", "commerce", "trade")):

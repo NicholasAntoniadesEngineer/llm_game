@@ -194,6 +194,8 @@ class Generators:
         await self._set_status("cartographus", "idle")
 
         self.districts = result.get("districts", [])
+        # Store full result so _create_blueprint can access AI-generated geography
+        self._last_skeleton_result = result
         if len(self.districts) > config_module.MAX_DISTRICTS:
             logger.warning("District count %d exceeds cap of %d — truncating", len(self.districts), config_module.MAX_DISTRICTS)
             self.districts = self.districts[:config_module.MAX_DISTRICTS]
