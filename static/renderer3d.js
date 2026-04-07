@@ -768,24 +768,32 @@ class WorldRenderer {
 
         // Adjust sky parameters based on time
         const warmth = 1 - sunAlt;
-        skyUniforms['turbidity'].value = 3 + warmth * 6; // Hazier at dawn/dusk
-        skyUniforms['rayleigh'].value = 1.0 + sunAlt * 1.0; // Bluer at noon
-        skyUniforms['mieCoefficient'].value = 0.003 + warmth * 0.012; // More scattering at horizon
+        skyUniforms['turbidity'].value = 2 + warmth * 3; // Moderate haze, capped
+        skyUniforms['rayleigh'].value = 1.5 + sunAlt * 0.5; // Subtle blue shift
+        skyUniforms['mieCoefficient'].value = 0.003 + warmth * 0.005; // Gentle scattering
 
-        // Regenerate environment map from sky (throttled — expensive)
-        this._regenerateSkyEnvironment();
+        // Regenerate environment map from sky — HEAVILY throttled (very expensive)
+        const now = Date.now();
+        if (!this._lastSkyEnvUpdate || now - this._lastSkyEnvUpdate > 2000) {
+            this._lastSkyEnvUpdate = now;
+            this._regenerateSkyEnvironment();
+        }
     }
 
-    /** Regenerate PMREM from current sky state. Throttled to avoid frame drops. */
+    /** Regenerate PMREM from current sky state. Very expensive — call sparingly. */
     _regenerateSkyEnvironment() {
         if (!this._pmremGenerator || !this._sky) return;
         try {
+            // Temporarily hide the sky from the scene to avoid feedback loop
+            const skyVisible = this._sky.visible;
+            this._sky.visible = true;
             if (this._pmremRenderTarget) {
                 this._pmremRenderTarget.dispose();
             }
             const rt = this._pmremGenerator.fromScene(this.scene, 0, 0.1, 10000);
             this.scene.environment = rt.texture;
             this._pmremRenderTarget = rt;
+            this._sky.visible = skyVisible;
         } catch (e) {
             // Silently continue — environment map is nice-to-have
         }
@@ -5161,7 +5169,7 @@ class WorldRenderer {
         if (this.scene.fog) {
             const baseDensity = this.scene.fog._baseDensity || this.scene.fog.density;
             if (!this.scene.fog._baseDensity) this.scene.fog._baseDensity = baseDensity;
-            this.scene.fog.density = baseDensity * (1 + warmth * 0.6 + nightFactor * 0.3);
+            this.scene.fog.density = baseDensity * (1 + warmth * 0.2 + nightFactor * 0.15);
             // Fog color: warm at golden hour, blue-gray at night
             this.scene.fog.color.setRGB(
                 0.77 - nightFactor * 0.3 + warmth * 0.1,
