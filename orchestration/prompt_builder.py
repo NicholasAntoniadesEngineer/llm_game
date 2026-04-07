@@ -4,13 +4,97 @@ Uses compact notation to minimize token usage while preserving all essential
 information the LLM needs to produce valid building specs.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
+from collections import deque
+from typing import Any
 
 from agents.golden_specs import get_golden_example_for_culture
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
 from orchestration.schema import format_compact_neighbors as _fmt_compact_nb
 from prompts import format_pbr_hint, format_composition_directive
+
+
+# ── Variety tracking ─────────────────────────────────────────────────────
+# Rolling window of recently built structures for variety hints.
+# Each entry: {"btype": str, "color": str, "height": float, "order": str|None}
+
+_RECENT_BUILDS: deque[dict[str, Any]] = deque(maxlen=8)
+
+# Column orders and material temperature groups for variety suggestions
+_COLUMN_ORDERS = ["doric", "ionic", "corinthian", "tuscan", "composite"]
+_WARM_MATERIALS = {"brick", "terracotta", "wood", "ochre", "adobe", "mud", "thatch", "coral"}
+_COOL_MATERIALS = {"marble", "travertine", "limestone", "granite", "concrete", "tufa", "slate"}
+
+
+def record_built(btype: str, color: str = "", height: float = 0.0,
+                 order: str | None = None) -> None:
+    """Record a completed building for variety tracking.
+
+    Called by the engine after each successful Urbanista response.
+    """
+    _RECENT_BUILDS.append({
+        "btype": btype, "color": color,
+        "height": height, "order": order,
+    })
+
+
+def clear_variety_history() -> None:
+    """Reset variety tracking (e.g., on city reset)."""
+    _RECENT_BUILDS.clear()
+
+
+def _generate_variety_hint(btype: str) -> str:
+    """Generate a compact variety suggestion based on recent builds.
+
+    Returns a short string (~15-25 tokens) or empty string if no
+    useful suggestion can be made.
+    """
+    if not _RECENT_BUILDS:
+        return ""
+
+    hints: list[str] = []
+
+    # 1. Column order rotation for temples/basilicas
+    if btype in ("temple", "basilica", "monument"):
+        recent_orders = [b["order"] for b in _RECENT_BUILDS
+                         if b.get("order") and b["btype"] in ("temple", "basilica")]
+        if recent_orders:
+            last_order = recent_orders[-1]
+            # Suggest a different order
+            alternatives = [o for o in _COLUMN_ORDERS if o != last_order]
+            if alternatives:
+                hints.append(f"Prefer {alternatives[0]} or {alternatives[1]} columns (last used {last_order})")
+
+    # 2. Color/material temperature alternation
+    recent_colors = [b["color"] for b in _RECENT_BUILDS if b.get("color")]
+    if len(recent_colors) >= 3:
+        last_3 = recent_colors[-3:]
+        if len(set(last_3)) == 1:
+            hints.append("Use a contrasting wall material — last 3 buildings share a color")
+
+    # 3. Height variation
+    recent_heights = [b["height"] for b in _RECENT_BUILDS
+                      if b.get("height") and b["height"] > 0]
+    if recent_heights:
+        avg_h = sum(recent_heights) / len(recent_heights)
+        last_h = recent_heights[-1]
+        if last_h > 0 and abs(last_h - avg_h) < avg_h * 0.1:
+            hints.append("Vary height +/-30% from neighbors")
+
+    # 4. Grammar mode suggestion for standard types
+    grammar_types = {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
+    if btype in grammar_types:
+        recent_grammar_use = sum(1 for b in _RECENT_BUILDS if b["btype"] in grammar_types)
+        if recent_grammar_use > 0 and recent_grammar_use % 3 == 0:
+            hints.append(f"Consider grammar mode for this {btype}")
+
+    if not hints:
+        return ""
+    # Return only the most relevant hint to stay compact
+    return "VARY: " + hints[0]
 
 
 def build_terrain_prompt(
@@ -148,6 +232,11 @@ def build_building_prompt(
 
     if env_note:
         prompt += f"\nENV: {env_note}"
+
+    # Variety hint based on recent builds
+    variety = _generate_variety_hint(btype)
+    if variety:
+        prompt += f"\n{variety}"
 
     prompt += _palette_suffix(district_palette)
 

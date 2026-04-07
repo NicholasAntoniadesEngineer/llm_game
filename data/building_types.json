@@ -1,63 +1,78 @@
 [
   {
     "type": "temple",
-    "description": "ANY religious structure: temple, mosque, pyramid, pagoda, shrine, church, ziggurat, stupa, altar"
+    "description": "ANY religious structure: temple, mosque, pyramid, pagoda, shrine, church, ziggurat, stupa, altar",
+    "arch_keywords": "elevated podium, columned portico, cella, pediment, specific column order (doric/ionic/corinthian), votive offerings"
   },
   {
     "type": "basilica",
-    "description": "large civic/public hall, audience hall, great hall, throne room, administrative building"
+    "description": "large civic/public hall, audience hall, great hall, throne room, administrative building",
+    "arch_keywords": "aisled nave, clerestory windows, apse at end, colonnaded interior, timber truss roof"
   },
   {
     "type": "insula",
-    "description": "multi-story residential block, apartment building, tenement, ward housing"
+    "description": "multi-story residential block, apartment building, tenement, ward housing",
+    "arch_keywords": "4-5 stories, ground-floor tabernae with wide openings, balconies, internal light well, opus testaceum brick"
   },
   {
     "type": "domus",
-    "description": "single-family dwelling, villa, mansion, noble house, palace wing"
+    "description": "single-family dwelling, villa, mansion, noble house, palace wing",
+    "arch_keywords": "entrance fauces, central atrium with impluvium, tablinum, peristyle garden, mosaic floors"
   },
   {
     "type": "aqueduct",
-    "description": "water infrastructure: aqueduct, canal, irrigation channel, qanat"
+    "description": "water infrastructure: aqueduct, canal, irrigation channel, qanat",
+    "arch_keywords": "tiered arcades, pilaster rhythm, specus water channel on top, rusticated piers"
   },
   {
     "type": "thermae",
-    "description": "bathhouse, hammam, public baths, ritual bath"
+    "description": "bathhouse, hammam, public baths, ritual bath",
+    "arch_keywords": "frigidarium, tepidarium, caldarium in sequence, barrel vaults, hypocaust floor, natatio pool"
   },
   {
     "type": "circus",
-    "description": "racetrack, processional avenue, parade ground, large arena"
+    "description": "racetrack, processional avenue, parade ground, large arena",
+    "arch_keywords": "elongated U-plan, spina barrier, meta turning posts, tiered seating, carceres starting gates"
   },
   {
     "type": "amphitheater",
-    "description": "arena, stadium, theater, ball court, performance space"
+    "description": "arena, stadium, theater, ball court, performance space",
+    "arch_keywords": "elliptical plan, tiered arcades per level, vomitoria passages, velarium mast sockets, arena floor"
   },
   {
     "type": "market",
-    "description": "marketplace, bazaar, souk, agora stoa, trading hall, caravanserai"
+    "description": "marketplace, bazaar, souk, agora stoa, trading hall, caravanserai",
+    "arch_keywords": "open stalls, covered portico, central courtyard, wide entrances, storage behind shops"
   },
   {
     "type": "taberna",
-    "description": "shop, workshop, stall, artisan's workplace, bakery"
+    "description": "shop, workshop, stall, artisan's workplace, bakery",
+    "arch_keywords": "single room, wide street-facing opening, masonry counter, mezzanine loft, flat or shed roof"
   },
   {
     "type": "warehouse",
-    "description": "storehouse, granary, treasury, arsenal, dockside storage, horreum"
+    "description": "storehouse, granary, treasury, arsenal, dockside storage, horreum",
+    "arch_keywords": "thick walls, raised floor on suspensurae, narrow windows, large loading doors, buttressed exterior"
   },
   {
     "type": "gate",
-    "description": "city gate, ceremonial entrance, arch, torii, pylon, propylon"
+    "description": "city gate, ceremonial entrance, arch, torii, pylon, propylon",
+    "arch_keywords": "flanking towers, barrel-vaulted passage, portcullis slot, inscribed attic, guard chambers"
   },
   {
     "type": "monument",
-    "description": "statue, obelisk, stele, column, commemorative structure, altar, triumphal arch"
+    "description": "statue, obelisk, stele, column, commemorative structure, altar, triumphal arch",
+    "arch_keywords": "high pedestal, relief panels, dedicatory inscription, bronze/marble figure, stepped base"
   },
   {
     "type": "wall",
-    "description": "city wall, fortification, rampart, embankment, defensive tower, palisade"
+    "description": "city wall, fortification, rampart, embankment, defensive tower, palisade",
+    "arch_keywords": "crenellated parapet, interval towers, wall walk, rubble-core faced masonry, battered base"
   },
   {
     "type": "bridge",
-    "description": "bridge, causeway, dam, dock, pier, jetty, pontoon"
+    "description": "bridge, causeway, dam, dock, pier, jetty, pontoon",
+    "arch_keywords": "semicircular arches, cutwaters, parapet walls, voussoir stonework, paved deck"
   },
   {
     "type": "road",

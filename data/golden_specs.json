@@ -8,7 +8,11 @@
             {"type": "pediment", "height": 0.09, "color": "#C45A3C"},
             {"type": "pilasters", "count": 4, "height": 0.4, "color": "#C8B070", "placement": "sides"},
             {"type": "door", "width": 0.16, "height": 0.3, "color": "#6B4226"}
-        ]
+        ],
+        "grammar_example": {
+            "grammar": "roman_temple",
+            "grammar_params": {"order": "ionic", "cols": 6, "steps": 5, "peripteral": false}
+        }
     },
     "basilica": {
         "ref_w": 3.6, "ref_d": 1.8,
@@ -18,7 +22,11 @@
             {"type": "tiled_roof", "height": 0.1, "color": "#C45A3C"},
             {"type": "door", "width": 0.2, "height": 0.32, "color": "#6B4226"},
             {"type": "pilasters", "count": 6, "height": 0.55, "color": "#F0EAD6"}
-        ]
+        ],
+        "grammar_example": {
+            "grammar": "basilica",
+            "grammar_params": {"aisles": 2, "bays": 5, "apse": true, "clerestory": true}
+        }
     },
     "insula": {
         "ref_w": 1.8, "ref_d": 1.8,
@@ -26,7 +34,11 @@
             {"type": "block", "stories": 4, "storyHeight": 0.18, "color": "#B85C3A", "windows": 4, "windowColor": "#1A1008"},
             {"type": "tiled_roof", "height": 0.08, "color": "#C45A3C"},
             {"type": "door", "width": 0.1, "height": 0.2, "color": "#6B4226"}
-        ]
+        ],
+        "grammar_example": {
+            "grammar": "insula",
+            "grammar_params": {"stories": 4, "tabernae": 3, "balconies": true, "light_well": true}
+        }
     },
     "domus": {
         "ref_w": 2.7, "ref_d": 1.8,
@@ -35,7 +47,11 @@
             {"type": "atrium", "height": 0.25, "color": "#F0EAD6"},
             {"type": "tiled_roof", "height": 0.08, "color": "#C45A3C"},
             {"type": "door", "width": 0.1, "height": 0.2, "color": "#6B4226"}
-        ]
+        ],
+        "grammar_example": {
+            "grammar": "domus",
+            "grammar_params": {"atrium": true, "peristyle": true, "impluvium": true, "rooms": 6}
+        }
     },
     "thermae": {
         "ref_w": 3.6, "ref_d": 2.7,
@@ -46,7 +62,11 @@
             {"type": "fountain", "radius": 0.12, "height": 0.15, "color": "#F0F0F0"},
             {"type": "door", "width": 0.18, "height": 0.3, "color": "#6B4226"},
             {"type": "pilasters", "count": 4, "height": 0.55, "color": "#F5E6C8"}
-        ]
+        ],
+        "grammar_example": {
+            "grammar": "thermae",
+            "grammar_params": {"frigidarium": true, "caldarium": true, "natatio": true, "vaults": "barrel"}
+        }
     },
     "amphitheater": {
         "ref_w": 3.6, "ref_d": 3.6,

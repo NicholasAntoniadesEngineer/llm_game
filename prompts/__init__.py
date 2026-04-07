@@ -40,9 +40,19 @@ def load_data(name: str) -> object:
 
 
 def format_building_types() -> str:
-    """Format building_types.json into a compact prompt-ready string."""
+    """Format building_types.json into a compact prompt-ready string.
+
+    Includes architectural keywords when available to guide the AI
+    toward historically accurate, varied building forms.
+    """
     types = load_data("building_types")
-    return " | ".join(f"{t['type']}={t['description']}" for t in types)
+    parts = []
+    for t in types:
+        entry = f"{t['type']}={t['description']}"
+        if t.get("arch_keywords"):
+            entry += f" [{t['arch_keywords']}]"
+        parts.append(entry)
+    return " | ".join(parts)
 
 
 def format_material_palette() -> str:

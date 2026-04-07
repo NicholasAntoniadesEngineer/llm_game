@@ -111,6 +111,13 @@ COMPOSITION PATTERNS (illustrate RANGE of forms, not templates):
 - COLOSSEUM: arcade+tier+tier+tier+pilasters
 - CAVE: box(deep,dark)+arch(entrance)
 
+VARIETY: Each building must be visually distinct.
+- Never repeat the same column order in consecutive temples.
+- Vary heights +/-30% from neighbors.
+- Alternate between warm (brick, terracotta, wood) and cool (marble, travertine, limestone) materials.
+- Each building needs at least one unique architectural feature (unusual roofline, asymmetric wing, distinctive entrance).
+- Use grammar mode for standard types (temple, basilica, insula, domus, thermae, amphitheater) when a standard form fits.
+
 RULES:
 1. Translate Historian's description into components for THIS culture. Procedural for non-Western forms.
 2. 6-14 components typical. Every building has a base and a cap.
