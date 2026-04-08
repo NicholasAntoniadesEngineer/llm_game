@@ -237,6 +237,10 @@ class BuildEngine:
         """Infinite generation loop: discover → build → expand → repeat."""
         try:
             self.running = True
+            # Reset auto-retry state on fresh run (manual resume clears it)
+            if not getattr(self, "_auto_retry_pending", False):
+                self._auto_retry_count = 0
+            self._auto_retry_pending = False
             self.tasks.start_token_telemetry()
             logger.info("BuildEngine started — infinite generation mode")
             log_event("engine", "Build started",
@@ -248,6 +252,11 @@ class BuildEngine:
             if not self.districts:
                 discovery_ok = await self.generators.discover_districts()
                 if not discovery_ok:
+                    if getattr(self, "_auto_retry_pending", False):
+                        self._auto_retry_pending = False
+                        logger.info("Auto-retry: re-entering run() after discovery failure")
+                        await self.schedule_run()
+                        return
                     self.running = False
                     return
             else:
@@ -392,6 +401,10 @@ class BuildEngine:
                 if di not in district_plans:
                     plan = await _get_plan(di)
                     if plan is None:
+                        if getattr(self, "_auto_retry_pending", False):
+                            self._auto_retry_pending = False
+                            logger.info("Auto-retry: re-entering run() after survey failure")
+                            await self.schedule_run()
                         return False
                     district_plans[di] = plan
 
@@ -407,6 +420,10 @@ class BuildEngine:
                 logger.info(f"=== {wave_label}: {district_name} ({len(wave_plan)} structures) ===")
                 district_ok = await self._build_district(district, wave_plan)
                 if not district_ok:
+                    if getattr(self, "_auto_retry_pending", False):
+                        self._auto_retry_pending = False
+                        logger.info("Auto-retry: re-entering run() after district build failure")
+                        await self.schedule_run()
                     return False
 
                 await asyncio.to_thread(save_state, self.world, self.chat_history, di, self.districts, self.generation)
@@ -415,8 +432,51 @@ class BuildEngine:
         return True
 
     async def _pause_for_api_issue(self, pause_reason: str, pause_detail: str, agent_role: str):
-        """Stop the build and notify clients (rate limit, API error, network, etc.)."""
+        """Stop the build and notify clients (rate limit, API error, network, etc.).
+
+        For retriable errors (bad_model_output, api_error, network), auto-retry
+        up to AUTO_RETRY_MAX times with a countdown before falling back to a
+        manual pause.
+        """
         pause_detail = (pause_detail or "").strip()
+
+        # Auto-retry for transient/retriable errors
+        AUTO_RETRY_MAX = 3
+        AUTO_RETRY_DELAY_S = 5
+        RETRIABLE_REASONS = {"bad_model_output", "api_error", "network"}
+
+        if pause_reason in RETRIABLE_REASONS:
+            attempt = getattr(self, "_auto_retry_count", 0) + 1
+            if attempt <= AUTO_RETRY_MAX:
+                self._auto_retry_count = attempt
+                logger.warning(
+                    "Auto-retry %d/%d for %s (%s): %s",
+                    attempt, AUTO_RETRY_MAX, pause_reason, agent_role,
+                    pause_detail[:200] if pause_detail else "(none)",
+                )
+                # Broadcast countdown to client
+                await self.broadcast({
+                    "type": "auto_retry",
+                    "attempt": attempt,
+                    "max_attempts": AUTO_RETRY_MAX,
+                    "delay_s": AUTO_RETRY_DELAY_S,
+                    "reason": pause_reason,
+                    "detail": pause_detail[:400] if pause_detail else "",
+                    "agent": agent_role,
+                })
+                await self._chat(
+                    agent_role, "warning",
+                    f"Error ({pause_reason}) — auto-retrying in {AUTO_RETRY_DELAY_S}s (attempt {attempt}/{AUTO_RETRY_MAX})...",
+                )
+                await asyncio.sleep(AUTO_RETRY_DELAY_S)
+                # Signal auto-retry to the caller so it can re-schedule the run.
+                self._auto_retry_pending = True
+                return
+
+        # Reset auto-retry counter on actual pause (manual retry resets it too)
+        self._auto_retry_count = 0
+        self._auto_retry_pending = False
+
         self.running = False
         await self.tasks.stop_token_telemetry()
         # Always save on pause — ensures no progress is lost
@@ -527,6 +587,70 @@ class BuildEngine:
 
         return bp
 
+    def _compute_city_center_and_radius(self) -> tuple[tuple[float, float] | None, float]:
+        """Compute city center (average of all district region centers) and radius."""
+        if not self.districts:
+            return None, 0.0
+        cx_sum, cy_sum, count = 0.0, 0.0, 0
+        for d in self.districts:
+            r = d.get("region", {})
+            x1, y1 = r.get("x1", 0), r.get("y1", 0)
+            x2, y2 = r.get("x2", 0), r.get("y2", 0)
+            cx_sum += (x1 + x2) / 2
+            cy_sum += (y1 + y2) / 2
+            count += 1
+        if count == 0:
+            return None, 0.0
+        center = (cx_sum / count, cy_sum / count)
+        # Radius = max distance from center to any district edge
+        max_dist = 0.0
+        for d in self.districts:
+            r = d.get("region", {})
+            for corner_x, corner_y in [
+                (r.get("x1", 0), r.get("y1", 0)),
+                (r.get("x2", 0), r.get("y2", 0)),
+            ]:
+                dist = ((corner_x - center[0]) ** 2 + (corner_y - center[1]) ** 2) ** 0.5
+                max_dist = max(max_dist, dist)
+        return center, max_dist
+
+    def _compute_transition_hint(self, anchor_x: int, anchor_y: int,
+                                  current_district: dict) -> str:
+        """Check if building is near another district's boundary. Returns compact hint or ''."""
+        cur_region = current_district.get("region", {})
+        cur_name = current_district.get("name", "")
+        transition_dist = 3  # tiles
+
+        for d in self.districts:
+            other_name = d.get("name", "")
+            if other_name == cur_name:
+                continue
+            r = d.get("region", {})
+            ox1, oy1 = r.get("x1", 0), r.get("y1", 0)
+            ox2, oy2 = r.get("x2", 0), r.get("y2", 0)
+            # Check if anchor is within transition_dist of the other district's region
+            if (anchor_x >= ox1 - transition_dist and anchor_x <= ox2 + transition_dist and
+                    anchor_y >= oy1 - transition_dist and anchor_y <= oy2 + transition_dist):
+                # Confirm it's actually near the border, not deep inside our own region
+                cx1 = cur_region.get("x1", 0)
+                cy1 = cur_region.get("y1", 0)
+                cx2 = cur_region.get("x2", 0)
+                cy2 = cur_region.get("y2", 0)
+                near_own_edge = (
+                    abs(anchor_x - cx1) <= transition_dist or
+                    abs(anchor_x - cx2) <= transition_dist or
+                    abs(anchor_y - cy1) <= transition_dist or
+                    abs(anchor_y - cy2) <= transition_dist
+                )
+                if near_own_edge:
+                    other_style = ""
+                    if self.blueprint:
+                        char = self.blueprint.district_characters.get(other_name, {})
+                        other_style = char.get("style", "")
+                    style_note = f" ({other_style})" if other_style else ""
+                    return f"TRANSITION: near {other_name}{style_note} — blend styles"
+        return ""
+
     async def _build_district(self, district: dict, master_plan: list) -> bool:
         district_key = district.get("name", "unknown")
         if not master_plan:
@@ -605,6 +729,9 @@ class BuildEngine:
         district_ref_year = district.get("year")
         if district_ref_year is None:
             district_ref_year = scenario.get("year_start", 0)
+
+        # Precompute city center and radius for height gradient hints
+        city_center, city_radius = self._compute_city_center_and_radius()
         try:
             district_ref_year_i = int(district_ref_year)
         except (TypeError, ValueError):
@@ -762,6 +889,7 @@ class BuildEngine:
                 )
             else:
                 try:
+                    transition_hint = self._compute_transition_hint(anchor_x, anchor_y, district)
                     prompt = build_building_prompt(
                         name=name, btype=btype, tiles=tiles,
                         anchor_x=anchor_x, anchor_y=anchor_y,
@@ -775,6 +903,10 @@ class BuildEngine:
                         district_scenery=district_scenery,
                         env_note=env_note,
                         district_palette=district_palette,
+                        world_state=self.world,
+                        city_center=city_center,
+                        city_radius=city_radius,
+                        transition_hint=transition_hint,
                     )
                 except ValueError as exc:
                     await self._pause_for_api_issue("unknown", str(exc), "urbanista")
@@ -916,6 +1048,17 @@ class BuildEngine:
                             name, arch_result.pause_reason, (arch_result.pause_detail or "")[:200],
                         )
                         await self._chat("urbanista", "info", f"Skipped {name} — design failed ({arch_result.pause_reason}). Continuing.")
+                        # Broadcast skipped building so the client knows
+                        await self.broadcast({
+                            "type": "building_skipped",
+                            "name": name,
+                            "building_type": job["btype"],
+                            "reason": arch_result.pause_reason,
+                            "detail": (arch_result.pause_detail or "")[:400],
+                            "tiles": [{"x": t["x"], "y": t["y"]} for t in job["tiles"]],
+                            "district": district_key,
+                            "skipped_count": skipped,
+                        })
                         if consecutive_failures >= max_consecutive_failures:
                             for t in pending:
                                 if not t.done():

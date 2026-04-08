@@ -1193,5 +1193,182 @@ class TestRenderingPipelineEndToEnd:
             })
 
 
+# ---------------------------------------------------------------------------
+# Urban planning intelligence — road connectivity, spacing, prompt hints
+# ---------------------------------------------------------------------------
+
+from orchestration.spatial import get_district_spacing, _DISTRICT_SPACING
+from orchestration.prompt_builder import _detect_road_facing, _height_gradient_hint
+from orchestration.generators import Generators
+
+
+class TestDistrictSpacing:
+    def test_monumental_gets_wide_spacing(self):
+        assert get_district_spacing("monumental") == 2
+
+    def test_commercial_gets_zero_spacing(self):
+        assert get_district_spacing("commercial") == 0
+
+    def test_residential_gets_default(self):
+        assert get_district_spacing("residential") == 1
+
+    def test_garden_gets_wide_spacing(self):
+        assert get_district_spacing("garden") == 2
+
+    def test_none_returns_default(self):
+        assert get_district_spacing(None) == 1
+
+    def test_unknown_style_returns_default(self):
+        assert get_district_spacing("alien") == 1
+
+    def test_case_insensitive(self):
+        assert get_district_spacing("COMMERCIAL") == 0
+        assert get_district_spacing("Monumental") == 2
+
+
+class TestRoadConnectivity:
+    def test_no_roads_returns_unchanged(self):
+        mp = [{"name": "A", "building_type": "temple", "tiles": [{"x": 5, "y": 5}]}]
+        region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        result = Generators._ensure_road_connectivity(mp, region)
+        assert len(result) == 1  # unchanged
+
+    def test_single_road_tile_returns_unchanged(self):
+        mp = [{"name": "R1", "building_type": "road", "tiles": [{"x": 5, "y": 5}]}]
+        region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        result = Generators._ensure_road_connectivity(mp, region)
+        # May add boundary road but original structure unchanged
+        assert result[0]["name"] == "R1"
+
+    def test_connected_roads_not_modified(self):
+        mp = [
+            {"name": "R1", "building_type": "road",
+             "tiles": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 7, "y": 5}]},
+        ]
+        region = {"x1": 5, "y1": 5, "x2": 7, "y2": 5}
+        result = Generators._ensure_road_connectivity(mp, region)
+        # Roads are already connected and on boundary — no changes
+        assert result[0]["name"] == "R1"
+
+    def test_isolated_segments_get_connected(self):
+        # Two road segments with a gap between them
+        mp = [
+            {"name": "R1", "building_type": "road",
+             "tiles": [{"x": 0, "y": 5}]},
+            {"name": "R2", "building_type": "road",
+             "tiles": [{"x": 5, "y": 5}]},
+        ]
+        region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        result = Generators._ensure_road_connectivity(mp, region)
+        # Should have added a connecting road structure
+        road_names = [s["name"] for s in result if s["building_type"] == "road"]
+        assert len(road_names) >= 3  # R1, R2, Connecting road (and maybe boundary)
+
+    def test_bridge_tiles_avoid_buildings(self):
+        # Road segments with a building in between
+        mp = [
+            {"name": "R1", "building_type": "road",
+             "tiles": [{"x": 0, "y": 5}]},
+            {"name": "Temple", "building_type": "temple",
+             "tiles": [{"x": 2, "y": 5}]},
+            {"name": "R2", "building_type": "road",
+             "tiles": [{"x": 5, "y": 5}]},
+        ]
+        region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        result = Generators._ensure_road_connectivity(mp, region)
+        # Bridge tiles should NOT include (2, 5) where temple is
+        for s in result:
+            if s["name"] == "Connecting road":
+                bridge_coords = {(t["x"], t["y"]) for t in s["tiles"]}
+                assert (2, 5) not in bridge_coords
+
+    def test_boundary_road_added_when_roads_internal(self):
+        # Roads exist but none touch the boundary
+        mp = [
+            {"name": "R1", "building_type": "road",
+             "tiles": [{"x": 5, "y": 5}, {"x": 6, "y": 5}]},
+        ]
+        region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
+        result = Generators._ensure_road_connectivity(mp, region)
+        # Should have added a "District edge road" structure
+        names = [s["name"] for s in result]
+        assert "District edge road" in names
+
+
+class TestHeightGradientHint:
+    def test_near_center_suggests_tall(self):
+        hint = _height_gradient_hint(10, 10, 10.0, 10.0, 50.0)
+        assert "tall" in hint.lower()
+        assert "0m" in hint
+
+    def test_mid_distance_suggests_moderate(self):
+        # 25 tiles from center, radius 50
+        hint = _height_gradient_hint(35, 10, 10.0, 10.0, 50.0)
+        assert "moderate" in hint.lower()
+
+    def test_far_from_center_suggests_low(self):
+        # 40 tiles from center, radius 50
+        hint = _height_gradient_hint(50, 10, 10.0, 10.0, 50.0)
+        assert "low" in hint.lower()
+
+    def test_zero_radius_returns_empty(self):
+        hint = _height_gradient_hint(10, 10, 10.0, 10.0, 0.0)
+        assert hint == ""
+
+    def test_token_budget(self):
+        hint = _height_gradient_hint(20, 20, 10.0, 10.0, 50.0)
+        # Should be under 30 tokens (rough estimate: words + numbers)
+        assert len(hint.split()) <= 15
+
+
+class TestRoadFacing:
+    def test_no_world_returns_empty(self):
+        tiles = [{"x": 5, "y": 5}]
+        assert _detect_road_facing(tiles, None) == ""
+
+    def test_empty_tiles_returns_empty(self):
+        assert _detect_road_facing([], None) == ""
+
+    def test_road_detected_north(self):
+        """Mock world where tile (5,4) is a road."""
+        class MockTile:
+            def __init__(self, terrain):
+                self.terrain = terrain
+        class MockWorld:
+            def get_tile(self, x, y):
+                if (x, y) == (5, 4):
+                    return MockTile("road")
+                return None
+        tiles = [{"x": 5, "y": 5}]
+        result = _detect_road_facing(tiles, MockWorld())
+        assert "FACING" in result
+        assert "N" in result
+
+    def test_forum_detected_as_road(self):
+        class MockTile:
+            def __init__(self, terrain):
+                self.terrain = terrain
+        class MockWorld:
+            def get_tile(self, x, y):
+                if (x, y) == (6, 5):
+                    return MockTile("forum")
+                return None
+        tiles = [{"x": 5, "y": 5}]
+        result = _detect_road_facing(tiles, MockWorld())
+        assert "FACING" in result
+        assert "E" in result
+
+    def test_no_roads_returns_empty(self):
+        class MockTile:
+            def __init__(self, terrain):
+                self.terrain = terrain
+        class MockWorld:
+            def get_tile(self, x, y):
+                return MockTile("building")
+        tiles = [{"x": 5, "y": 5}]
+        result = _detect_road_facing(tiles, MockWorld())
+        assert result == ""
+
+
 if __name__ == "__main__":
     unittest.main()

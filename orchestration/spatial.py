@@ -6,6 +6,30 @@ from core.config import GRID_WIDTH, GRID_HEIGHT
 
 logger = logging.getLogger("eternal.spatial")
 
+# District style -> spacing multiplier.
+# Wealthy/garden districts get more space; dense commercial districts pack tighter.
+_DISTRICT_SPACING: dict[str, int] = {
+    "monumental": 2,   # temples, forums: generous gardens/courtyards
+    "garden": 2,        # parks, villas: wide spacing
+    "residential": 1,   # standard separation
+    "military": 1,      # barracks: functional spacing
+    "commercial": 0,    # markets, shops: shared walls allowed
+}
+
+
+def get_district_spacing(district_style: str | None = None) -> int:
+    """Return the min_gap for a given district style.
+
+    Args:
+        district_style: Style string (e.g., 'monumental', 'commercial').
+
+    Returns:
+        Integer gap in tiles (0 = shared walls, 1 = alley, 2 = courtyard).
+    """
+    if not district_style:
+        return 1
+    return _DISTRICT_SPACING.get(district_style.lower(), 1)
+
 
 def enforce_spacing(master_plan: list, min_gap: int = 1) -> list:
     """Shift buildings that touch or overlap to create gaps between them."""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import deque
 from typing import Any
 
@@ -97,6 +98,78 @@ def _generate_variety_hint(btype: str) -> str:
     return "VARY: " + hints[0]
 
 
+# ── Urban intelligence hints ────────────────────────────────────────────
+
+
+def _detect_road_facing(tiles: list, world_state: Any = None) -> str:
+    """Detect which side of a building faces a road tile.
+
+    Checks adjacent tiles in cardinal directions from the building's footprint.
+    Returns compact hint like 'FACING: road N — orient entrance northward' or ''.
+    Token budget: <20 tokens.
+    """
+    if world_state is None:
+        return ""
+
+    # Build set of building's own tile coords
+    own_coords: set[tuple[int, int]] = set()
+    for t in tiles:
+        try:
+            own_coords.add((int(t["x"]), int(t["y"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not own_coords:
+        return ""
+
+    # Check perimeter tiles for roads/forums
+    directions = {"N": (0, -1), "S": (0, 1), "E": (1, 0), "W": (-1, 0)}
+    road_dirs: list[str] = []
+    for label, (dx, dy) in directions.items():
+        for ox, oy in own_coords:
+            nx, ny = ox + dx, oy + dy
+            if (nx, ny) in own_coords:
+                continue
+            tile = world_state.get_tile(nx, ny)
+            if tile and tile.terrain in ("road", "forum"):
+                road_dirs.append(label)
+                break
+
+    if not road_dirs:
+        return ""
+    primary = road_dirs[0]
+    return f"FACING: road {primary} — orient entrance {primary.lower()}ward"
+
+
+def _height_gradient_hint(
+    anchor_x: int,
+    anchor_y: int,
+    city_center_x: float,
+    city_center_y: float,
+    city_radius: float,
+) -> str:
+    """Suggest building height based on distance from city center.
+
+    Closer to center = taller, further = shorter.
+    Returns compact hint like 'HEIGHT: 80m from center — tall (1.2-1.8 units)' or ''.
+    Token budget: <25 tokens.
+    """
+    if city_radius <= 0:
+        return ""
+    dist = math.sqrt((anchor_x - city_center_x) ** 2 + (anchor_y - city_center_y) ** 2)
+    dist_m = round(dist * 10)
+    ratio = min(dist / city_radius, 1.0)  # 0.0 = center, 1.0 = edge
+
+    if ratio < 0.3:
+        suggestion = "tall (1.2-1.8 units)"
+    elif ratio < 0.6:
+        suggestion = "moderate (0.8-1.3 units)"
+    else:
+        suggestion = "low (0.5-0.9 units)"
+
+    return f"HEIGHT: {dist_m}m from center — {suggestion}"
+
+
 def build_terrain_prompt(
     name: str,
     btype: str,
@@ -167,6 +240,10 @@ def build_building_prompt(
     district_scenery: str,
     env_note: str,
     district_palette: dict | None = None,
+    world_state: Any = None,
+    city_center: tuple[float, float] | None = None,
+    city_radius: float = 0.0,
+    transition_hint: str = "",
 ) -> str:
     """Construct prompt for a building structure."""
     xs = [t["x"] for t in tiles]
@@ -232,6 +309,21 @@ def build_building_prompt(
 
     if env_note:
         prompt += f"\nENV: {env_note}"
+
+    # Road orientation hint (~15 tokens)
+    facing = _detect_road_facing(tiles, world_state)
+    if facing:
+        prompt += f"\n{facing}"
+
+    # Height gradient from city center (~20 tokens)
+    if city_center:
+        h_hint = _height_gradient_hint(anchor_x, anchor_y, city_center[0], city_center[1], city_radius)
+        if h_hint:
+            prompt += f"\n{h_hint}"
+
+    # District transition zone hint (~15 tokens)
+    if transition_hint:
+        prompt += f"\n{transition_hint}"
 
     # Variety hint based on recent builds
     variety = _generate_variety_hint(btype)

@@ -33,6 +33,12 @@ FUNCTIONAL PLACEMENT:
 - Temples/forums: open approach space toward main street.
 - Major civic/sacred: adjacent to road OR forum/grass/garden.
 
+SMART PLACEMENT:
+- Place temples on the highest elevation point in the district.
+- Place markets and commercial buildings near road intersections (tiles with 2+ road neighbors).
+- Place residential buildings away from noisy areas (markets, workshops, amphitheaters) — at least 2 tiles separation.
+- Leave open space (forum/grass, 2x2 to 4x4) near the district center for a small plaza.
+
 ENVIRONMENT: 30-50% open space. Open-space tiles need: 1-2 sentence description + 1 sentence environment_note. Keep descriptions concise — physical facts for 3D.
 
 Respond with ONLY valid JSON:

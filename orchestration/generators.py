@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections import deque
 
 from core.errors import AgentGenerationError
 from core import config as config_module
@@ -12,7 +13,7 @@ from core.config import (
     SURVEY_BUILDINGS_PER_CHUNK,
 )
 from core.persistence import save_districts_cache, load_districts_cache, load_surveys_cache, save_surveys_cache
-from orchestration.spatial import enforce_spacing, occupancy_summary_for_survey
+from orchestration.spatial import enforce_spacing, get_district_spacing, occupancy_summary_for_survey
 
 logger = logging.getLogger("eternal.generators")
 
@@ -116,6 +117,187 @@ class Generators:
 
     def _apply_master_plan_validation(self, *args, **kwargs):
         return self.engine._apply_master_plan_validation(*args, **kwargs)
+
+    def _district_style(self, district: dict) -> str | None:
+        """Extract district style from blueprint or infer from description."""
+        name = district.get("name", "")
+        bp = self.engine.blueprint
+        if bp and name in bp.district_characters:
+            return bp.district_characters[name].get("style")
+        # Infer from description
+        desc = district.get("description", "").lower()
+        if any(w in desc for w in ("monumental", "sacred", "temple", "imperial", "forum")):
+            return "monumental"
+        if any(w in desc for w in ("market", "commerce", "trade")):
+            return "commercial"
+        if any(w in desc for w in ("residential", "insula", "domus")):
+            return "residential"
+        if any(w in desc for w in ("garden", "park", "grove")):
+            return "garden"
+        return None
+
+    # ── Road connectivity ─────────────────────────────────────────────
+
+    @staticmethod
+    def _ensure_road_connectivity(master_plan: list, region: dict) -> list:
+        """Ensure road tiles form a connected graph; add bridging tiles if needed.
+
+        1. Build a graph of all road tiles and find connected components.
+        2. If isolated road segments exist, connect them via shortest Manhattan bridges.
+        3. Ensure at least one road tile touches the region boundary (inter-district link).
+
+        Modifies master_plan in-place and returns it.
+        """
+        # Collect all road tile coords
+        road_coords: set[tuple[int, int]] = set()
+        non_road_coords: set[tuple[int, int]] = set()
+        for struct in master_plan:
+            btype = struct.get("building_type", "")
+            for t in struct.get("tiles", []):
+                try:
+                    x, y = int(t["x"]), int(t["y"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if btype == "road":
+                    road_coords.add((x, y))
+                else:
+                    non_road_coords.add((x, y))
+
+        if len(road_coords) < 2:
+            return master_plan
+
+        # BFS to find connected components (4-connected)
+        visited: set[tuple[int, int]] = set()
+        components: list[set[tuple[int, int]]] = []
+        for start in road_coords:
+            if start in visited:
+                continue
+            comp: set[tuple[int, int]] = set()
+            queue = deque([start])
+            while queue:
+                cx, cy = queue.popleft()
+                if (cx, cy) in visited:
+                    continue
+                visited.add((cx, cy))
+                comp.add((cx, cy))
+                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                    nb = (cx + dx, cy + dy)
+                    if nb in road_coords and nb not in visited:
+                        queue.append(nb)
+            if comp:
+                components.append(comp)
+
+        if len(components) <= 1:
+            # Already connected -- check boundary connectivity
+            Generators._ensure_boundary_road(master_plan, road_coords, non_road_coords, region)
+            return master_plan
+
+        # Connect components: greedily bridge closest pairs
+        bridge_tiles: list[dict] = []
+        # Sort components by size descending so largest is the "trunk"
+        components.sort(key=len, reverse=True)
+        trunk = components[0]
+        for comp in components[1:]:
+            # Find closest pair between trunk and this component
+            best_dist = float("inf")
+            best_pair = None
+            for tx, ty in trunk:
+                for cx, cy in comp:
+                    d = abs(tx - cx) + abs(ty - cy)
+                    if d < best_dist:
+                        best_dist = d
+                        best_pair = ((tx, ty), (cx, cy))
+            if best_pair is None:
+                continue
+            (ax, ay), (bx, by) = best_pair
+            # Build Manhattan path: horizontal then vertical
+            x, y = ax, ay
+            while x != bx:
+                x += 1 if bx > x else -1
+                pos = (x, y)
+                if pos not in road_coords and pos not in non_road_coords:
+                    bridge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                    road_coords.add(pos)
+            while y != by:
+                y += 1 if by > y else -1
+                pos = (x, y)
+                if pos not in road_coords and pos not in non_road_coords:
+                    bridge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                    road_coords.add(pos)
+            trunk |= comp
+
+        if bridge_tiles:
+            master_plan.append({
+                "name": "Connecting road",
+                "building_type": "road",
+                "tiles": bridge_tiles,
+                "description": "Road segment connecting isolated street sections.",
+            })
+            logger.info("Road connectivity: added %d bridge tiles across %d isolated segments",
+                        len(bridge_tiles), len(components) - 1)
+
+        Generators._ensure_boundary_road(master_plan, road_coords, non_road_coords, region)
+        return master_plan
+
+    @staticmethod
+    def _ensure_boundary_road(
+        master_plan: list,
+        road_coords: set[tuple[int, int]],
+        non_road_coords: set[tuple[int, int]],
+        region: dict,
+    ) -> None:
+        """Ensure at least one road tile touches the region boundary for inter-district links."""
+        x1 = region.get("x1", 0)
+        y1 = region.get("y1", 0)
+        x2 = region.get("x2", GRID_WIDTH - 1)
+        y2 = region.get("y2", GRID_HEIGHT - 1)
+
+        # Check if any road tile is on the boundary
+        for rx, ry in road_coords:
+            if rx == x1 or rx == x2 or ry == y1 or ry == y2:
+                return  # Already connected to boundary
+
+        # Find road tile closest to any boundary edge and extend to it
+        best_road = None
+        best_dist = float("inf")
+        best_edge_pos = None
+        for rx, ry in road_coords:
+            for edge_val, axis in [(x1, "x_min"), (x2, "x_max"), (y1, "y_min"), (y2, "y_max")]:
+                if axis.startswith("x"):
+                    d = abs(rx - edge_val)
+                    target = (edge_val, ry)
+                else:
+                    d = abs(ry - edge_val)
+                    target = (rx, edge_val)
+                if d < best_dist:
+                    best_dist = d
+                    best_road = (rx, ry)
+                    best_edge_pos = target
+
+        if best_road is None or best_edge_pos is None or best_dist == 0:
+            return
+
+        # Build path from best_road to best_edge_pos
+        edge_tiles: list[dict] = []
+        x, y = best_road
+        tx, ty = best_edge_pos
+        while x != tx:
+            x += 1 if tx > x else -1
+            if (x, y) not in road_coords and (x, y) not in non_road_coords:
+                edge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+        while y != ty:
+            y += 1 if ty > y else -1
+            if (x, y) not in road_coords and (x, y) not in non_road_coords:
+                edge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+
+        if edge_tiles:
+            master_plan.append({
+                "name": "District edge road",
+                "building_type": "road",
+                "tiles": edge_tiles,
+                "description": "Road extending to district boundary for inter-district connectivity.",
+            })
+            logger.info("Boundary road: added %d tiles connecting to district edge", len(edge_tiles))
 
     # ── Extracted methods ──────────────────────────────────────────────
 
@@ -493,7 +675,10 @@ class Generators:
             self._fused_seed_master_plan = None
             master_plan = self.validate_master_plan_structures(raw_seed)
             if master_plan:
-                master_plan = enforce_spacing(master_plan)
+                gap = get_district_spacing(self._district_style(district))
+                master_plan = enforce_spacing(master_plan, min_gap=gap)
+                region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+                master_plan = self._ensure_road_connectivity(master_plan, region)
                 master_plan = self._apply_master_plan_validation(
                     master_plan, f"Fused seed {district_key!r}"
                 )
@@ -562,7 +747,10 @@ class Generators:
             if isinstance(palette, dict):
                 self._district_palettes[district_key] = palette
                 logger.info("District %s palette: %s", district_key, palette)
-            mp = enforce_spacing(master_plan)
+            gap = get_district_spacing(self._district_style(district))
+            mp = enforce_spacing(master_plan, min_gap=gap)
+            region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+            mp = self._ensure_road_connectivity(mp, region)
             return self._apply_master_plan_validation(mp, f"Survey {district.get('name', '?')}")
 
         merged: list = []
@@ -620,7 +808,10 @@ class Generators:
                 district_name, chunks_failed, total_chunks,
             )
 
-        mp = enforce_spacing(merged)
+        gap = get_district_spacing(self._district_style(district))
+        mp = enforce_spacing(merged, min_gap=gap)
+        region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
+        mp = self._ensure_road_connectivity(mp, region)
         return self._apply_master_plan_validation(mp, f"Survey (chunked) {district_name}")
 
     async def survey_district_single_pass(
