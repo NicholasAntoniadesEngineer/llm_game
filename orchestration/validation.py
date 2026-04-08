@@ -102,6 +102,9 @@ def _validate_procedural_component(comp: dict, ctx: str) -> None:
     if recipe is not None and not isinstance(recipe, str):
         raise UrbanistaValidationError(f"{ctx}: procedural.recipe must be a string if present")
 
+    # Track X,Z positions to detect degenerate vertical-line layouts
+    xz_positions: set[tuple[float, float]] = set()
+
     for i, p in enumerate(parts):
         pc = f"{ctx} parts[{i}]"
         if not isinstance(p, dict):
@@ -113,6 +116,20 @@ def _validate_procedural_component(comp: dict, ctx: str) -> None:
             )
         _require_color(p, pc)
         _validate_optional_pbr(p, pc)
+
+        # Ensure position field exists (renderer defaults to [0,0,0])
+        pos = p.get("position")
+        if pos is not None:
+            if not isinstance(pos, list) or len(pos) < 3:
+                raise UrbanistaValidationError(f"{pc}: position must be [x,y,z] (3 numbers)")
+            try:
+                px_val = float(pos[0])
+                pz_val = float(pos[2])
+                xz_positions.add((round(px_val, 4), round(pz_val, 4)))
+            except (TypeError, ValueError, IndexError):
+                pass
+        else:
+            xz_positions.add((0.0, 0.0))
 
         if shape == "box":
             if p.get("size") is not None:
@@ -143,6 +160,16 @@ def _validate_procedural_component(comp: dict, ctx: str) -> None:
             for k in ("width", "height"):
                 if p.get(k) is None:
                     raise UrbanistaValidationError(f"{pc}: plane requires width and height (XZ extent)")
+
+    # Warn about degenerate layouts where all parts share the same X,Z
+    # (produces a vertical line of floating objects instead of a building)
+    if len(parts) >= 3 and len(xz_positions) <= 1:
+        logger.warning(
+            "%s: all %d procedural parts share the same X,Z position — "
+            "building will appear as a vertical stack. "
+            "Spread parts across X and Z for a coherent building shape.",
+            ctx, len(parts),
+        )
 
 
 def _validate_template(tmpl: dict, ctx: str) -> None:
@@ -299,6 +326,7 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
                 comp["stack_role"] = "structural"
                 fixes += 1
         # Fix color names / material names in procedural parts
+        # Also ensure every part has an explicit position to prevent silent [0,0,0] defaults
         for comp in spec.get("components", []):
             if not isinstance(comp, dict):
                 continue
@@ -311,6 +339,74 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
                     if resolved != "#808080" or c.lower().strip() in _NAMED_COLOR_MAP or c.lower().strip() in MATERIAL_NAMES:
                         part["color"] = resolved
                         fixes += 1
+                # Ensure position exists — renderer defaults to [0,0,0] but
+                # being explicit prevents silent vertical-line layouts
+                if part.get("position") is None:
+                    part["position"] = [0, 0, 0]
+                    fixes += 1
+        # Fix double-offset: when a spec mixes foundation components (podium, etc.)
+        # with procedural structural/infill/roof components, the renderer adds
+        # the foundation height (anchorY) to procedural Y positions automatically.
+        # If the LLM already accounted for the foundation in its Y positions
+        # (absolute from ground), the shapes float above their intended location.
+        # Detect and correct by shifting procedural Y positions down.
+        comps = spec.get("components", [])
+        if isinstance(comps, list) and len(comps) >= 2:
+            # Estimate foundation height from foundation-role components
+            foundation_h = 0.0
+            has_foundation = False
+            for comp in comps:
+                if not isinstance(comp, dict):
+                    continue
+                role = comp.get("stack_role", _DEFAULT_STACK_ROLES.get(comp.get("type", ""), ""))
+                if role == "foundation":
+                    has_foundation = True
+                    h = comp.get("height")
+                    if isinstance(h, (int, float)) and not isinstance(h, bool) and h > 0:
+                        foundation_h = max(foundation_h, float(h))
+                    elif comp.get("type") == "podium":
+                        steps = comp.get("steps", 3)
+                        if isinstance(steps, (int, float)):
+                            foundation_h = max(foundation_h, int(steps) * 0.06)
+
+            if has_foundation and foundation_h > 0.01:
+                for comp in comps:
+                    if not isinstance(comp, dict) or comp.get("type") != "procedural":
+                        continue
+                    role = comp.get("stack_role", "structural")
+                    if role not in ("structural", "infill", "roof", "decorative"):
+                        continue
+                    parts = comp.get("parts", [])
+                    if not isinstance(parts, list) or not parts:
+                        continue
+                    # Check if parts' Y positions look like absolute (include foundation offset)
+                    min_y = None
+                    for part in parts:
+                        if not isinstance(part, dict):
+                            continue
+                        pos = part.get("position")
+                        if isinstance(pos, list) and len(pos) >= 2:
+                            py = pos[1]
+                            if isinstance(py, (int, float)):
+                                if min_y is None or py < min_y:
+                                    min_y = py
+                    # If the lowest procedural Y is >= foundation height,
+                    # the LLM likely used absolute positions. Shift down by foundation_h
+                    # so the renderer's anchorY addition produces the correct result.
+                    if min_y is not None and min_y >= foundation_h * 0.8:
+                        for part in parts:
+                            if not isinstance(part, dict):
+                                continue
+                            pos = part.get("position")
+                            if isinstance(pos, list) and len(pos) >= 2:
+                                if isinstance(pos[1], (int, float)):
+                                    pos[1] = pos[1] - foundation_h
+                        fixes += 1
+                        logger.debug(
+                            "Shifted procedural Y positions down by %.3f (foundation offset)",
+                            foundation_h,
+                        )
+
     if fixes:
         logger.info("Sanitized Urbanista output: %d auto-corrections applied", fixes)
     return arch_result

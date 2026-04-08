@@ -130,7 +130,7 @@ RULES:
 9. Structural coherence: walls support roof, door at ground level, decorative elements need attachment.
 10. Vary height by type: temples wide/low, insulae tall/narrow, warehouses large/blocky, shops small/low.
 11. Differentiate materials with hex colors AND roughness/metalness, not color alone.
-12. STACKING: Each component has default stack_role. Override with "stack_role". "stack_priority" breaks ties.
+12. STACKING: Each component has default stack_role. Override with "stack_role". "stack_priority" breaks ties. IMPORTANT: Procedural parts' Y positions are RELATIVE to their stacking base, not absolute from ground. If you have a podium (foundation, height=0.18) followed by a procedural structural component, position Y=0 in that procedural means the top of the podium, NOT the ground. Do NOT add the podium height to procedural positions — the renderer does this automatically.
 13. PBR: roughness(0-1), metalness(0-1), surface_detail(0-1,>0 enables procedural normal maps), detail_repeat(0.5-40).
 14. TEMPLATE (optional, mutually exclusive with components): template.id from {{temple,basilica,insula,domus,thermae,amphitheater,market,monument,gate,wall,aqueduct,mesoamerican_temple,mesoamerican_shrine,mesoamerican_civic,open}}. Only when Historian's description matches.
 15. PHASE4 (optional): neighbor-aware contextual polish keys for auto-steps, party walls, street fascia, etc.

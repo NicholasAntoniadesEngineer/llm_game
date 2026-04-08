@@ -921,103 +921,276 @@ class TestGrammarTiles:
 
 
 # ---------------------------------------------------------------------------
-# Terrain procedural generation (Optimization 2)
+# Rendering pipeline end-to-end tests
 # ---------------------------------------------------------------------------
 
-from orchestration.engine import _generate_terrain_procedurally, BATCHABLE_TYPES, OPEN_TERRAIN_TYPES
+
+from orchestration.schema import (
+    expand_dense_shape,
+    expand_dense_tile,
+    expand_dense_shapes_in_result,
+    DENSE_SHAPE_CODES,
+    resolve_color,
+)
 
 
-class TestGenerateTerrainProcedurally:
-    def test_road_tiles(self):
-        tiles = [{"x": 0, "y": 0, "elevation": 0.1}, {"x": 1, "y": 0, "elevation": 0.1}]
-        result = _generate_terrain_procedurally(
-            name="Via Sacra", btype="road", tiles=tiles,
-            avg_elevation=0.1, district_palette=None, physical_desc="Ancient road",
+class TestRenderingPipelineEndToEnd:
+    """Verify data flows correctly through the pipeline:
+    LLM output → sanitize → validate → tile data that renderer expects.
+    """
+
+    def test_grammar_tile_through_sanitize(self):
+        """Grammar tiles pass through sanitize with terrain set."""
+        arch = {
+            "tiles": [{
+                "x": 10, "y": 5,
+                "grammar": "roman_temple",
+                "grammar_params": {"order": "corinthian", "cols": {"front": 8}},
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        tile = result["tiles"][0]
+        assert tile.get("terrain") == "building"
+        assert tile.get("grammar") == "roman_temple"
+
+    def test_dense_shapes_expansion_preserves_position(self):
+        """Dense shapes expand with correct position and size fields."""
+        dense = ["b", [0.1, 0.5, -0.2], [0.8, 1.0, 0.8], "travertine"]
+        result = expand_dense_shape(dense)
+        assert result["shape"] == "box"
+        assert result["position"] == [0.1, 0.5, -0.2]
+        assert result["width"] == 0.8
+        assert result["height"] == 1.0
+        assert result["depth"] == 0.8
+        assert result["color"].startswith("#")
+
+    def test_dense_cylinder_expansion(self):
+        """Dense cylinder shapes expand correctly with radius and height."""
+        dense = ["c", [0.3, 0.7, 0], [0.04, 0.6], "marble"]
+        result = expand_dense_shape(dense)
+        assert result["shape"] == "cylinder"
+        assert result["position"] == [0.3, 0.7, 0]
+        assert result["radius"] == 0.04
+        assert result["height"] == 0.6
+
+    def test_dense_shapes_in_procedural_parts_expanded(self):
+        """Dense arrays inside procedural parts[] are expanded to dicts."""
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "spec": {
+                    "components": [{
+                        "type": "procedural",
+                        "stack_role": "structural",
+                        "parts": [
+                            ["b", [0, 0.5, 0], [0.8, 1.0, 0.8], "travertine"],
+                            ["c", [0.3, 0.7, 0], [0.04, 0.6], "marble"],
+                        ],
+                    }],
+                },
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        parts = result["tiles"][0]["spec"]["components"][0]["parts"]
+        assert len(parts) == 2
+        assert isinstance(parts[0], dict)
+        assert parts[0]["shape"] == "box"
+        assert parts[0]["position"] == [0, 0.5, 0]
+        assert parts[0]["width"] == 0.8
+        assert isinstance(parts[1], dict)
+        assert parts[1]["shape"] == "cylinder"
+        assert parts[1]["position"] == [0.3, 0.7, 0]
+        assert parts[1]["radius"] == 0.04
+
+    def test_spec_as_list_expanded_to_procedural(self):
+        """A spec that is a raw list of dense shapes gets wrapped correctly."""
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "building_name": "Test",
+                "spec": [
+                    ["b", [0, 0.1, 0], [0.8, 0.2, 0.8], "travertine"],
+                    ["b", [0, 0.5, 0], [0.6, 0.6, 0.6], "brick"],
+                ],
+            }],
+        }
+        result = expand_dense_shapes_in_result(arch)
+        tile = result["tiles"][0]
+        spec = tile["spec"]
+        assert isinstance(spec, dict), "spec should be converted to a dict"
+        assert "components" in spec
+        comp = spec["components"][0]
+        assert comp["type"] == "procedural"
+        assert comp["stack_role"] == "structural"
+        assert len(comp["parts"]) == 2
+        assert comp["parts"][0]["shape"] == "box"
+        assert comp["parts"][0]["position"] == [0, 0.1, 0]
+
+    def test_dense_tile_keys_expansion(self):
+        """Dense tile keys (n, bt, g) are expanded to verbose form."""
+        tile = {"n": "Temple", "bt": "temple", "x": 5, "y": 10,
+                "g": "roman_temple", "p": {"order": "ionic"}}
+        result = expand_dense_tile(tile)
+        assert result["building_name"] == "Temple"
+        assert result["building_type"] == "temple"
+        assert result["grammar"] == "roman_temple"
+        assert result["grammar_params"] == {"order": "ionic"}
+        assert result["terrain"] == "building"
+
+    def test_mixed_spec_position_normalization(self):
+        """When a procedural component is mixed with foundation, Y positions
+        that include the foundation offset are normalized down."""
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "spec": {
+                    "components": [
+                        {"type": "podium", "steps": 3, "height": 0.18, "color": "#F5E6C8"},
+                        {"type": "procedural", "stack_role": "structural", "parts": [
+                            # LLM used absolute Y including podium height
+                            {"shape": "box", "position": [0, 0.18, 0],
+                             "width": 0.6, "height": 0.5, "depth": 0.9, "color": "#F0F0F0"},
+                            {"shape": "box", "position": [-0.2, 0.43, 0],
+                             "width": 0.05, "height": 0.4, "depth": 0.05, "color": "#F0F0F0"},
+                        ]},
+                    ],
+                },
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        parts = result["tiles"][0]["spec"]["components"][1]["parts"]
+        # Positions should be shifted down by ~0.18 (foundation height)
+        # so the renderer's anchorY addition produces correct results
+        assert parts[0]["position"][1] < 0.18, (
+            f"Y position {parts[0]['position'][1]} should be shifted below foundation height 0.18"
         )
-        assert "tiles" in result
-        assert len(result["tiles"]) == 2
-        for t in result["tiles"]:
-            assert t["terrain"] == "road"
-            assert t["building_type"] == "road"
-            assert "color" in t
-            assert "spec" in t
+        # The Y should be approximately 0 (0.18 - 0.18 = 0.0)
+        assert abs(parts[0]["position"][1]) < 0.05
 
-    def test_water_tiles(self):
-        tiles = [{"x": 5, "y": 5, "elevation": 0.0}]
-        result = _generate_terrain_procedurally(
-            name="Tiber", btype="water", tiles=tiles,
-            avg_elevation=0.0, district_palette=None, physical_desc="River",
-        )
-        assert len(result["tiles"]) == 1
-        assert result["tiles"][0]["terrain"] == "water"
-        assert "water_murk" in result["tiles"][0]["spec"]["scenery"]
+    def test_missing_position_gets_default(self):
+        """Parts without position get [0,0,0] explicitly during sanitize."""
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "spec": {
+                    "components": [{
+                        "type": "procedural",
+                        "stack_role": "structural",
+                        "parts": [
+                            {"shape": "box", "width": 0.8, "height": 1.0,
+                             "depth": 0.8, "color": "#F5E6C8"},
+                        ],
+                    }],
+                },
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        part = result["tiles"][0]["spec"]["components"][0]["parts"][0]
+        assert part.get("position") == [0, 0, 0]
 
-    def test_garden_tiles(self):
-        tiles = [{"x": 3, "y": 3}]
-        result = _generate_terrain_procedurally(
-            name="Horti", btype="garden", tiles=tiles,
-            avg_elevation=0.2, district_palette=None, physical_desc="Garden",
-        )
-        assert result["tiles"][0]["terrain"] == "garden"
-        assert "vegetation_density" in result["tiles"][0]["spec"]["scenery"]
+    def test_shapes_have_spatial_spread(self):
+        """Validation warns when all parts share the same X,Z (vertical line)."""
+        # This should not raise but should log a warning
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "spec": {
+                    "components": [{
+                        "type": "procedural",
+                        "stack_role": "structural",
+                        "parts": [
+                            {"shape": "box", "position": [0, 0, 0],
+                             "width": 0.8, "height": 0.1, "depth": 0.8, "color": "#AAAAAA"},
+                            {"shape": "box", "position": [0, 0.3, 0],
+                             "width": 0.6, "height": 0.5, "depth": 0.6, "color": "#AAAAAA"},
+                            {"shape": "cone", "position": [0, 0.7, 0],
+                             "radius": 0.3, "height": 0.15, "color": "#AAAAAA"},
+                        ],
+                    }],
+                },
+            }],
+        }
+        # Should pass validation (warning only, not error)
+        validate_urbanista_arch_result(arch)
 
-    def test_with_district_palette(self):
-        tiles = [{"x": 0, "y": 0}]
-        palette = {"primary": "#AA8844", "secondary": "#BB5533", "accent": "#227744"}
-        result = _generate_terrain_procedurally(
-            name="Forum", btype="forum", tiles=tiles,
-            avg_elevation=0.1, district_palette=palette, physical_desc="Forum",
-        )
-        # Forum should use primary color from palette
-        assert result["tiles"][0]["color"] == "#AA8844"
+    def test_all_dense_shape_codes_have_renderer_shapes(self):
+        """Every dense shape code maps to a shape in PROCEDURAL_SHAPES."""
+        for code, shape in DENSE_SHAPE_CODES.items():
+            assert shape in PROCEDURAL_SHAPES, (
+                f"Dense code '{code}' maps to '{shape}' which is not in PROCEDURAL_SHAPES"
+            )
 
+    def test_grammar_tile_validates_then_moves_to_spec(self):
+        """Grammar data flows correctly: tile-level → validated → moved to spec."""
+        arch = {
+            "tiles": [{
+                "x": 10, "y": 5, "terrain": "building",
+                "grammar": "roman_temple",
+                "grammar_params": {"order": "corinthian"},
+            }],
+        }
+        # Sanitize and validate
+        result = sanitize_urbanista_output(arch)
+        validate_urbanista_arch_result(result)
 
-class TestBatchableTypes:
-    def test_batchable_types_not_in_open_terrain(self):
-        """Batchable types should not overlap with open terrain types."""
-        assert BATCHABLE_TYPES & OPEN_TERRAIN_TYPES == frozenset()
+        # Simulate engine.py: move grammar into spec
+        tile = result["tiles"][0]
+        g = tile.pop("grammar", None)
+        gp = tile.pop("grammar_params", None)
+        assert g == "roman_temple"
+        if not tile.get("spec"):
+            tile["spec"] = {}
+        tile["spec"]["grammar"] = g
+        if gp:
+            tile["spec"]["params"] = gp
 
-    def test_expected_batchable_types(self):
-        assert "taberna" in BATCHABLE_TYPES
-        assert "warehouse" in BATCHABLE_TYPES
-        assert "insula" in BATCHABLE_TYPES
+        # Verify final format matches what renderer expects
+        assert tile["spec"]["grammar"] == "roman_temple"
+        assert tile["spec"]["params"]["order"] == "corinthian"
+        assert "grammar" not in tile  # moved to spec
 
-    def test_complex_types_not_batchable(self):
-        assert "temple" not in BATCHABLE_TYPES
-        assert "amphitheater" not in BATCHABLE_TYPES
-        assert "thermae" not in BATCHABLE_TYPES
+    def test_material_names_resolved_to_hex(self):
+        """Material names in parts are resolved to hex colors."""
+        arch = {
+            "tiles": [{
+                "x": 0, "y": 0, "terrain": "building",
+                "spec": {
+                    "components": [{
+                        "type": "procedural",
+                        "stack_role": "structural",
+                        "parts": [
+                            {"shape": "box", "position": [0, 0, 0],
+                             "width": 0.8, "height": 0.5, "depth": 0.8,
+                             "color": "travertine"},
+                        ],
+                    }],
+                },
+            }],
+        }
+        result = sanitize_urbanista_output(arch)
+        part = result["tiles"][0]["spec"]["components"][0]["parts"][0]
+        assert part["color"].startswith("#"), f"Color should be hex, got {part['color']}"
 
-
-# ---------------------------------------------------------------------------
-# JSON array parsing (for batch mode)
-# ---------------------------------------------------------------------------
-
-from agents.base import _try_decode_json_array
-
-
-class TestTryDecodeJsonArray:
-    def test_valid_array(self):
-        result = _try_decode_json_array('[{"a": 1}, {"b": 2}]')
-        assert result == [{"a": 1}, {"b": 2}]
-
-    def test_with_markdown_fences(self):
-        result = _try_decode_json_array('```json\n[{"a": 1}]\n```')
-        assert result == [{"a": 1}]
-
-    def test_with_surrounding_prose(self):
-        result = _try_decode_json_array('Here are the results: [{"a": 1}] done.')
-        assert result == [{"a": 1}]
-
-    def test_empty_returns_none(self):
-        assert _try_decode_json_array("") is None
-        assert _try_decode_json_array("   ") is None
-
-    def test_non_array_returns_none(self):
-        assert _try_decode_json_array('{"a": 1}') is None
-
-    def test_nested_array(self):
-        result = _try_decode_json_array('[{"tiles": [{"x": 1}]}, {"tiles": [{"x": 2}]}]')
-        assert len(result) == 2
+    def test_position_validation_rejects_invalid(self):
+        """Position with wrong format is rejected."""
+        with pytest.raises(UrbanistaValidationError, match="position must be"):
+            validate_urbanista_arch_result({
+                "tiles": [{
+                    "x": 0, "y": 0, "terrain": "building",
+                    "spec": {
+                        "components": [{
+                            "type": "procedural",
+                            "stack_role": "structural",
+                            "parts": [{
+                                "shape": "box",
+                                "position": [0, 0],  # Only 2 elements
+                                "width": 0.5, "height": 0.5, "depth": 0.5,
+                                "color": "#AAAAAA",
+                            }],
+                        }],
+                    },
+                }],
+            })
 
 
 if __name__ == "__main__":

@@ -379,6 +379,27 @@ def expand_dense_shapes_in_result(arch_result: dict) -> dict:
 
     arch_result["tiles"] = expanded_tiles
 
+    # Handle spec-as-list even for verbose-key tiles (expand_dense_tile only
+    # catches this when dense tile keys like "n"/"bt"/"g" are present).
+    for tile in arch_result["tiles"]:
+        if not isinstance(tile, dict):
+            continue
+        spec = tile.get("spec")
+        if isinstance(spec, list):
+            expanded_components = []
+            for item in spec:
+                if isinstance(item, list):
+                    expanded_components.append(expand_dense_shape(item))
+                elif isinstance(item, dict):
+                    expanded_components.append(item)
+            tile["spec"] = {
+                "components": [{
+                    "type": "procedural",
+                    "stack_role": "structural",
+                    "parts": expanded_components,
+                }]
+            }
+
     # Also expand dense shapes inside spec.components[].parts[]
     for tile in arch_result["tiles"]:
         if not isinstance(tile, dict):
