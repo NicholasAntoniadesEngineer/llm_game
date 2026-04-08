@@ -63,6 +63,34 @@ def build_app(state: AppState, lifespan=None):
             },
         )
 
+    @app.get("/api/health")
+    async def api_health():
+        """Health check endpoint -- returns current server status, tile/district counts, and token usage."""
+        from core import config as config_module
+        from core.token_usage import get_token_summary
+
+        tile_count = len(state.world.tiles)
+        district_count = 0
+        is_running = False
+        if state.engine_is_running is not None:
+            is_running = state.engine_is_running()
+        # Extract district count from the most recent phase message in chat history
+        for msg in reversed(state.chat_history):
+            if msg.get("type") == "phase" and msg.get("total_districts"):
+                district_count = msg["total_districts"]
+                break
+
+        token_summary = get_token_summary()
+        total_tokens = token_summary.get("total_tokens", 0)
+
+        return {
+            "status": "ok",
+            "tiles": tile_count,
+            "districts": district_count,
+            "running": is_running,
+            "tokens": total_tokens,
+        }
+
     @app.get("/api/cities")
     async def get_cities():
         return [

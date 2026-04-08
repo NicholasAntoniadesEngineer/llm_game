@@ -321,6 +321,7 @@ function connect() {
     ws.onopen = () => {
         wsLog(seq, "OPEN — connected");
         setConnectionStatus(true);
+        hideReconnectingBanner();
         reconnectDelay = 1000;
         updateAiSettingsConnectionStatus();
         // Only send pending actions on the FIRST connect (not on auto-reconnects).
@@ -364,6 +365,7 @@ function connect() {
     ws.onclose = (ev) => {
         wsLog(seq, `CLOSE — code=${ev.code} reason=${ev.reason || "(none)"} wasClean=${ev.wasClean} nextDelay=${reconnectDelay}ms`);
         setConnectionStatus(false);
+        showReconnectingBanner(reconnectDelay);
         updateAiSettingsConnectionStatus();
         clearWebSocketReconnectTimer();
         wsReconnectTimer = setTimeout(() => {
@@ -371,7 +373,8 @@ function connect() {
             wsLog(seq, `backoff timer fired — reconnecting (was ${reconnectDelay}ms)`);
             connect();
         }, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
     };
 
     ws.onerror = (err) => {
@@ -445,6 +448,7 @@ function handleMessage(msg) {
 
         case "tile_update":
             if (!Array.isArray(msg.tiles)) break;
+            dismissAutoRetryOverlay();
             renderer.updateTiles(msg.tiles);
             miniMapAddTiles(msg.tiles);
             drawMiniMap();
@@ -605,7 +609,19 @@ function handleMessage(msg) {
             document.title = `Expanding Gen ${msg.generation} — Eternal Cities`;
             break;
 
+        case "auto_retry":
+            showAutoRetryOverlay(msg);
+            break;
+
+        case "building_skipped":
+            appendSystemMessage(
+                `Skipped: ${msg.name || "building"} (${msg.building_type || "unknown"}) — ${msg.reason || "error"}. ` +
+                `${msg.skipped_count || 1} skipped so far in ${msg.district || "district"}.`
+            );
+            break;
+
         case "paused":
+            dismissAutoRetryOverlay();
             showPausedOverlay(msg);
             resetAllAgentStatus();
             updatePauseButton(true);
@@ -1009,6 +1025,67 @@ function resumeBuildAfterPause() {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resume" }));
     }
+    dismissPausedOverlay();
+}
+
+// --- Auto-retry countdown overlay ---
+
+let _autoRetryCountdownTimer = null;
+
+function showAutoRetryOverlay(msg) {
+    // Reuse the paused overlay but show countdown text
+    const overlay = document.getElementById("paused-overlay");
+    const titleEl = document.getElementById("paused-title");
+    const bodyEl = document.getElementById("paused-body");
+    const detailEl = document.getElementById("paused-detail");
+    const retryBtn = document.getElementById("paused-retry-btn");
+    if (!overlay || !titleEl || !bodyEl) return;
+
+    const attempt = msg.attempt || 1;
+    const maxAttempts = msg.max_attempts || 3;
+    let remaining = msg.delay_s || 5;
+
+    titleEl.textContent = "Auto-retrying (" + attempt + "/" + maxAttempts + ")";
+    bodyEl.textContent = "Retrying in " + remaining + "s...";
+    if (detailEl) {
+        const detail = (msg.detail || "").trim();
+        if (detail) {
+            detailEl.textContent = detail;
+            detailEl.hidden = false;
+        } else {
+            detailEl.textContent = "";
+            detailEl.hidden = true;
+        }
+    }
+    // Hide the manual retry button during auto-retry
+    if (retryBtn) retryBtn.style.display = "none";
+
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+
+    // Countdown timer
+    if (_autoRetryCountdownTimer) clearInterval(_autoRetryCountdownTimer);
+    _autoRetryCountdownTimer = setInterval(function() {
+        remaining--;
+        if (remaining <= 0) {
+            clearInterval(_autoRetryCountdownTimer);
+            _autoRetryCountdownTimer = null;
+            bodyEl.textContent = "Retrying now...";
+            return;
+        }
+        bodyEl.textContent = "Retrying in " + remaining + "s... (attempt " + attempt + "/" + maxAttempts + ")";
+    }, 1000);
+}
+
+function dismissAutoRetryOverlay() {
+    if (_autoRetryCountdownTimer) {
+        clearInterval(_autoRetryCountdownTimer);
+        _autoRetryCountdownTimer = null;
+    }
+    // Restore the retry button visibility
+    const retryBtn = document.getElementById("paused-retry-btn");
+    if (retryBtn) retryBtn.style.display = "";
+    // Dismiss overlay
     dismissPausedOverlay();
 }
 
@@ -1501,6 +1578,53 @@ function setConnectionStatus(connected) {
     el.classList.add(connected ? "connected" : "disconnected");
     el.textContent = connected ? "Connected" : "Reconnecting...";
     updateAiSettingsConnectionStatus();
+}
+
+// --- Reconnecting banner (non-intrusive top bar with countdown) ---
+
+let _reconnectBannerTimer = null;
+
+function showReconnectingBanner(delayMs) {
+    let banner = document.getElementById("reconnecting-banner");
+    if (!banner) {
+        banner = document.createElement("div");
+        banner.id = "reconnecting-banner";
+        banner.style.cssText =
+            "position:fixed;top:0;left:0;right:0;z-index:9999;" +
+            "background:rgba(30,30,30,0.92);color:#ffd700;text-align:center;" +
+            "padding:8px 16px;font-size:14px;font-family:inherit;" +
+            "border-bottom:2px solid #ffd700;transition:opacity 0.3s;";
+        document.body.appendChild(banner);
+    }
+    var delaySec = Math.round(delayMs / 1000);
+    banner.textContent = "Reconnecting in " + delaySec + "s...";
+    banner.style.opacity = "1";
+    banner.style.display = "block";
+
+    if (_reconnectBannerTimer) clearInterval(_reconnectBannerTimer);
+    var remaining = delaySec;
+    _reconnectBannerTimer = setInterval(function() {
+        remaining--;
+        if (remaining <= 0) {
+            banner.textContent = "Reconnecting now...";
+            clearInterval(_reconnectBannerTimer);
+            _reconnectBannerTimer = null;
+            return;
+        }
+        banner.textContent = "Reconnecting in " + remaining + "s...";
+    }, 1000);
+}
+
+function hideReconnectingBanner() {
+    if (_reconnectBannerTimer) {
+        clearInterval(_reconnectBannerTimer);
+        _reconnectBannerTimer = null;
+    }
+    var banner = document.getElementById("reconnecting-banner");
+    if (banner) {
+        banner.style.opacity = "0";
+        setTimeout(function() { if (banner) banner.style.display = "none"; }, 300);
+    }
 }
 
 // --- Reload / restart / timeline (keeps planning caches unless full RESET) ---

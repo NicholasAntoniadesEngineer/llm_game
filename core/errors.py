@@ -20,6 +20,15 @@ class UrbanistaValidationError(EternalCitiesError):
     """Urbanista JSON violates renderer contract; do not strip or substitute."""
 
 
+class BuildingSkippedError(EternalCitiesError):
+    """A building was skipped after exhausting retry attempts."""
+
+    def __init__(self, building_name: str, reason: str):
+        self.building_name = building_name
+        self.reason = reason
+        super().__init__(f"Skipped {building_name}: {reason}")
+
+
 def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple[str, str]:
     """Map stderr / exception to (pause_reason, short_detail) for UI and engine."""
     raw = (stderr_text or "").strip()
