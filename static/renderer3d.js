@@ -80,7 +80,6 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups = new Set();
-        this._constructingGroups = new Set();
         // Spatial index: anchor key → footprint bounds (maintained on tile update)
         this._anchorFootprints = new Map();
         /** @type {number[][]|null} Elevation samples at grid corners [j][i], 0..height × 0..width */
@@ -175,6 +174,13 @@ class WorldRenderer {
         // Particle system — dust motes for atmosphere
         this._dustParticles = null;
         this._dustVelocities = null;
+
+        // Ambient atmosphere systems
+        this._smokeEmitters = [];      // Rising smoke from bakeries, tabernae, thermae
+        this._birdParticles = null;    // Circling bird specks above the city
+        this._birdData = null;         // Per-bird orbit parameters
+        this._flagMeshes = [];         // Animated flags on temples, monuments, basilicas
+        this._torchLights = [];        // Flickering point lights at night
 
         // District label sprites — floating text above each district center
         this._districtLabelsGroup = new THREE.Group();
@@ -1260,11 +1266,16 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups.clear();
-        this._constructingGroups.clear();
         this._cornerHeights = null;
         // Clean up particles
         this._dustParticles = null;
         this._dustVelocities = null;
+        // Clean up ambient atmosphere systems
+        this._smokeEmitters = [];
+        this._birdParticles = null;
+        this._birdData = null;
+        this._flagMeshes = [];
+        this._torchLights = [];
         // District labels group was removed with scene children — recreate
         this._districtLabelsGroup = new THREE.Group();
         this._districtLabelsGroup.name = "districtLabels";
@@ -1729,6 +1740,9 @@ class WorldRenderer {
 
         // Create atmospheric dust mote particles
         this._createDustParticles(mapW, mapH, midY);
+
+        // Create circling bird particles above the city
+        this._createBirdParticles(mapW, mapH, midY);
     }
 
     // ─── Particle System (Dust Motes) ───
@@ -1772,6 +1786,179 @@ class WorldRenderer {
         this._dustBoundsH = mapH;
         this._dustMidY = midY;
     }
+
+    // ─── Bird Particles (Circling Specks Above the City) ───
+
+    /** Create 15 dark bird specks that orbit above the city at varying heights and speeds. */
+    _createBirdParticles(mapW, mapH, midY) {
+        const count = 15;
+        const positions = new Float32Array(count * 3);
+        const birdData = [];
+        const centerX = mapW / 2;
+        const centerZ = mapH / 2;
+        const baseRadius = Math.min(mapW, mapH) * 0.3;
+
+        for (let i = 0; i < count; i++) {
+            const radius = baseRadius * (0.4 + Math.random() * 0.6);
+            const speed = 0.0003 + Math.random() * 0.0005;   // radians per frame
+            const phase = Math.random() * Math.PI * 2;
+            const heightBase = midY + 60 + Math.random() * 50;
+            const heightAmp = 5 + Math.random() * 10;
+            const heightFreq = 0.0005 + Math.random() * 0.001;
+
+            birdData.push({ radius, speed, phase, heightBase, heightAmp, heightFreq, centerX, centerZ });
+
+            // Initial position
+            positions[i * 3] = centerX + Math.cos(phase) * radius;
+            positions[i * 3 + 1] = heightBase;
+            positions[i * 3 + 2] = centerZ + Math.sin(phase) * radius;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+
+        const mat = new THREE.PointsMaterial({
+            color: 0x1a1a1a,          // dark specks
+            size: 1.8,
+            transparent: true,
+            opacity: 0.7,
+            depthWrite: false,
+            sizeAttenuation: true,
+        });
+
+        const pts = new THREE.Points(geo, mat);
+        pts.frustumCulled = false;
+        this.scene.add(pts);
+
+        this._birdParticles = pts;
+        this._birdData = birdData;
+    }
+
+    // ─── Smoke Emitter (Chimney Particles) ───
+
+    /** Building types that produce chimney smoke. */
+    static _SMOKE_BUILDING_TYPES = new Set(["bakery", "taberna", "tabernae", "thermae", "baths", "fullonica", "popina"]);
+
+    /** Create a rising smoke particle emitter above a building group. */
+    _createSmokeEmitter(group, tile) {
+        const bt = String(tile.building_type || "").toLowerCase();
+        if (!WorldRenderer._SMOKE_BUILDING_TYPES.has(bt)) return;
+
+        // Cap total smoke particles to stay within performance budget
+        const existingCount = this._smokeEmitters.reduce((n, e) => n + (e ? e.count : 0), 0);
+        if (existingCount >= 150) return; // Leave room for dust + birds
+
+        const count = 25;
+        const positions = new Float32Array(count * 3);
+        const alphas = new Float32Array(count);
+        const velocities = new Float32Array(count * 3);
+
+        for (let i = 0; i < count; i++) {
+            // Start at random height within the column so they don't all pop in at once
+            positions[i * 3] = (Math.random() - 0.5) * 0.08;
+            positions[i * 3 + 1] = Math.random() * 0.6;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+
+            alphas[i] = Math.random(); // stagger lifetimes
+            velocities[i * 3] = (Math.random() - 0.5) * 0.0004;  // slight X drift
+            velocities[i * 3 + 1] = 0.001 + Math.random() * 0.0008; // rise
+            velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.0004; // slight Z drift
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute("alpha", new THREE.BufferAttribute(alphas, 1));
+
+        const mat = new THREE.PointsMaterial({
+            color: 0xcccccc,          // grey-white smoke
+            size: 0.03,
+            transparent: true,
+            opacity: 0.35,
+            depthWrite: false,
+            sizeAttenuation: true,
+        });
+
+        const pts = new THREE.Points(geo, mat);
+        pts.frustumCulled = false;
+
+        // Position above building — estimate building top from group bounding box
+        const bbox = new THREE.Box3().setFromObject(group);
+        const topY = (bbox.max.y - group.position.y) / TILE_SIZE; // local tile units
+        pts.position.y = topY + 0.05;
+
+        group.add(pts);
+
+        const emitter = { points: pts, velocities, count, group };
+        this._smokeEmitters.push(emitter);
+    }
+
+    // ─── Flag / Banner on Important Buildings ───
+
+    /** Building types that get animated flags. */
+    static _FLAG_BUILDING_TYPES = new Set(["temple", "monument", "basilica", "capitol", "forum_building", "curia", "palace"]);
+
+    /** Flag colors — culturally appropriate Roman palette. */
+    static _FLAG_COLORS = [0xcc2222, 0x882288, 0xccaa22, 0xcc3333, 0x993399];
+
+    /** Create a small animated cloth flag at the highest point of a building. */
+    _createFlag(group, tile) {
+        const bt = String(tile.building_type || "").toLowerCase();
+        if (!WorldRenderer._FLAG_BUILDING_TYPES.has(bt)) return;
+        if (this._flagMeshes.length >= 20) return; // performance cap
+
+        const flagW = 0.05;
+        const flagH = 0.08;
+        const widthSegs = 6;
+        const heightSegs = 3;
+        const geo = new THREE.PlaneGeometry(flagW, flagH, widthSegs, heightSegs);
+
+        const colorIdx = (tile.x * 7 + tile.y * 13) % WorldRenderer._FLAG_COLORS.length;
+        const mat = new THREE.MeshStandardMaterial({
+            color: WorldRenderer._FLAG_COLORS[colorIdx],
+            side: THREE.DoubleSide,
+            roughness: 0.8,
+            metalness: 0.0,
+        });
+
+        const flag = new THREE.Mesh(geo, mat);
+        flag.castShadow = false;
+        flag.receiveShadow = false;
+
+        // Position at building top
+        const bbox = new THREE.Box3().setFromObject(group);
+        const topY = (bbox.max.y - group.position.y) / TILE_SIZE;
+        // Offset slightly so it doesn't clip into roof
+        flag.position.set(0, topY + flagH / 2 + 0.02, 0);
+
+        // Store original vertex positions for wave animation
+        const posAttr = geo.getAttribute("position");
+        flag.userData.flagOrigPositions = new Float32Array(posAttr.array);
+        flag.userData.flagWidthSegs = widthSegs;
+        flag.userData.flagWidth = flagW;
+
+        group.add(flag);
+        this._flagMeshes.push(flag);
+    }
+
+    // ─── Torch Lights (Nighttime Flickering) ───
+
+    /** Create torch point lights near important buildings, managed by time-of-day. */
+    _createTorchLight(group, tile) {
+        // Limit to 8 total torch lights (forward renderer constraint)
+        if (this._torchLights.length >= 8) return;
+
+        const light = new THREE.PointLight(0xff9944, 0, 8 * TILE_SIZE);
+        light.castShadow = false;
+        // Position at building entrance (slightly above ground, in front)
+        light.position.set(0, 0.15 * TILE_SIZE, 0.5 * TILE_SIZE);
+        light.visible = false; // Controlled by setTimeOfDay
+
+        group.add(light);
+        this._torchLights.push({ light, group, baseIntensity: 0.5 + Math.random() * 0.3 });
+    }
+
+    /** Torch-light priority: temples first, then civic/monumental, then others. */
+    static _TORCH_PRIORITY_TYPES = new Set(["temple", "capitol", "basilica", "monument", "palace", "curia", "thermae", "forum_building"]);
 
     updateTiles(tiles) {
         if (!this.grid) return;
@@ -2423,7 +2610,10 @@ class WorldRenderer {
                 return true;
             });
             this._animatingGroups.delete(oldGroup);
-            this._constructingGroups.delete(oldGroup);
+            // Remove atmosphere objects tied to the old group
+            this._smokeEmitters = this._smokeEmitters.filter(e => e && e.group !== oldGroup);
+            this._flagMeshes = this._flagMeshes.filter(f => f && f.parent !== oldGroup);
+            this._torchLights = this._torchLights.filter(t => t && t.group !== oldGroup);
         }
 
         group.traverse((c) => {
@@ -2454,22 +2644,7 @@ class WorldRenderer {
             if (c.userData && c.userData.isWater) this._waterMeshes.push(c);
         });
 
-        if (animate && !isTerrainMesh) {
-            // Construction animation: reveal bottom-up with staggered timing
-            const constructNow = Date.now();
-            group.traverse(c => {
-                if (c.isMesh) {
-                    const baseY = c.position.y;
-                    c.userData._constructY = baseY;
-                    c.userData._constructStart = constructNow + Math.max(0, baseY) * 200; // Stagger by height
-                    c.userData._constructDuration = 1500;
-                    c.scale.y = 0.01; // Start flat
-                    c.position.y = 0;  // Start at ground
-                }
-            });
-            this._constructingGroups.add(group);
-        } else if (animate) {
-            // Terrain tiles keep the old drop-in animation
+        if (animate) {
             group.userData.animStartY = elevation - 2 * S;
             group.userData.animTargetY = elevation;
             group.userData.animStart = Date.now();
@@ -2489,6 +2664,18 @@ class WorldRenderer {
         this.scene.add(group);
         this.buildingGroups.set(key, group);
         this._meshListDirty = true;
+
+        // Ambient atmosphere: add smoke emitters for appropriate building types
+        if (!isTerrainMesh && tile.building_type) {
+            this._createSmokeEmitter(group, tile);
+            this._createFlag(group, tile);
+            // Torch lights for important buildings
+            const bt = String(tile.building_type || "").toLowerCase();
+            if (WorldRenderer._TORCH_PRIORITY_TYPES.has(bt)) {
+                this._createTorchLight(group, tile);
+            }
+        }
+
         return { ok: true };
     }
 
@@ -5586,6 +5773,30 @@ class WorldRenderer {
             this._dustParticles.material.opacity = goldenHourFactor * 0.4;
             this._dustParticles.visible = goldenHourFactor > 0.05;
         }
+
+        // Bird particles — more visible at dawn/dusk (silhouettes), dimmer at noon
+        if (this._birdParticles) {
+            const silhouetteFactor = Math.max(0.3, warmth * 0.8 + nightFactor * 0.5);
+            this._birdParticles.material.opacity = Math.min(0.9, silhouetteFactor);
+            this._birdParticles.visible = nightFactor < 0.8; // hide in deep night
+        }
+
+        // Torch lights — active during evening/night (t > 0.7 or t < 0.2)
+        const torchActive = t > 0.7 || t < 0.2;
+        // Ramp intensity: fade in/out over 0.05 range at boundaries
+        let torchIntensityScale = 0;
+        if (torchActive) {
+            if (t > 0.7) {
+                torchIntensityScale = Math.min(1, (t - 0.7) / 0.05);
+            } else {
+                torchIntensityScale = Math.min(1, (0.2 - t) / 0.05);
+            }
+        }
+        for (const torch of this._torchLights) {
+            if (!torch || !torch.light) continue;
+            torch.light.visible = torchActive;
+            torch.light.intensity = torch.baseIntensity * torchIntensityScale;
+        }
     }
 
     _getMeshList() {
@@ -5874,37 +6085,12 @@ class WorldRenderer {
             if (this._keysDown.has("f")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 1.03);
             this._updateCamera();
         }
-        // Animate only groups that are currently dropping in (terrain tiles)
+        // Animate only groups that are currently dropping in
         for (const group of this._animatingGroups) {
             const t = Math.min(1, (now - group.userData.animStart) / 600);
             const ease = 1 - Math.pow(1 - t, 3);
             group.position.y = group.userData.animStartY + (group.userData.animTargetY - group.userData.animStartY) * ease;
             if (t >= 1) { delete group.userData.animStart; this._animatingGroups.delete(group); }
-        }
-        // Construction animation: bottom-up reveal for building groups
-        if (this._constructingGroups.size > 0) {
-            const cDone = [];
-            for (const group of this._constructingGroups) {
-                let allDone = true;
-                group.traverse(c => {
-                    if (c.isMesh && c.userData._constructStart != null) {
-                        const elapsed = now - c.userData._constructStart;
-                        if (elapsed < 0) { allDone = false; return; } // Stagger not started yet
-                        const t = Math.min(1, elapsed / c.userData._constructDuration);
-                        const ease = 1 - Math.pow(1 - t, 3); // ease-out-cubic
-                        c.scale.y = 0.01 + ease * 0.99;
-                        c.position.y = c.userData._constructY * ease;
-                        if (t < 1) { allDone = false; }
-                        else {
-                            delete c.userData._constructStart;
-                            delete c.userData._constructDuration;
-                            delete c.userData._constructY;
-                        }
-                    }
-                });
-                if (allDone) cDone.push(group);
-            }
-            for (let i = 0; i < cDone.length; i++) this._constructingGroups.delete(cDone[i]);
         }
         // Animate only tracked water meshes (river/harbor tiles)
         {
@@ -5976,6 +6162,80 @@ class WorldRenderer {
                 if (pos[i + 1] > my + 90) pos[i + 1] = my + 10;
             }
             posAttr.needsUpdate = true;
+        }
+
+        // Animate bird particles — circular orbits with sine height variation
+        if (this._birdParticles && this._birdData) {
+            const bPosAttr = this._birdParticles.geometry.getAttribute("position");
+            const bPos = bPosAttr.array;
+            for (let i = 0; i < this._birdData.length; i++) {
+                const b = this._birdData[i];
+                b.phase += b.speed;
+                bPos[i * 3] = b.centerX + Math.cos(b.phase) * b.radius;
+                bPos[i * 3 + 1] = b.heightBase + Math.sin(now * b.heightFreq) * b.heightAmp;
+                bPos[i * 3 + 2] = b.centerZ + Math.sin(b.phase) * b.radius;
+            }
+            bPosAttr.needsUpdate = true;
+        }
+
+        // Animate smoke emitters — particles rise, drift, fade, and respawn
+        for (let si = this._smokeEmitters.length - 1; si >= 0; si--) {
+            const emitter = this._smokeEmitters[si];
+            if (!emitter || !emitter.points || !emitter.points.parent) {
+                this._smokeEmitters.splice(si, 1);
+                continue;
+            }
+            const posAttrS = emitter.points.geometry.getAttribute("position");
+            const sPos = posAttrS.array;
+            const sVel = emitter.velocities;
+            for (let i = 0; i < emitter.count; i++) {
+                // Apply velocity
+                sPos[i * 3] += sVel[i * 3];
+                sPos[i * 3 + 1] += sVel[i * 3 + 1];
+                sPos[i * 3 + 2] += sVel[i * 3 + 2];
+                // Add slight wind drift
+                sVel[i * 3] += (Math.random() - 0.5) * 0.00005;
+                sVel[i * 3 + 2] += (Math.random() - 0.5) * 0.00005;
+                // Respawn at base when particle rises too high (local Y > 0.6 tile units)
+                if (sPos[i * 3 + 1] > 0.6) {
+                    sPos[i * 3] = (Math.random() - 0.5) * 0.08;
+                    sPos[i * 3 + 1] = 0;
+                    sPos[i * 3 + 2] = (Math.random() - 0.5) * 0.08;
+                    sVel[i * 3] = (Math.random() - 0.5) * 0.0004;
+                    sVel[i * 3 + 1] = 0.001 + Math.random() * 0.0008;
+                    sVel[i * 3 + 2] = (Math.random() - 0.5) * 0.0004;
+                }
+            }
+            posAttrS.needsUpdate = true;
+        }
+
+        // Animate flags — sine wave cloth approximation
+        for (const flag of this._flagMeshes) {
+            if (!flag || !flag.parent || !flag.userData.flagOrigPositions) continue;
+            const posAttrF = flag.geometry.getAttribute("position");
+            const fPos = posAttrF.array;
+            const orig = flag.userData.flagOrigPositions;
+            const wSegs = flag.userData.flagWidthSegs;
+            const fW = flag.userData.flagWidth;
+            const waveTime = now * 0.003;
+            for (let i = 0; i < fPos.length; i += 3) {
+                // Compute how far along the width this vertex is (0 at hinge, 1 at tip)
+                const xNorm = (orig[i] + fW / 2) / fW; // 0..1 across width
+                // Wave amplitude increases toward the tip
+                const amp = xNorm * xNorm * 0.012;
+                fPos[i] = orig[i]; // X unchanged
+                fPos[i + 1] = orig[i + 1]; // Y unchanged
+                fPos[i + 2] = orig[i + 2] + Math.sin(waveTime + xNorm * 4) * amp
+                              + Math.sin(waveTime * 1.7 + xNorm * 2.5) * amp * 0.4;
+            }
+            posAttrF.needsUpdate = true;
+        }
+
+        // Animate torch light flicker
+        for (const torch of this._torchLights) {
+            if (!torch || !torch.light || !torch.light.visible) continue;
+            // Random flicker: +-15% intensity variation
+            torch.light.intensity = torch.baseIntensity * (0.85 + Math.random() * 0.3);
         }
 
         this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
