@@ -920,5 +920,105 @@ class TestGrammarTiles:
             })
 
 
+# ---------------------------------------------------------------------------
+# Terrain procedural generation (Optimization 2)
+# ---------------------------------------------------------------------------
+
+from orchestration.engine import _generate_terrain_procedurally, BATCHABLE_TYPES, OPEN_TERRAIN_TYPES
+
+
+class TestGenerateTerrainProcedurally:
+    def test_road_tiles(self):
+        tiles = [{"x": 0, "y": 0, "elevation": 0.1}, {"x": 1, "y": 0, "elevation": 0.1}]
+        result = _generate_terrain_procedurally(
+            name="Via Sacra", btype="road", tiles=tiles,
+            avg_elevation=0.1, district_palette=None, physical_desc="Ancient road",
+        )
+        assert "tiles" in result
+        assert len(result["tiles"]) == 2
+        for t in result["tiles"]:
+            assert t["terrain"] == "road"
+            assert t["building_type"] == "road"
+            assert "color" in t
+            assert "spec" in t
+
+    def test_water_tiles(self):
+        tiles = [{"x": 5, "y": 5, "elevation": 0.0}]
+        result = _generate_terrain_procedurally(
+            name="Tiber", btype="water", tiles=tiles,
+            avg_elevation=0.0, district_palette=None, physical_desc="River",
+        )
+        assert len(result["tiles"]) == 1
+        assert result["tiles"][0]["terrain"] == "water"
+        assert "water_murk" in result["tiles"][0]["spec"]["scenery"]
+
+    def test_garden_tiles(self):
+        tiles = [{"x": 3, "y": 3}]
+        result = _generate_terrain_procedurally(
+            name="Horti", btype="garden", tiles=tiles,
+            avg_elevation=0.2, district_palette=None, physical_desc="Garden",
+        )
+        assert result["tiles"][0]["terrain"] == "garden"
+        assert "vegetation_density" in result["tiles"][0]["spec"]["scenery"]
+
+    def test_with_district_palette(self):
+        tiles = [{"x": 0, "y": 0}]
+        palette = {"primary": "#AA8844", "secondary": "#BB5533", "accent": "#227744"}
+        result = _generate_terrain_procedurally(
+            name="Forum", btype="forum", tiles=tiles,
+            avg_elevation=0.1, district_palette=palette, physical_desc="Forum",
+        )
+        # Forum should use primary color from palette
+        assert result["tiles"][0]["color"] == "#AA8844"
+
+
+class TestBatchableTypes:
+    def test_batchable_types_not_in_open_terrain(self):
+        """Batchable types should not overlap with open terrain types."""
+        assert BATCHABLE_TYPES & OPEN_TERRAIN_TYPES == frozenset()
+
+    def test_expected_batchable_types(self):
+        assert "taberna" in BATCHABLE_TYPES
+        assert "warehouse" in BATCHABLE_TYPES
+        assert "insula" in BATCHABLE_TYPES
+
+    def test_complex_types_not_batchable(self):
+        assert "temple" not in BATCHABLE_TYPES
+        assert "amphitheater" not in BATCHABLE_TYPES
+        assert "thermae" not in BATCHABLE_TYPES
+
+
+# ---------------------------------------------------------------------------
+# JSON array parsing (for batch mode)
+# ---------------------------------------------------------------------------
+
+from agents.base import _try_decode_json_array
+
+
+class TestTryDecodeJsonArray:
+    def test_valid_array(self):
+        result = _try_decode_json_array('[{"a": 1}, {"b": 2}]')
+        assert result == [{"a": 1}, {"b": 2}]
+
+    def test_with_markdown_fences(self):
+        result = _try_decode_json_array('```json\n[{"a": 1}]\n```')
+        assert result == [{"a": 1}]
+
+    def test_with_surrounding_prose(self):
+        result = _try_decode_json_array('Here are the results: [{"a": 1}] done.')
+        assert result == [{"a": 1}]
+
+    def test_empty_returns_none(self):
+        assert _try_decode_json_array("") is None
+        assert _try_decode_json_array("   ") is None
+
+    def test_non_array_returns_none(self):
+        assert _try_decode_json_array('{"a": 1}') is None
+
+    def test_nested_array(self):
+        result = _try_decode_json_array('[{"tiles": [{"x": 1}]}, {"tiles": [{"x": 2}]}]')
+        assert len(result) == 2
+
+
 if __name__ == "__main__":
     unittest.main()

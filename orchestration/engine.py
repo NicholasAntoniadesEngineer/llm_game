@@ -21,6 +21,71 @@ from agents.base import BaseAgent
 # Master-plan building_types that are rendered as procedural terrain (no Urbanista components).
 OPEN_TERRAIN_TYPES = frozenset({"road", "forum", "garden", "water", "grass"})
 
+# Small/simple building types eligible for batching (2-3 per Urbanista call).
+# These have simpler geometry and shorter outputs, making batching safe.
+BATCHABLE_TYPES = frozenset({"taberna", "warehouse", "insula", "domus", "market"})
+
+# Max buildings per batch. Keep small to avoid overly complex responses.
+MAX_BATCH_SIZE = 3
+
+# Max total tiles across a batch — larger buildings should not be batched.
+MAX_BATCH_TILES = 12
+
+
+# ── Default terrain colors/scenery by type (used when skipping Urbanista for terrain) ──
+_TERRAIN_DEFAULTS = {
+    "road": {"color": "#8B8680", "scenery": {"pavement_detail": 0.6}},
+    "forum": {"color": "#C8B89A", "scenery": {"pavement_detail": 0.8, "vegetation_density": 0.1}},
+    "garden": {"color": "#4A7C3F", "scenery": {"vegetation_density": 0.7}},
+    "water": {"color": "#2E5A88", "scenery": {"water_murk": 0.3}},
+    "grass": {"color": "#6B8E4E", "scenery": {"vegetation_density": 0.5}},
+}
+
+
+def _generate_terrain_procedurally(
+    name: str,
+    btype: str,
+    tiles: list,
+    avg_elevation: float,
+    district_palette: dict | None,
+    physical_desc: str,
+) -> dict:
+    """Generate terrain tiles without an LLM call.
+
+    Road, forum, garden, water, grass tiles use simple color + scenery spec.
+    This saves one Urbanista system prompt per terrain structure.
+    """
+    defaults = _TERRAIN_DEFAULTS.get(btype, {"color": "#808080", "scenery": {}})
+    color = defaults["color"]
+
+    # Use district palette if available (primary for roads/forums, accent for gardens)
+    if district_palette and isinstance(district_palette, dict):
+        if btype in ("road", "forum") and district_palette.get("primary"):
+            color = district_palette["primary"]
+        elif btype in ("garden", "grass") and district_palette.get("accent"):
+            # Blend toward green for vegetation
+            pass  # Keep default green
+
+    result_tiles = []
+    for t in tiles:
+        td = {
+            "x": t["x"],
+            "y": t["y"],
+            "terrain": btype,
+            "building_name": name,
+            "building_type": btype,
+            "description": physical_desc[:200] if physical_desc else f"{name} ({btype})",
+            "elevation": t.get("elevation", avg_elevation),
+            "color": color,
+            "spec": {
+                "color": color,
+                "scenery": dict(defaults.get("scenery", {})),
+            },
+        }
+        result_tiles.append(td)
+
+    return {"tiles": result_tiles, "commentary": f"Procedural terrain: {name}"}
+
 # Wave 1 (landmarks) — built first across all districts for a quick city skeleton.
 # Wave 2 (infill) — fills density after the skeleton is complete.
 WAVE1_TYPES = frozenset({
@@ -648,6 +713,41 @@ class BuildEngine:
             env_note = (structure.get("environment_note") or "").strip()
 
             if btype in OPEN_TERRAIN_TYPES:
+                # OPTIMIZATION: Generate terrain tiles procedurally (no Urbanista LLM call).
+                # Roads, forums, gardens, water, and grass use simple color + scenery spec.
+                terrain_result = _generate_terrain_procedurally(
+                    name=name, btype=btype, tiles=tiles,
+                    avg_elevation=avg_elevation,
+                    district_palette=district_palette,
+                    physical_desc=physical_desc,
+                )
+                placed_terrain = []
+                district_elev = district.get("elevation", 0.0)
+                for td in terrain_result.get("tiles", []):
+                    x, y = td.get("x"), td.get("y")
+                    if x is not None and y is not None:
+                        if "elevation" not in td or td["elevation"] is None:
+                            td["elevation"] = district_elev
+                        td["period"] = district.get("period", "")
+                        td["placed_by"] = "faber"
+                        td["historical_note"] = hist_note
+                        if self.world.place_tile(x, y, td):
+                            tile = self.world.get_tile(x, y)
+                            if tile:
+                                placed_terrain.append(tile.to_dict())
+                if placed_terrain:
+                    await self.broadcast({
+                        "type": "tile_update", "tiles": placed_terrain,
+                        "turn": self.world.turn,
+                        "period": district.get("period", ""),
+                        "year": district.get("year", ""),
+                    })
+                    logger.info("Placed %d terrain tiles for %s (no LLM call)", len(placed_terrain), name)
+                self.world.turn += 1
+                await self.tasks.persist_progress_after_structure()
+                continue  # Skip Urbanista pipeline for terrain
+                # NOTE: build_terrain_prompt path below is now unreachable but kept
+                # as documentation of the old approach.
                 prompt = build_terrain_prompt(
                     name=name, btype=btype, tiles=tiles,
                     anchor_x=anchor_x, anchor_y=anchor_y,
@@ -715,6 +815,10 @@ class BuildEngine:
         # Instead of waiting for all N structures, fire all tasks and place each result
         # immediately as it arrives. Buildings appear on screen within seconds of each
         # Urbanista call finishing, not after a 5-10 minute batch wait.
+        #
+        # OPTIMIZATION: Consecutive small/simple buildings (taberna, warehouse, insula,
+        # domus, market) are batched 2-3 into a single Urbanista call. This saves one
+        # system prompt worth of tokens per additional building in the batch.
         skipped = 0
         consecutive_failures = 0
         max_consecutive_failures = 3
@@ -722,23 +826,64 @@ class BuildEngine:
 
         if urban_jobs:
             await self._set_status("urbanista", "thinking")
+
+            # ── Group consecutive batchable jobs ──
+            work_units: list[dict] = []  # {"type": "single"|"batch", "indices": [int]}
+            i = 0
+            while i < len(urban_jobs):
+                job = urban_jobs[i]
+                job_tiles = len(job["tiles"])
+                if (
+                    job["btype"] in BATCHABLE_TYPES
+                    and job_tiles <= 4  # small footprint
+                ):
+                    batch_indices = [i]
+                    batch_tiles = job_tiles
+                    j = i + 1
+                    while (
+                        j < len(urban_jobs)
+                        and len(batch_indices) < MAX_BATCH_SIZE
+                        and batch_tiles + len(urban_jobs[j]["tiles"]) <= MAX_BATCH_TILES
+                        and urban_jobs[j]["btype"] in BATCHABLE_TYPES
+                        and len(urban_jobs[j]["tiles"]) <= 4
+                    ):
+                        batch_indices.append(j)
+                        batch_tiles += len(urban_jobs[j]["tiles"])
+                        j += 1
+                    if len(batch_indices) >= 2:
+                        work_units.append({"type": "batch", "indices": batch_indices})
+                        i = j
+                        continue
+                work_units.append({"type": "single", "indices": [i]})
+                i += 1
+
+            batch_count = sum(1 for wu in work_units if wu["type"] == "batch")
+            batched_buildings = sum(len(wu["indices"]) for wu in work_units if wu["type"] == "batch")
             await self._chat(
                 "urbanista",
                 "info",
-                f"Designing {len(urban_jobs)} structures (max {URBANISTA_MAX_CONCURRENT} concurrent) — placing as each completes...",
+                f"Designing {len(urban_jobs)} structures (max {URBANISTA_MAX_CONCURRENT} concurrent)"
+                + (f" — {batched_buildings} batched into {batch_count} calls" if batch_count else "")
+                + " — placing as each completes...",
             )
 
-            # Wrap each task to carry its index
-            async def _design_with_index(idx: int, prompt: str) -> tuple[int, dict | BaseException]:
-                try:
-                    result = await self.generators.urbanista_generate_bounded(prompt)
-                    return (idx, result)
-                except BaseException as err:
-                    return (idx, err)
+            # Wrap each work unit to carry its index
+            async def _design_work_unit(wu_idx: int, work_unit: dict) -> tuple[int, list[tuple[int, dict | BaseException]]]:
+                """Returns (wu_idx, [(job_idx, result_or_error), ...])."""
+                indices = work_unit["indices"]
+                if work_unit["type"] == "batch" and len(indices) >= 2:
+                    return await self._execute_batch_urbanista(wu_idx, work_unit, urban_jobs)
+                else:
+                    job_idx = indices[0]
+                    try:
+                        result = await self.generators.urbanista_generate_bounded(urban_jobs[job_idx]["prompt"])
+                        return (wu_idx, [(job_idx, result)])
+                    except BaseException as err:
+                        return (wu_idx, [(job_idx, err)])
 
             pending = [
-                asyncio.create_task(_design_with_index(i, job["prompt"]))
-                for i, job in enumerate(urban_jobs)
+                asyncio.create_task(_design_work_unit(wu_i, wu))
+                for wu_i, wu in enumerate(work_units)
             ]
 
             try:
@@ -746,232 +891,231 @@ class BuildEngine:
                 if not self.running:
                     break
 
-                idx, arch_result = await coro
-                job = urban_jobs[idx]
-                name = job["name"]
-                placed_count += 1
-                logger.info(
-                    "Streaming result %d/%d: %s — type=%s keys=%s",
-                    placed_count, len(urban_jobs), name,
-                    type(arch_result).__name__,
-                    sorted(arch_result.keys()) if isinstance(arch_result, dict) else "N/A",
-                )
+                wu_idx, job_results = await coro
 
-                # --- Per-structure error recovery: skip failures, pause only if excessive ---
-                if isinstance(arch_result, AgentGenerationError):
-                    consecutive_failures += 1
-                    skipped += 1
-                    logger.warning(
-                        "Urbanista failed for %s (%s): %s — skipping",
-                        name, arch_result.pause_reason, (arch_result.pause_detail or "")[:200],
+                for idx, arch_result in job_results:
+                    if not self.running:
+                        break
+
+                    job = urban_jobs[idx]
+                    name = job["name"]
+                    placed_count += 1
+                    logger.info(
+                        "Streaming result %d/%d: %s — type=%s keys=%s",
+                        placed_count, len(urban_jobs), name,
+                        type(arch_result).__name__,
+                        sorted(arch_result.keys()) if isinstance(arch_result, dict) else "N/A",
                     )
-                    await self._chat("urbanista", "info", f"Skipped {name} — design failed ({arch_result.pause_reason}). Continuing.")
-                    if consecutive_failures >= max_consecutive_failures:
+
+                    # --- Per-structure error recovery: skip failures, pause only if excessive ---
+                    if isinstance(arch_result, AgentGenerationError):
+                        consecutive_failures += 1
+                        skipped += 1
+                        logger.warning(
+                            "Urbanista failed for %s (%s): %s — skipping",
+                            name, arch_result.pause_reason, (arch_result.pause_detail or "")[:200],
+                        )
+                        await self._chat("urbanista", "info", f"Skipped {name} — design failed ({arch_result.pause_reason}). Continuing.")
+                        if consecutive_failures >= max_consecutive_failures:
+                            for t in pending:
+                                if not t.done():
+                                    t.cancel()
+                            await self._pause_for_api_issue(
+                                arch_result.pause_reason,
+                                f"{max_consecutive_failures} consecutive failures — last: {arch_result.pause_detail or ''}",
+                                "urbanista",
+                            )
+                            return False
+                        continue
+                    if isinstance(arch_result, BaseException):
                         for t in pending:
                             if not t.done():
                                 t.cancel()
-                        await self._pause_for_api_issue(
-                            arch_result.pause_reason,
-                            f"{max_consecutive_failures} consecutive failures — last: {arch_result.pause_detail or ''}",
-                            "urbanista",
-                        )
-                        return False
-                    continue
-                if isinstance(arch_result, BaseException):
-                    for t in pending:
-                        if not t.done():
-                            t.cancel()
-                    raise arch_result
-                consecutive_failures = 0
+                        raise arch_result
+                    consecutive_failures = 0
 
-                tiles = job["tiles"]
-                hist_note = job["hist_note"]
-                hist_result = job["hist_result"]
-                anchor_x = job["anchor_x"]
-                anchor_y = job["anchor_y"]
+                    tiles = job["tiles"]
+                    hist_note = job["hist_note"]
+                    hist_result = job["hist_result"]
+                    anchor_x = job["anchor_x"]
+                    anchor_y = job["anchor_y"]
 
-                try:
-                    arch_result = sanitize_urbanista_output(arch_result)
-                    validate_urbanista_arch_result(arch_result)
-                except UrbanistaValidationError as err:
-                    skipped += 1
-                    logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
-                    await self._chat("urbanista", "info", f"Skipped {name} — validation error. Continuing.")
-                    continue
+                    try:
+                        arch_result = sanitize_urbanista_output(arch_result)
+                        validate_urbanista_arch_result(arch_result)
+                    except UrbanistaValidationError as err:
+                        skipped += 1
+                        logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
+                        await self._chat("urbanista", "info", f"Skipped {name} — validation error. Continuing.")
+                        continue
 
-                # ── Geometry collision check — detect and fix overlapping components ──
-                anchor_tile = None
-                for td in arch_result.get("tiles", []):
-                    if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
-                        anchor_tile = td
-                        break
-                if anchor_tile and job["btype"] not in OPEN_TERRAIN_TYPES:
-                    fp_w = round((max(t["x"] for t in tiles) - min(t["x"] for t in tiles) + 1) * 0.9, 2)
-                    fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * 0.9, 2)
-                    collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
-                    if collisions:
-                        collision_report = "\n".join(collisions[:6])  # Cap at 6 to keep prompt short
-                        logger.warning("Geometry collisions for %s: %d issues", name, len(collisions))
-                        await self._chat("urbanista", "info",
-                            f"Geometry issues in {name}: {len(collisions)} collision(s). Requesting fix...")
-                        # Quick fix attempt (5 min max, no retry) — if it fails, use original
-                        fix_prompt = (
-                            f"GEOMETRY FIX for {name} ({fp_w}x{fp_d} footprint):\n"
-                            f"{collision_report}\n\n"
-                            f"RULES:\n"
-                            f"- foundation (podium) is the base — structural sits ABOVE it\n"
-                            f"- Do NOT put colonnade + walls + block all as structural — they overlap!\n"
-                            f"- colonnade wraps the EXTERIOR; walls/cella are INSIDE (use infill role)\n"
-                            f"- Roof sits above the highest structural component\n"
-                            f"- decorative (doors, pilasters) go on the facade, NOT filling the volume\n\n"
-                            f"Return the CORRECTED JSON. Same format, same design, fixed geometry."
-                        )
-                        try:
-                            fixed = await asyncio.wait_for(
-                                self.urbanista.generate(fix_prompt),
-                                timeout=300,  # 5 min max for geometry fix
-                            )
-                            fixed = sanitize_urbanista_output(fixed)
-                            validate_urbanista_arch_result(fixed)
-                            fixed_anchor = None
-                            for td in fixed.get("tiles", []):
-                                if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
-                                    fixed_anchor = td
-                                    break
-                            if fixed_anchor:
-                                new_collisions = check_component_collisions(fixed_anchor["spec"], fp_w, fp_d)
-                                if len(new_collisions) < len(collisions):
-                                    arch_result = fixed
-                                    logger.info("Geometry fix for %s: %d→%d collisions", name, len(collisions), len(new_collisions))
-                                    await self._chat("urbanista", "info",
-                                        f"Fixed {name}: {len(collisions)}→{len(new_collisions)} collision(s)")
-                                else:
-                                    logger.info("Geometry fix for %s did not improve (%d→%d) — using original", name, len(collisions), len(new_collisions))
-                            else:
-                                arch_result = fixed
-                        except asyncio.TimeoutError:
-                            logger.warning("Geometry fix for %s timed out (5min) — using original", name)
-                        except Exception as fix_err:
-                            logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
-
-                await self._set_status("urbanista", "speaking")
-                commentary = arch_result.get("commentary", "Design ready.")
-                if len(commentary) > 400:
-                    commentary = commentary[:397] + "..."
-                await self._chat("urbanista", "design", commentary)
-                await self._set_status("urbanista", "thinking" if placed_count < len(urban_jobs) else "idle")
-
-                # Place tiles — ensure multi-tile buildings have anchors
-                final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []))
-                if not final_tiles:
-                    skipped += 1
-                    logger.warning("Urbanista returned no in-bounds tiles for %s — skipping", name)
-                    await self._chat("urbanista", "info", f"Skipped {name} — no valid tiles. Continuing.")
-                    continue
-
-                # Auto-fill: if Urbanista returned fewer tiles than the survey
-                # (because we told large buildings to output only the anchor), fill the rest
-                survey_coords = {(t["x"], t["y"]) for t in tiles}
-                returned_coords = {(td.get("x"), td.get("y")) for td in final_tiles}
-                missing_coords = survey_coords - returned_coords
-                if missing_coords and len(final_tiles) >= 1:
-                    template_td = final_tiles[0]
-                    for td in final_tiles:
-                        if td.get("x") == anchor_x and td.get("y") == anchor_y:
-                            template_td = td
+                    # ── Geometry collision check — detect and fix overlapping components ──
+                    anchor_tile = None
+                    for td in arch_result.get("tiles", []):
+                        if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
+                            anchor_tile = td
                             break
-                    is_terrain = job["btype"] in OPEN_TERRAIN_TYPES
-                    for (mx, my) in missing_coords:
-                        if is_terrain:
-                            sec_tile = {
-                                "x": mx, "y": my,
-                                "terrain": job["btype"],
-                                "building_name": template_td.get("building_name", name),
-                                "building_type": job["btype"],
-                                "description": f"Part of {name}",
-                                "elevation": avg_elevation,
-                            }
-                            # Copy scenery spec from template if present
-                            t_spec = template_td.get("spec")
-                            if t_spec and isinstance(t_spec, dict):
-                                sec_tile["spec"] = {k: v for k, v in t_spec.items() if k != "anchor"}
-                            # Copy color from template
-                            if template_td.get("color"):
-                                sec_tile["color"] = template_td["color"]
-                        else:
-                            sec_tile = {
-                                "x": mx, "y": my,
-                                "terrain": "building",
-                                "building_name": template_td.get("building_name", name),
-                                "building_type": template_td.get("building_type", job["btype"]),
-                                "description": f"Part of {name}",
-                                "elevation": avg_elevation,
-                                "spec": {"anchor": {"x": anchor_x, "y": anchor_y}},
-                            }
-                        final_tiles.append(sec_tile)
-                    logger.info("Auto-filled %d secondary tiles for %s (%s)", len(missing_coords), name, job["btype"])
+                    if anchor_tile and job["btype"] not in OPEN_TERRAIN_TYPES:
+                        fp_w = round((max(t["x"] for t in tiles) - min(t["x"] for t in tiles) + 1) * 0.9, 2)
+                        fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * 0.9, 2)
+                        collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
+                        if collisions:
+                            collision_report = "\n".join(collisions[:6])
+                            logger.warning("Geometry collisions for %s: %d issues", name, len(collisions))
+                            await self._chat("urbanista", "info",
+                                f"Geometry issues in {name}: {len(collisions)} collision(s). Requesting fix...")
+                            fix_prompt = (
+                                f"GEOMETRY FIX for {name} ({fp_w}x{fp_d} footprint):\n"
+                                f"{collision_report}\n\n"
+                                f"RULES:\n"
+                                f"- foundation (podium) is the base — structural sits ABOVE it\n"
+                                f"- Do NOT put colonnade + walls + block all as structural — they overlap!\n"
+                                f"- colonnade wraps the EXTERIOR; walls/cella are INSIDE (use infill role)\n"
+                                f"- Roof sits above the highest structural component\n"
+                                f"- decorative (doors, pilasters) go on the facade, NOT filling the volume\n\n"
+                                f"Return the CORRECTED JSON. Same format, same design, fixed geometry."
+                            )
+                            try:
+                                fixed = await asyncio.wait_for(
+                                    self.urbanista.generate(fix_prompt),
+                                    timeout=300,
+                                )
+                                fixed = sanitize_urbanista_output(fixed)
+                                validate_urbanista_arch_result(fixed)
+                                fixed_anchor = None
+                                for td in fixed.get("tiles", []):
+                                    if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
+                                        fixed_anchor = td
+                                        break
+                                if fixed_anchor:
+                                    new_collisions = check_component_collisions(fixed_anchor["spec"], fp_w, fp_d)
+                                    if len(new_collisions) < len(collisions):
+                                        arch_result = fixed
+                                        logger.info("Geometry fix for %s: %d->%d collisions", name, len(collisions), len(new_collisions))
+                                        await self._chat("urbanista", "info",
+                                            f"Fixed {name}: {len(collisions)}->{len(new_collisions)} collision(s)")
+                                    else:
+                                        logger.info("Geometry fix for %s did not improve (%d->%d) — using original", name, len(collisions), len(new_collisions))
+                                else:
+                                    arch_result = fixed
+                            except asyncio.TimeoutError:
+                                logger.warning("Geometry fix for %s timed out (5min) — using original", name)
+                            except Exception as fix_err:
+                                logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
 
-                # Inject anchors for multi-tile buildings if AI didn't set them (not for procedural terrain)
-                if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
+                    await self._set_status("urbanista", "speaking")
+                    commentary = arch_result.get("commentary", "Design ready.")
+                    if len(commentary) > 400:
+                        commentary = commentary[:397] + "..."
+                    await self._chat("urbanista", "design", commentary)
+                    await self._set_status("urbanista", "thinking" if placed_count < len(urban_jobs) else "idle")
+
+                    # Place tiles
+                    final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []))
+                    if not final_tiles:
+                        skipped += 1
+                        logger.warning("Urbanista returned no in-bounds tiles for %s — skipping", name)
+                        await self._chat("urbanista", "info", f"Skipped {name} — no valid tiles. Continuing.")
+                        continue
+
+                    # Auto-fill secondary tiles
+                    survey_coords = {(t["x"], t["y"]) for t in tiles}
+                    returned_coords = {(td.get("x"), td.get("y")) for td in final_tiles}
+                    missing_coords = survey_coords - returned_coords
+                    if missing_coords and len(final_tiles) >= 1:
+                        template_td = final_tiles[0]
+                        for td in final_tiles:
+                            if td.get("x") == anchor_x and td.get("y") == anchor_y:
+                                template_td = td
+                                break
+                        is_terrain = job["btype"] in OPEN_TERRAIN_TYPES
+                        for (mx, my) in missing_coords:
+                            if is_terrain:
+                                sec_tile = {
+                                    "x": mx, "y": my,
+                                    "terrain": job["btype"],
+                                    "building_name": template_td.get("building_name", name),
+                                    "building_type": job["btype"],
+                                    "description": f"Part of {name}",
+                                    "elevation": avg_elevation,
+                                }
+                                t_spec = template_td.get("spec")
+                                if t_spec and isinstance(t_spec, dict):
+                                    sec_tile["spec"] = {k: v for k, v in t_spec.items() if k != "anchor"}
+                                if template_td.get("color"):
+                                    sec_tile["color"] = template_td["color"]
+                            else:
+                                sec_tile = {
+                                    "x": mx, "y": my,
+                                    "terrain": "building",
+                                    "building_name": template_td.get("building_name", name),
+                                    "building_type": template_td.get("building_type", job["btype"]),
+                                    "description": f"Part of {name}",
+                                    "elevation": avg_elevation,
+                                    "spec": {"anchor": {"x": anchor_x, "y": anchor_y}},
+                                }
+                            final_tiles.append(sec_tile)
+                        logger.info("Auto-filled %d secondary tiles for %s (%s)", len(missing_coords), name, job["btype"])
+
+                    # Inject anchors for multi-tile buildings
+                    if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
+                        for td in final_tiles:
+                            if not td.get("spec"):
+                                td["spec"] = {}
+                            if not td["spec"].get("anchor"):
+                                td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
+
+                    # Nest grammar data into spec
                     for td in final_tiles:
-                        if not td.get("spec"):
-                            td["spec"] = {}
-                        if not td["spec"].get("anchor"):
-                            td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
+                        g = td.pop("grammar", None)
+                        gp = td.pop("grammar_params", None)
+                        if g:
+                            if not td.get("spec"):
+                                td["spec"] = {}
+                            td["spec"]["grammar"] = g
+                            if gp:
+                                td["spec"]["params"] = gp
 
-                # Nest grammar data into spec so it survives Tile storage
-                # (Tile dataclass has no grammar/grammar_params fields — they'd be lost).
-                # The renderer checks spec.grammar, not tile-level grammar.
-                for td in final_tiles:
-                    g = td.pop("grammar", None)
-                    gp = td.pop("grammar_params", None)
-                    if g:
-                        if not td.get("spec"):
-                            td["spec"] = {}
-                        td["spec"]["grammar"] = g
-                        if gp:
-                            td["spec"]["params"] = gp
+                    placed = []
+                    district_elev = district.get("elevation", 0.0)
+                    for td in final_tiles:
+                        x, y = td.get("x"), td.get("y")
+                        if x is not None and y is not None:
+                            if "elevation" not in td or td["elevation"] is None:
+                                td["elevation"] = district_elev
+                            td["period"] = district.get("period", "")
+                            td["placed_by"] = "faber"
+                            td["historical_note"] = hist_result.get("historical_note", hist_note)
+                            if self.world.place_tile(x, y, td):
+                                tile = self.world.get_tile(x, y)
+                                if tile:
+                                    placed.append(tile.to_dict())
 
-                placed = []
-                district_elev = district.get("elevation", 0.0)
-                for td in final_tiles:
-                    x, y = td.get("x"), td.get("y")
-                    if x is not None and y is not None:
-                        if "elevation" not in td or td["elevation"] is None:
-                            td["elevation"] = district_elev
-                        td["period"] = district.get("period", "")
-                        td["placed_by"] = "faber"
-                        td["historical_note"] = hist_result.get("historical_note", hist_note)
-                        if self.world.place_tile(x, y, td):
-                            tile = self.world.get_tile(x, y)
-                            if tile:
-                                placed.append(tile.to_dict())
+                    # Record design in style memory
+                    for td_placed in placed:
+                        if td_placed.get("spec"):
+                            self.style_memory.record_design(td_placed.get("spec", {}))
 
-                # Record design in style memory for coherence tracking
-                for td_placed in placed:
-                    if td_placed.get("spec"):
-                        self.style_memory.record_design(td_placed.get("spec", {}))
+                    logger.info("Placing %d tiles for %s", len(placed), name)
+                    if placed:
+                        await self.broadcast({
+                            "type": "tile_update", "tiles": placed,
+                            "turn": self.world.turn,
+                            "period": district.get("period", ""),
+                            "year": district.get("year", ""),
+                        })
+                        await self.broadcast({
+                            "type": "build_progress",
+                            "structure": name,
+                            "building_type": job["btype"],
+                            "done": placed_count,
+                            "total": len(urban_jobs),
+                            "district": district_key,
+                        })
 
-                logger.info("Placing %d tiles for %s", len(placed), name)
-                if placed:
-                    await self.broadcast({
-                        "type": "tile_update", "tiles": placed,
-                        "turn": self.world.turn,
-                        "period": district.get("period", ""),
-                        "year": district.get("year", ""),
-                    })
-                    await self.broadcast({
-                        "type": "build_progress",
-                        "structure": name,
-                        "building_type": job["btype"],
-                        "done": placed_count,
-                        "total": len(urban_jobs),
-                        "district": district_key,
-                    })
-
-                self.world.turn += 1
-                await self.tasks.persist_progress_after_structure()
-                await asyncio.sleep(0.05)  # Brief yield for UI rendering
+                    self.world.turn += 1
+                    await self.tasks.persist_progress_after_structure()
+                    await asyncio.sleep(0.05)  # Brief yield for UI rendering
 
             finally:
                 # Cancel any still-running tasks (pause, error, or normal completion)
@@ -1003,6 +1147,76 @@ class BuildEngine:
             )
 
         return True
+
+    async def _execute_batch_urbanista(
+        self,
+        wu_idx: int,
+        work_unit: dict,
+        urban_jobs: list[dict],
+    ) -> tuple[int, list[tuple[int, dict | BaseException]]]:
+        """Execute a batched Urbanista call for 2-3 small buildings.
+
+        Constructs a combined prompt, calls generate_batch(), and splits
+        the results back to individual jobs. On batch failure, falls back
+        to individual calls so no buildings are lost.
+        """
+        indices = work_unit["indices"]
+        jobs = [urban_jobs[i] for i in indices]
+        names = [j["name"] for j in jobs]
+
+        logger.info("Batch Urbanista: %d buildings [%s]", len(indices), ", ".join(names))
+
+        # Build combined prompt
+        batch_prompt_parts = [
+            f"Design these {len(jobs)} buildings. Return a JSON array with one object per building.\n"
+            f"Each object should have the same format as a single-building response "
+            f"(tiles[], commentary, reference).\n\n"
+        ]
+        for bi, job in enumerate(jobs):
+            batch_prompt_parts.append(f"--- BUILDING {bi + 1}: {job['name']} ---\n{job['prompt']}\n")
+
+        batch_prompt = "\n".join(batch_prompt_parts)
+
+        try:
+            async with self.generators._urbanista_semaphore:
+                results = await self.urbanista.generate_batch(batch_prompt, len(jobs))
+        except Exception as e:
+            logger.warning("Batch Urbanista call failed: %s — falling back to individual", e)
+            results = []
+
+        # If batch returned correct count, map results to jobs
+        if len(results) >= len(jobs):
+            logger.info("Batch Urbanista success: got %d results for %d jobs", len(results), len(jobs))
+            return (wu_idx, [(indices[i], results[i]) for i in range(len(jobs))])
+
+        if results:
+            # Partial results — use what we got, fall back for the rest
+            logger.warning(
+                "Batch Urbanista partial: got %d results for %d jobs — using partial + fallback",
+                len(results), len(jobs),
+            )
+            out: list[tuple[int, dict | BaseException]] = []
+            for i in range(len(results)):
+                out.append((indices[i], results[i]))
+            for i in range(len(results), len(jobs)):
+                try:
+                    async with self.generators._urbanista_semaphore:
+                        r = await self.urbanista.generate(urban_jobs[indices[i]]["prompt"])
+                    out.append((indices[i], r))
+                except BaseException as err:
+                    out.append((indices[i], err))
+            return (wu_idx, out)
+
+        # Full batch failure — fall back to individual calls
+        logger.warning("Batch Urbanista empty — falling back to %d individual calls", len(jobs))
+        out = []
+        for i, job_idx in enumerate(indices):
+            try:
+                r = await self.generators.urbanista_generate_bounded(urban_jobs[job_idx]["prompt"])
+                out.append((job_idx, r))
+            except BaseException as err:
+                out.append((job_idx, err))
+        return (wu_idx, out)
 
     async def _chat(self, sender, msg_type, content, approved=None):
         msg = BusMessage(sender=sender, msg_type=msg_type, content=content, turn=self.world.turn)

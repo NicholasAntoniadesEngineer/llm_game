@@ -56,9 +56,22 @@ def format_building_types() -> str:
 
 
 def format_material_palette() -> str:
-    """Format material_palette.json into a prompt-ready key=value string."""
+    """Format material_palette.json into a compact prompt-ready string.
+
+    Uses short notation: name=#hex,r=roughness,m=metalness
+    This saves ~500 tokens vs the full dict representation.
+    """
     palette = load_data("material_palette")
-    return " ".join(f"{name}={hex}" for name, hex in palette.items())
+    parts = []
+    for name, props in palette.items():
+        if isinstance(props, dict):
+            hex_val = props.get("hex") or props.get("color", "")
+            r = props.get("roughness", 0.5)
+            m = props.get("metalness", 0.01)
+            parts.append(f"{name}={hex_val},r{r},m{m}")
+        else:
+            parts.append(f"{name}={props}")
+    return " ".join(parts)
 
 
 def format_pbr_hint(building_type: str) -> str:

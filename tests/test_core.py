@@ -325,6 +325,91 @@ class TestTokenUsageStore:
         assert store.to_payload() == {}
 
 
+class TestTokenUsageCallCount:
+    def test_call_count_starts_at_zero(self):
+        store = TokenUsageStore()
+        assert store.call_count("urbanista") == 0
+
+    def test_call_count_increments(self):
+        store = TokenUsageStore()
+        for _ in range(5):
+            store.record(
+                agent_key="urbanista",
+                provider="cli",
+                model="haiku",
+                prompt_tokens=10,
+                completion_tokens=5,
+                total_tokens=15,
+                exact=False,
+            )
+        assert store.call_count("urbanista") == 5
+
+    def test_call_count_per_agent(self):
+        store = TokenUsageStore()
+        store.record(agent_key="a", provider="p", model="m", prompt_tokens=10,
+                     completion_tokens=5, total_tokens=15, exact=True)
+        store.record(agent_key="a", provider="p", model="m", prompt_tokens=10,
+                     completion_tokens=5, total_tokens=15, exact=True)
+        store.record(agent_key="b", provider="p", model="m", prompt_tokens=10,
+                     completion_tokens=5, total_tokens=15, exact=True)
+        assert store.call_count("a") == 2
+        assert store.call_count("b") == 1
+
+
+class TestGetTokenSummary:
+    def test_empty_summary(self):
+        from core.token_usage import get_token_summary, STORE
+        # Save and restore state
+        old_last = STORE._last_by_agent.copy()
+        old_totals = STORE._totals_by_agent.copy()
+        old_counts = STORE._call_counts.copy()
+        STORE._last_by_agent.clear()
+        STORE._totals_by_agent.clear()
+        STORE._call_counts.clear()
+        try:
+            summary = get_token_summary()
+            assert "agents" in summary
+            assert "by_group" in summary
+            assert "avg_tokens_per_building" in summary
+            assert "estimated_cost_usd" in summary
+            assert summary["avg_tokens_per_building"] == 0
+            assert summary["urbanista_calls"] == 0
+        finally:
+            STORE._last_by_agent = old_last
+            STORE._totals_by_agent = old_totals
+            STORE._call_counts = old_counts
+
+    def test_summary_with_data(self):
+        from core.token_usage import get_token_summary, STORE
+        old_last = STORE._last_by_agent.copy()
+        old_totals = STORE._totals_by_agent.copy()
+        old_counts = STORE._call_counts.copy()
+        STORE._last_by_agent.clear()
+        STORE._totals_by_agent.clear()
+        STORE._call_counts.clear()
+        try:
+            STORE.record(
+                agent_key="urbanista",
+                provider="cli",
+                model="haiku",
+                prompt_tokens=1000,
+                completion_tokens=500,
+                total_tokens=1500,
+                exact=True,
+            )
+            summary = get_token_summary()
+            assert summary["urbanista_calls"] == 1
+            assert summary["avg_tokens_per_building"] == 1500
+            assert summary["total_tokens"] == 1500
+            assert summary["estimated_cost_usd"] > 0
+            assert "urbanista" in summary["by_group"]
+            assert summary["by_group"]["urbanista"]["call_count"] == 1
+        finally:
+            STORE._last_by_agent = old_last
+            STORE._totals_by_agent = old_totals
+            STORE._call_counts = old_counts
+
+
 class TestEstimateTokens:
     def test_empty_string(self):
         assert estimate_tokens_from_text("") == 0

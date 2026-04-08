@@ -15,7 +15,7 @@ import time
 from agents import llm_routing as llm_agents
 from agents.memory import ConversationMemory, KnowledgeBase
 from agents.providers import LlmProvider, build_provider_from_spec
-from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text
+from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text, get_token_summary
 from core.run_log import log_event
 from core.errors import AgentGenerationError, classify_agent_failure
 
@@ -84,6 +84,31 @@ def _try_decode_json_object(text: str) -> dict | None:
     return None
 
 
+def _try_decode_json_array(text: str) -> list | None:
+    """Extract the first JSON array from text that may contain prose, markdown fences, etc."""
+    if not text or not text.strip():
+        return None
+    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text).strip()
+    # Try direct parse
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, list):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    # Find first [ to last ] and try parsing
+    i = cleaned.find("[")
+    j = cleaned.rfind("]")
+    if i >= 0 and j > i:
+        try:
+            obj = json.loads(cleaned[i:j + 1])
+            if isinstance(obj, list):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 class BaseAgent:
     def __init__(
         self,
@@ -137,6 +162,122 @@ class BaseAgent:
 
         return result
 
+    async def generate_batch(self, instruction: str, count: int) -> list[dict]:
+        """Call LLM once expecting a JSON array of `count` results.
+
+        Returns a list of parsed dicts. On failure, returns an empty list
+        (caller should fall back to individual calls).
+
+        This is used for batching multiple small buildings into a single
+        Urbanista call to reduce token overhead from repeated system prompts.
+        """
+        enriched = self._prepend_memory_context(instruction)
+        prompt = (
+            enriched
+            + f"\n\nRespond with ONLY a valid JSON array of {count} objects. "
+            "No markdown, no code fences, no extra text. Start with '[' and end with ']'."
+        )
+
+        try:
+            spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
+            model = spec["model"]
+            provider_kind = str(spec.get("provider") or "claude_cli")
+            provider = (
+                self._provider_override
+                if self._provider_override is not None
+                else build_provider_from_spec(spec)
+            )
+
+            sys_tokens_est = estimate_tokens_from_text(self.system_prompt)
+            inst_tokens_est = estimate_tokens_from_text(prompt)
+            logger.info(
+                "LLM batch query → | role=%s agent_key=%s | batch_size=%d | "
+                "total_prompt ~%d tok",
+                self.role,
+                self.llm_agent_key,
+                count,
+                sys_tokens_est + inst_tokens_est,
+            )
+
+            _t0 = time.monotonic()
+            raw = await provider.complete(
+                role=self.role,
+                system_prompt=self.system_prompt,
+                user_text=prompt,
+                model=model,
+            )
+            _elapsed_ms = int((time.monotonic() - _t0) * 1000)
+
+            # Token tracking
+            prompt_tokens_est = sys_tokens_est + inst_tokens_est
+            completion_tokens_est = estimate_tokens_from_text(raw)
+            prompt_tokens = prompt_tokens_est
+            completion_tokens = completion_tokens_est
+            total_tokens = prompt_tokens + completion_tokens
+            exact = False
+            usage = getattr(provider, "last_usage", None)
+            if isinstance(usage, dict):
+                pt = usage.get("prompt_tokens")
+                ct = usage.get("completion_tokens")
+                tt = usage.get("total_tokens")
+                if isinstance(pt, int) and isinstance(ct, int):
+                    prompt_tokens = max(0, pt)
+                    completion_tokens = max(0, ct)
+                    total_tokens = max(0, int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens))
+                    exact = True
+            TOKEN_USAGE_STORE.record(
+                agent_key=self.llm_agent_key,
+                provider=provider_kind,
+                model=str(model or ""),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                exact=exact,
+            )
+            await self._broadcast_token_usage()
+
+            logger.info(
+                "LLM batch reply ← | role=%s | batch_size=%d | response_chars=%s | "
+                "total_tokens=%s (%s) | %sms",
+                self.role, count, len(raw),
+                total_tokens, "exact" if exact else "estimated", _elapsed_ms,
+            )
+
+            # Parse as array
+            arr = _try_decode_json_array(raw)
+            if arr is not None and isinstance(arr, list):
+                results = [item for item in arr if isinstance(item, dict)]
+                if results:
+                    logger.info(
+                        "Batch parse OK: expected %d, got %d dicts", count, len(results)
+                    )
+                    return results
+
+            # Fallback: try parsing as single object wrapping array
+            obj = _try_decode_json_object(raw)
+            if isinstance(obj, dict):
+                # Check common wrapper keys
+                for key in ("buildings", "results", "tiles", "designs"):
+                    inner = obj.get(key)
+                    if isinstance(inner, list):
+                        results = [item for item in inner if isinstance(item, dict)]
+                        if results:
+                            logger.info(
+                                "Batch parse via wrapper key '%s': got %d dicts",
+                                key, len(results),
+                            )
+                            return results
+
+            logger.warning(
+                "Batch parse failed for %s — returning empty (caller will retry individually)",
+                self.role,
+            )
+            return []
+
+        except Exception as e:
+            logger.warning("Batch generate failed for %s: %s — returning empty", self.role, e)
+            return []
+
     def _prepend_memory_context(self, instruction: str) -> str:
         """Prepend compact memory context to an instruction if available.
 
@@ -171,15 +312,23 @@ class BaseAgent:
                 else build_provider_from_spec(spec)
             )
             inst_preview = _safe_preview_for_logs(instruction, 600)
+            # Prompt size logging in estimated tokens (helps identify wastefully large prompts)
+            sys_tokens_est = estimate_tokens_from_text(self.system_prompt)
+            inst_tokens_est = estimate_tokens_from_text(prompt)
+            total_prompt_tokens_est = sys_tokens_est + inst_tokens_est
             logger.info(
-                "LLM query → | role=%s agent_key=%s | provider=%s model=%s | system=%s instruction=%s user_msg=%s chars",
+                "LLM query → | role=%s agent_key=%s | provider=%s model=%s | "
+                "system=%s chars (~%d tok) instruction=%s chars (~%d tok) | "
+                "total_prompt ~%d tok",
                 self.role,
                 self.llm_agent_key,
                 provider_kind,
                 model,
                 len(self.system_prompt),
-                len(instruction),
+                sys_tokens_est,
                 len(prompt),
+                inst_tokens_est,
+                total_prompt_tokens_est,
             )
             logger.info("LLM query instruction preview [%s]:\n%s", self.role, inst_preview)
             # Broadcast prompt to UI
@@ -337,6 +486,7 @@ class BaseAgent:
                         "type": "token_usage",
                         "by_ui_agent": aggregate_for_ui(),
                         "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
+                        "summary": get_token_summary(),
                     }
                 )
         except Exception:

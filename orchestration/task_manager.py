@@ -103,11 +103,13 @@ class TaskManager:
                     # Only broadcast when totals have changed since the last send.
                     if current_totals != prev_totals:
                         try:
+                            from core.token_usage import get_token_summary
                             await self.broadcast(
                                 {
                                     "type": "token_usage",
                                     "by_ui_agent": token_aggregate_for_ui(),
                                     "by_llm_key": payload,
+                                    "summary": get_token_summary(),
                                 }
                             )
                         except Exception:
