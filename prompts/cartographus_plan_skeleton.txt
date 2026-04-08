@@ -40,7 +40,7 @@ Respond with ONLY valid JSON:
 }}
 
 GEOGRAPHY RULES:
-- "hills": Array of hills/elevated areas. cx,cy = center in tile coords (grid is {GRID_WIDTH}x{GRID_HEIGHT}). radius = spread in tiles. peak = height (0.5=gentle rise, 3-5=major hill, 8+=mountain). Research the REAL topography.
+- "hills": Array of hills/elevated areas. cx,cy = center in tile coords (grid is {GRID_WIDTH}x{GRID_HEIGHT}). radius = spread in tiles. peak = height in building-heights (0.3=gentle rise, 0.8-1.5=notable hill, 2-3=major hill, 4=steep cliff). Buildings are ~1 unit tall, so peak=2 means a hill twice building height. Research REAL topography but keep peaks under 4.
 - "water": Rivers as polylines [[x,y],...] crossing the grid. type = "river"|"sea"|"lake". Points trace the waterway through the grid. Also coastlines if coastal city.
 - Materials: Research what stone/brick/roof the real city used. Different cultures used different materials.
 - EVERY city has geography. Flat cities have rivers/canals. Mountain cities have peaks. Coastal cities have harbors. Research and include it.

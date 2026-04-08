@@ -1512,15 +1512,17 @@ class WorldRenderer {
                         }
                     }
                 }
-                // Buildings get flat platforms at their elevation
-                if (maxBuildingElev !== null) {
+                // When hills data exists, ALWAYS use gaussian elevation as the authority.
+                // Building tiles should sit ON the hill surface, not create sinkholes
+                // from mismatched AI-specified elevation values.
+                if (hasHills) {
+                    row.push(baseElev);
+                } else if (maxBuildingElev !== null) {
                     row.push(maxBuildingElev);
-                } else if (n > 0 && !hasHills) {
-                    // No hills data: use tile averages (original behavior)
+                } else if (n > 0) {
                     row.push(sum / n);
                 } else {
-                    // Hills data: use gaussian elevation
-                    row.push(baseElev);
+                    row.push(0);
                 }
             }
             H.push(row);

@@ -834,7 +834,16 @@ class BuildEngine:
             footprint_d = round(tile_d * 0.9, 2)
             anchor_x, anchor_y = min(xs), min(ys)
 
-            tile_elevations = [t.get("elevation", district.get("elevation", 0.0)) for t in tiles]
+            # Compute elevation from blueprint hills (authoritative) instead of AI-specified values
+            # which are on a different scale. This prevents buildings creating sinkholes in terrain.
+            if self.blueprint and self.blueprint.hills:
+                from world.roads import compute_elevation as _compute_elev
+                tile_elevations = [
+                    round(_compute_elev(self.blueprint.hills, t["x"], t["y"]), 2)
+                    for t in tiles
+                ]
+            else:
+                tile_elevations = [t.get("elevation", district.get("elevation", 0.0)) for t in tiles]
             avg_elevation = round(sum(tile_elevations) / len(tile_elevations), 2) if tile_elevations else 0.0
 
             env_note = (structure.get("environment_note") or "").strip()
@@ -849,12 +858,15 @@ class BuildEngine:
                     physical_desc=physical_desc,
                 )
                 placed_terrain = []
-                district_elev = district.get("elevation", 0.0)
                 for td in terrain_result.get("tiles", []):
                     x, y = td.get("x"), td.get("y")
                     if x is not None and y is not None:
-                        if "elevation" not in td or td["elevation"] is None:
-                            td["elevation"] = district_elev
+                        # Use hill gaussian for elevation (authoritative)
+                        if self.blueprint and self.blueprint.hills:
+                            from world.roads import compute_elevation as _ce
+                            td["elevation"] = round(_ce(self.blueprint.hills, x, y), 2)
+                        elif "elevation" not in td or td["elevation"] is None:
+                            td["elevation"] = district.get("elevation", 0.0)
                         td["period"] = district.get("period", "")
                         td["placed_by"] = "faber"
                         td["historical_note"] = hist_note
