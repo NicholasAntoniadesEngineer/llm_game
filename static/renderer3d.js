@@ -195,8 +195,10 @@ class WorldRenderer {
         // District label sprites — floating text above each district center
         this._districtLabelsGroup = new THREE.Group();
         this._districtLabelsGroup.name = "districtLabels";
+        this._districtLabelsGroup.visible = false; // Hidden by default — shown on hover
         this.scene.add(this._districtLabelsGroup);
-        this._districtLabelsVisible = true;
+        this._districtLabelsVisible = false;
+        this._districtRegions = []; // {name, x1, y1, x2, y2, sprite} for hover detection
 
         // Camera orbit
         this.cameraAngle = Math.PI / 4;
@@ -5951,6 +5953,17 @@ class WorldRenderer {
             }
         }
         if (tooltip) tooltip.style.display = "none";
+
+        // District label hover — show label when mouse is over a district region
+        if (this._districtRegions && this._districtRegions.length > 0) {
+            // Raycast against ground plane to get world position
+            const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+            const worldPoint = new THREE.Vector3();
+            this.raycaster.ray.intersectPlane(groundPlane, worldPoint);
+            if (worldPoint) {
+                this._updateDistrictHover(worldPoint.x, worldPoint.z);
+            }
+        }
     }
 
     _onClick(e) {
@@ -6023,75 +6036,63 @@ class WorldRenderer {
      */
     addDistrictLabel(name, region) {
         if (!name || !region) return;
-        // Avoid duplicate labels for the same district
-        for (const child of this._districtLabelsGroup.children) {
-            if (child.userData && child.userData.districtName === name) return;
-        }
+        // Avoid duplicates
+        if (this._districtRegions.find(d => d.name === name)) return;
 
         const S = TILE_SIZE;
-        // Center of the region in world coordinates
         const cx = ((region.x1 + region.x2) / 2 + 0.5) * S;
         const cz = ((region.y1 + region.y2) / 2 + 0.5) * S;
-        // Elevation at center + offset above buildings
         const groundY = this._surfaceYAtWorldXZ ? this._surfaceYAtWorldXZ(cx, cz) : 0;
-        const labelY = groundY + S * 6;
+        const labelY = groundY + S * 1.5; // Just above buildings, not stratosphere
 
-        // Canvas text texture
+        // Small canvas label
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
-        const fontSize = 48;
+        const fontSize = 28;
         ctx.font = `bold ${fontSize}px sans-serif`;
-        const textWidth = ctx.measureText(name).width;
-        const padding = 24;
-        canvas.width = textWidth + padding * 2;
-        canvas.height = fontSize + padding * 2;
-
-        // Semi-transparent dark background
-        ctx.fillStyle = "rgba(15, 15, 30, 0.7)";
-        const radius = 12;
-        this._roundRect(ctx, 0, 0, canvas.width, canvas.height, radius);
+        const tw = ctx.measureText(name).width;
+        const pad = 10;
+        canvas.width = tw + pad * 2;
+        canvas.height = fontSize + pad * 2;
+        ctx.fillStyle = "rgba(10, 10, 25, 0.75)";
+        this._roundRect(ctx, 0, 0, canvas.width, canvas.height, 6);
         ctx.fill();
-
-        // Border
-        ctx.strokeStyle = "rgba(200, 180, 120, 0.5)";
-        ctx.lineWidth = 2;
-        this._roundRect(ctx, 1, 1, canvas.width - 2, canvas.height - 2, radius);
-        ctx.stroke();
-
-        // Text
         ctx.font = `bold ${fontSize}px sans-serif`;
-        ctx.fillStyle = "#ffffff";
+        ctx.fillStyle = "#e0d8c0";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(name, canvas.width / 2, canvas.height / 2);
 
         const texture = new THREE.CanvasTexture(canvas);
         texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-
         const spriteMat = new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: false,
-            sizeAttenuation: true,
+            map: texture, transparent: true, depthTest: false, sizeAttenuation: true, opacity: 0,
         });
         const sprite = new THREE.Sprite(spriteMat);
         sprite.position.set(cx, labelY, cz);
-
-        // Scale: proportional to region size so labels are readable at city-wide zoom
-        const regionSpan = Math.max(
-            (region.x2 - region.x1) * S,
-            (region.y2 - region.y1) * S,
-            S * 6
-        );
         const aspect = canvas.width / canvas.height;
-        const baseScale = regionSpan * 0.4;
-        sprite.scale.set(baseScale * aspect, baseScale, 1);
-
+        const scale = S * 2.5; // Modest size
+        sprite.scale.set(scale * aspect, scale, 1);
         sprite.userData = { districtName: name, region };
         sprite.renderOrder = 999;
+        sprite.visible = false; // Hidden until hover
 
         this._districtLabelsGroup.add(sprite);
+        this._districtRegions.push({
+            name, x1: region.x1, y1: region.y1, x2: region.x2, y2: region.y2, sprite,
+        });
+    }
+
+    /** Show district label when mouse is over its region. Called from _updateHover. */
+    _updateDistrictHover(worldX, worldZ) {
+        const S = TILE_SIZE;
+        const tileX = worldX / S - 0.5;
+        const tileZ = worldZ / S - 0.5;
+        for (const d of this._districtRegions) {
+            const inside = tileX >= d.x1 && tileX <= d.x2 && tileZ >= d.y1 && tileZ <= d.y2;
+            d.sprite.visible = inside;
+            d.sprite.material.opacity = inside ? 0.9 : 0;
+        }
     }
 
     /** Helper: draw a rounded rectangle path on a canvas 2D context. */
