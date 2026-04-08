@@ -106,6 +106,7 @@ def create_scenario(city_name, year):
         "year_start": year - WINDOW // 2,
         "year_end": year + WINDOW // 2,
         "ruler": "Research who ruled and what the city looked like at this exact time",
+        "climate": city.get("climate"),
     }
 
 # Default scenario (set by user selection via /api/start)

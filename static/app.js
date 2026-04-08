@@ -433,6 +433,10 @@ function handleMessage(msg) {
             }
             updatePauseButton(false);
             showPauseButton();
+            // Pass climate data to atmosphere system
+            if (msg.climate && renderer && renderer.setClimate) {
+                renderer.setClimate(msg.climate);
+            }
             break;
 
         case "token_usage":

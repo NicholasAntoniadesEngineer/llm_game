@@ -145,6 +145,8 @@ async def _handle_start_inner(city_name, year):
 
     # Broadcast scenario to all clients
     await broadcast(state.world.to_dict())
+    # Include climate data for atmosphere system
+    climate = config.SCENARIO.get("climate")
     await broadcast({
         "type": "scenario",
         "city": config.SCENARIO["location"],
@@ -152,6 +154,7 @@ async def _handle_start_inner(city_name, year):
         "year": config.SCENARIO.get("focus_year"),
         "description": config.SCENARIO.get("description", ""),
         "started_at_s": config.SCENARIO.get("started_at_s"),
+        "climate": climate,
     })
 
     # Start the engine

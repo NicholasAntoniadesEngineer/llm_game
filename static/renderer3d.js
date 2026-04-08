@@ -171,6 +171,16 @@ class WorldRenderer {
         this.scene.add(rimLight);
         this._timeOfDay = 0.35; // Default: late morning
 
+        // Unified atmosphere system (clouds, aerial perspective, stars, weather)
+        this._atmosphere = null;
+        try {
+            const AtmCtrl = window.EternalCities?.Atmosphere?.AtmosphereController;
+            if (AtmCtrl) {
+                this._atmosphere = new AtmCtrl(this.scene);
+                this._atmosphere.setTimeOfDay(this._timeOfDay);
+            }
+        } catch (e) { console.warn("Atmosphere system unavailable:", e); }
+
         // Particle system — dust motes for atmosphere
         this._dustParticles = null;
         this._dustVelocities = null;
@@ -5768,8 +5778,23 @@ class WorldRenderer {
      * Set time of day (0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 1 = midnight).
      * Adjusts sun position, color temperature, shadow intensity, and fog.
      */
+    setClimate(climate) {
+        if (this._atmosphere && climate) {
+            try { this._atmosphere.setClimate(climate); } catch (e) { console.warn("setClimate:", e); }
+        }
+    }
+
+    setWeather(name, transitionTime) {
+        if (this._atmosphere) {
+            try { this._atmosphere.setWeather(name, transitionTime || 10); } catch (e) { console.warn("setWeather:", e); }
+        }
+    }
+
     setTimeOfDay(t) {
         this._timeOfDay = t;
+        if (this._atmosphere) {
+            try { this._atmosphere.setTimeOfDay(t); } catch (e) { /* graceful */ }
+        }
         const angle = (t - 0.25) * Math.PI; // 0.25=horizon, 0.5=zenith, 0.75=horizon
         const sunY = Math.sin(angle);
         const sunX = Math.cos(angle);
@@ -6105,6 +6130,11 @@ class WorldRenderer {
     _animate() {
         requestAnimationFrame(() => this._animate());
         const now = Date.now();
+
+        // Update atmosphere system (clouds, stars, weather transitions)
+        if (this._atmosphere) {
+            try { this._atmosphere.update(1/60, this.camera); } catch (e) { /* graceful */ }
+        }
 
         // Keyboard: WASD pan; arrows + Q/E = orbit yaw + pitch; +/− zoom; R/F fine zoom
         if (this._keysDown && this._keysDown.size > 0) {
