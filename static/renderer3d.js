@@ -80,6 +80,7 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups = new Set();
+        this._constructingGroups = new Set();
         // Spatial index: anchor key → footprint bounds (maintained on tile update)
         this._anchorFootprints = new Map();
         /** @type {number[][]|null} Elevation samples at grid corners [j][i], 0..height × 0..width */
@@ -1259,6 +1260,7 @@ class WorldRenderer {
         this._meshListDirty = true;
         this._waterMeshes = [];
         this._animatingGroups.clear();
+        this._constructingGroups.clear();
         this._cornerHeights = null;
         // Clean up particles
         this._dustParticles = null;
@@ -2421,6 +2423,7 @@ class WorldRenderer {
                 return true;
             });
             this._animatingGroups.delete(oldGroup);
+            this._constructingGroups.delete(oldGroup);
         }
 
         group.traverse((c) => {
@@ -2451,7 +2454,22 @@ class WorldRenderer {
             if (c.userData && c.userData.isWater) this._waterMeshes.push(c);
         });
 
-        if (animate) {
+        if (animate && !isTerrainMesh) {
+            // Construction animation: reveal bottom-up with staggered timing
+            const constructNow = Date.now();
+            group.traverse(c => {
+                if (c.isMesh) {
+                    const baseY = c.position.y;
+                    c.userData._constructY = baseY;
+                    c.userData._constructStart = constructNow + Math.max(0, baseY) * 200; // Stagger by height
+                    c.userData._constructDuration = 1500;
+                    c.scale.y = 0.01; // Start flat
+                    c.position.y = 0;  // Start at ground
+                }
+            });
+            this._constructingGroups.add(group);
+        } else if (animate) {
+            // Terrain tiles keep the old drop-in animation
             group.userData.animStartY = elevation - 2 * S;
             group.userData.animTargetY = elevation;
             group.userData.animStart = Date.now();
@@ -5856,12 +5874,37 @@ class WorldRenderer {
             if (this._keysDown.has("f")) this.cameraDistance = this._clampCameraDistance(this.cameraDistance * 1.03);
             this._updateCamera();
         }
-        // Animate only groups that are currently dropping in
+        // Animate only groups that are currently dropping in (terrain tiles)
         for (const group of this._animatingGroups) {
             const t = Math.min(1, (now - group.userData.animStart) / 600);
             const ease = 1 - Math.pow(1 - t, 3);
             group.position.y = group.userData.animStartY + (group.userData.animTargetY - group.userData.animStartY) * ease;
             if (t >= 1) { delete group.userData.animStart; this._animatingGroups.delete(group); }
+        }
+        // Construction animation: bottom-up reveal for building groups
+        if (this._constructingGroups.size > 0) {
+            const cDone = [];
+            for (const group of this._constructingGroups) {
+                let allDone = true;
+                group.traverse(c => {
+                    if (c.isMesh && c.userData._constructStart != null) {
+                        const elapsed = now - c.userData._constructStart;
+                        if (elapsed < 0) { allDone = false; return; } // Stagger not started yet
+                        const t = Math.min(1, elapsed / c.userData._constructDuration);
+                        const ease = 1 - Math.pow(1 - t, 3); // ease-out-cubic
+                        c.scale.y = 0.01 + ease * 0.99;
+                        c.position.y = c.userData._constructY * ease;
+                        if (t < 1) { allDone = false; }
+                        else {
+                            delete c.userData._constructStart;
+                            delete c.userData._constructDuration;
+                            delete c.userData._constructY;
+                        }
+                    }
+                });
+                if (allDone) cDone.push(group);
+            }
+            for (let i = 0; i < cDone.length; i++) this._constructingGroups.delete(cDone[i]);
         }
         // Animate only tracked water meshes (river/harbor tiles)
         {
