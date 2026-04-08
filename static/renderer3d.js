@@ -1154,7 +1154,10 @@ class WorldRenderer {
     _matPBR(comp, color, defaultRoughness = 0.7, defaultMetalness = 0.02) {
         const hasR = comp != null && Number.isFinite(comp.roughness);
         const hasM = comp != null && Number.isFinite(comp.metalness);
-        const r = Math.max(0.05, Math.min(1, hasR ? Number(comp.roughness) : defaultRoughness));
+        // Micro-jitter roughness ±0.04 for natural material variation
+        if (!this._matJitterCounter) this._matJitterCounter = 0;
+        const jitter = ((++this._matJitterCounter * 2654435761 >>> 0) % 100 - 50) / 1250;
+        const r = Math.max(0.05, Math.min(1, (hasR ? Number(comp.roughness) : defaultRoughness) + jitter));
         const m = Math.max(0, Math.min(1, hasM ? Number(comp.metalness) : defaultMetalness));
 
         if (comp != null && typeof comp.map_url === "string") {
@@ -3939,6 +3942,20 @@ class WorldRenderer {
             const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
             structuralTop = Math.max(structuralTop, topY);
         }
+
+        // Ground contact shadow — prevents "floating building" look
+        const shadowW = w * 1.06;
+        const shadowD = d * 1.06;
+        const shadowGeo = new THREE.PlaneGeometry(shadowW, shadowD);
+        shadowGeo.rotateX(-Math.PI / 2);
+        const shadowMat = new THREE.MeshBasicMaterial({
+            color: 0x1a1008, transparent: true, opacity: 0.22,
+            depthWrite: false, side: THREE.DoubleSide,
+        });
+        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+        shadow.position.y = 0.003;
+        shadow.userData.isContactShadow = true;
+        group.add(shadow);
     }
 
     // Deterministic per-building variation — jitters colors AND structural numbers
