@@ -1302,6 +1302,58 @@ class WorldRenderer {
     }
 
     /**
+     * Place a simple colored box as a placeholder when a building fails to render.
+     * The box is muted terracotta with slight transparency so it is obvious but not ugly.
+     * Returns { ok: true, placeholder: true } so the caller knows a placeholder was placed.
+     */
+    _placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, errorMsg) {
+        const S = TILE_SIZE;
+        const elevation = this._surfaceYAtWorldXZ(centerX, centerZ);
+
+        // Clean up old group if present
+        if (oldGroup) {
+            this.scene.remove(oldGroup);
+            this._disposeGroupResources(oldGroup);
+        }
+
+        const group = new THREE.Group();
+        group.position.set(centerX, elevation, centerZ);
+        group.scale.set(S, S, S);
+        group.userData = { tile, baseY: elevation, placeholder: true, error: errorMsg };
+
+        // Muted terracotta placeholder — visible but not garish
+        const boxW = Math.max(0.3, tileW - 0.2);
+        const boxD = Math.max(0.3, tileD - 0.2);
+        const boxH = 0.4 + Math.random() * 0.3; // Slight height variation
+        const geo = new THREE.BoxGeometry(boxW, boxH, boxD);
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0xB87333,  // Muted copper/terracotta
+            roughness: 0.9,
+            metalness: 0.0,
+            transparent: true,
+            opacity: 0.6,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.y = boxH / 2;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+
+        // Small "?" marker on top
+        const markerGeo = new THREE.SphereGeometry(0.08, 6, 4);
+        const markerMat = new THREE.MeshBasicMaterial({ color: 0xFFD700 });
+        const marker = new THREE.Mesh(markerGeo, markerMat);
+        marker.position.y = boxH + 0.12;
+        group.add(marker);
+
+        this.scene.add(group);
+        this.buildingGroups.set(key, group);
+
+        console.warn("Placeholder placed for tile (" + tile.x + "," + tile.y + "): " + errorMsg);
+        return { ok: true, placeholder: true, key };
+    }
+
+    /**
      * Per-corner elevation (0..1) from adjacent tile elevations — smooth heightfield.
      * Corner (i,j) in world sits at (i*S, j*S); each tile has one nominal elevation.
      */
@@ -1758,12 +1810,12 @@ class WorldRenderer {
 
         for (let i = 0; i < count; i++) {
             positions[i * 3] = Math.random() * mapW;
-            positions[i * 3 + 1] = midY + Math.random() * 80 + 10;
+            positions[i * 3 + 1] = midY + Math.random() * 20 + 2;
             positions[i * 3 + 2] = Math.random() * mapH;
             // Slow brownian drift velocities
-            velocities[i * 3] = (Math.random() - 0.5) * 0.15;
-            velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.05;
-            velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.15;
+            velocities[i * 3] = (Math.random() - 0.5) * 0.03;
+            velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.01;
+            velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.03;
         }
 
         const geo = new THREE.BufferGeometry();
@@ -1771,7 +1823,7 @@ class WorldRenderer {
 
         const mat = new THREE.PointsMaterial({
             color: 0xffe8b0,        // warm golden
-            size: 1.5,
+            size: 0.15,
             transparent: true,
             opacity: 0.0,           // starts invisible; setTimeOfDay controls visibility
             depthWrite: false,
@@ -1805,8 +1857,8 @@ class WorldRenderer {
             const radius = baseRadius * (0.4 + Math.random() * 0.6);
             const speed = 0.0003 + Math.random() * 0.0005;   // radians per frame
             const phase = Math.random() * Math.PI * 2;
-            const heightBase = midY + 60 + Math.random() * 50;
-            const heightAmp = 5 + Math.random() * 10;
+            const heightBase = midY + 25 + Math.random() * 15;
+            const heightAmp = 2 + Math.random() * 3;
             const heightFreq = 0.0005 + Math.random() * 0.001;
 
             birdData.push({ radius, speed, phase, heightBase, heightAmp, heightFreq, centerX, centerZ });
@@ -1822,7 +1874,7 @@ class WorldRenderer {
 
         const mat = new THREE.PointsMaterial({
             color: 0x1a1a1a,          // dark specks
-            size: 1.8,
+            size: 0.2,
             transparent: true,
             opacity: 0.7,
             depthWrite: false,
@@ -2452,7 +2504,7 @@ class WorldRenderer {
     // ═══════════════════════════════════════════════
     // COMPONENT-BASED RENDERER
     // Terrain tiles use procedural meshes; buildings require spec.components OR spec.template (parametric_templates.js).
-    // No placeholder geometry — violations return { ok: false } and emit world-render-error.
+    // On render errors, a colored placeholder box is placed so the tile location is visible.
     // ═══════════════════════════════════════════════
 
     /**
@@ -2487,7 +2539,7 @@ class WorldRenderer {
                     const err =
                         "expandParametricTemplate missing — ensure parametric_templates.js loads before renderer3d.js";
                     this._emitRenderError(err, tile, key);
-                    return { ok: false, error: err, key };
+                    return this._placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, err);
                 }
                 try {
                     const templateIdResolved = this._maybeMesoamericanTemplateId(String(tmpl.id), spec, tile);
@@ -2501,7 +2553,7 @@ class WorldRenderer {
                     const msg = e && e.message ? e.message : String(e);
                     const err = `Parametric template failed for tile (${tile.x},${tile.y}): ${msg}`;
                     this._emitRenderError(err, tile, key);
-                    return { ok: false, error: err, key };
+                    return this._placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, err);
                 }
             } else if (Array.isArray(spec.components) && spec.components.length > 0) {
                 resolvedComponents = spec.components;
@@ -2555,7 +2607,7 @@ class WorldRenderer {
             if (!spec || !resolvedComponents || resolvedComponents.length === 0) {
                 const err = `Building tile (${tile.x},${tile.y}) requires spec.components or spec.template with a known id; terrain=${JSON.stringify(terrain)}`;
                 this._emitRenderError(err, tile, key);
-                return { ok: false, error: err, key };
+                return this._placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, err);
             }
             // Per-instance deterministic variation — same-type buildings differ in
             // colors, stories, windows, column counts, heights. Stable per tile.
@@ -2593,7 +2645,7 @@ class WorldRenderer {
             const err = e && e.message ? e.message : String(e);
             const msg = `Build failed for tile (${tile.x},${tile.y}): ${err}`;
             this._emitRenderError(msg, tile, key);
-            return { ok: false, error: msg, key };
+            return this._placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, msg);
         }
 
         if (!isTerrainMesh && this.grid && spec) {
@@ -6297,10 +6349,23 @@ class WorldRenderer {
         });
 
         // Use post-processing composer if available, otherwise direct render
-        if (this.composer) {
-            this.composer.render();
-        } else {
-            this.renderer3d.render(this.scene, this.camera);
+        try {
+            if (this.composer) {
+                this.composer.render();
+            } else {
+                this.renderer3d.render(this.scene, this.camera);
+            }
+        } catch (renderErr) {
+            // If composer fails mid-frame, disable it and fall back to direct render
+            if (this.composer) {
+                console.warn("Post-processing render failed — disabling composer:", renderErr);
+                this.composer = null;
+                try {
+                    this.renderer3d.render(this.scene, this.camera);
+                } catch (e2) {
+                    console.error("Direct render also failed:", e2);
+                }
+            }
         }
     }
 }
