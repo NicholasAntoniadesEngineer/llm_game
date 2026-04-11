@@ -35,6 +35,23 @@ def _broadcast_prompt_event(msg: dict):
         pass  # Never let UI broadcasting break agent calls
 
 
+def _broadcast_agent_activity(agent_role: str, detail: str):
+    """Short-lived activity line while the LLM HTTP call is in flight (no timer reset)."""
+    try:
+        from server.state import broadcast_fn
+        if not broadcast_fn or not detail:
+            return
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(broadcast_fn({
+                "type": "agent_activity",
+                "agent": agent_role,
+                "detail": str(detail).strip()[:280],
+            }))
+    except Exception:
+        pass
+
+
 def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
     """First `limit` chars for logs (newlines normalized; truncation marked)."""
     if not text:
@@ -199,6 +216,10 @@ class BaseAgent:
                 sys_tokens_est + inst_tokens_est,
             )
 
+            _broadcast_agent_activity(
+                self.role,
+                f"Batch request ({provider_kind}, {model}) ×{count} — waiting for API…",
+            )
             _t0 = time.monotonic()
             raw = await provider.complete(
                 role=self.role,
@@ -341,6 +362,10 @@ class BaseAgent:
                 "instruction": instruction[:2000],
                 "timestamp": time.time(),
             })
+            _broadcast_agent_activity(
+                self.role,
+                f"Waiting for {provider_kind} ({model}) — large prompts can take several minutes.",
+            )
             _t0 = time.monotonic()
             raw = await provider.complete(
                 role=self.role,

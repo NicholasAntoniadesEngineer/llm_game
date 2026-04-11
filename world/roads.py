@@ -153,7 +153,7 @@ def compute_elevation(hills: list[dict], x: int, y: int, terrain_features: dict 
 
     total = 0.0
 
-    # Basic hill elevation
+    # Basic hill elevation (Gaussian) + wide foothill octave for smoother gradients between peaks
     for hill in hills:
         cx = hill.get("cx", 0)
         cy = hill.get("cy", 0)
@@ -165,6 +165,11 @@ def compute_elevation(hills: list[dict], x: int, y: int, terrain_features: dict 
         if sigma_sq > 0:
             contribution = peak * math.exp(-dist_sq / sigma_sq)
             total += contribution
+        # Rolling foothills — same peak sign, ~2.5× wider, low amplitude (matches renderer3d.js)
+        sigma2 = 2.5 * radius
+        sigma2_sq = 2.0 * sigma2 * sigma2
+        if sigma2_sq > 0:
+            total += peak * 0.22 * math.exp(-dist_sq / sigma2_sq)
 
     # Enhanced terrain features
     if terrain_features:
@@ -174,6 +179,64 @@ def compute_elevation(hills: list[dict], x: int, y: int, terrain_features: dict 
         total += _compute_plateau_elevation(x, y, terrain_features.get("plateaus", []))
 
     return total
+
+
+def smooth_elevation_max_gradient(
+    heights: dict[tuple[int, int], float],
+    max_step: float,
+    iterations: int,
+) -> dict[tuple[int, int], float]:
+    """Reduce cliffs by bounding orthogonal slope: |h(x)-h(x')| ≤ max_step per edge.
+
+    Iteratively splits elevation excess across each violated edge (half to each endpoint),
+    preserving approximate mass and spreading a total rise of *Y* over enough tiles that
+    the path length × max_step can absorb it (given enough iterations).
+
+    Args:
+        heights: tile coordinate → raw elevation (typically from ``compute_elevation``).
+        max_step: maximum allowed absolute difference between 4-neighbors (world units).
+        iterations: relaxation passes over all edges.
+
+    Returns:
+        New dict of smoothed elevations (does not mutate the input dict).
+    """
+    if max_step <= 0 or not heights:
+        return dict(heights)
+    h: dict[tuple[int, int], float] = {k: float(v) for k, v in heights.items()}
+    if len(h) < 2:
+        return h
+
+    edges: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    seen: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for (x, y) in h:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if (nx, ny) not in h:
+                continue
+            a, b = (x, y), (nx, ny)
+            if a < b:
+                edge_key = (a, b)
+            else:
+                edge_key = (b, a)
+            if edge_key in seen:
+                continue
+            seen.add(edge_key)
+            edges.append(edge_key)
+
+    for _ in range(max(1, iterations)):
+        for ua, ub in edges:
+            va = h[ua]
+            vb = h[ub]
+            if va > vb + max_step:
+                excess = (va - vb - max_step) / 2.0
+                h[ua] = va - excess
+                h[ub] = vb + excess
+            elif vb > va + max_step:
+                excess = (vb - va - max_step) / 2.0
+                h[ua] = va + excess
+                h[ub] = vb - excess
+
+    return h
 
 
 def _compute_river_elevation(x: int, y: int, rivers: list[dict]) -> float:

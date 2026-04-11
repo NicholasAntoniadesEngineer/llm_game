@@ -11,6 +11,7 @@ from core.config import (
     SAVE_STATE_EVERY_N_STRUCTURES,
 )
 from core.persistence import save_state
+from core.run_log import trace_event
 
 logger = logging.getLogger("eternal.task_manager")
 
@@ -34,6 +35,7 @@ class TaskManager:
         survey_work_item_fn: Callable,
         set_status_fn: Callable[..., Awaitable],
         district_index_fn: Callable[[], int],
+        generation_fn: Callable[[], int],
     ):
         # Shared references
         self.broadcast = broadcast_fn
@@ -43,6 +45,7 @@ class TaskManager:
         self._survey_work_item_fn = survey_work_item_fn
         self._set_status_fn = set_status_fn
         self._district_index_fn = district_index_fn  # callable returning current index
+        self._generation_fn = generation_fn
 
         # Authoritative running flag
         self.running: bool = False
@@ -302,11 +305,19 @@ class TaskManager:
         """Throttle disk writes while keeping periodic checkpoints."""
         self._structures_since_save += 1
         if self._structures_since_save >= SAVE_STATE_EVERY_N_STRUCTURES:
+            trace_event(
+                "persist",
+                "save_state (throttled checkpoint)",
+                district_index=self._district_index_fn(),
+                generation=self._generation_fn(),
+                structures_since_reset=SAVE_STATE_EVERY_N_STRUCTURES,
+            )
             await asyncio.to_thread(
                 save_state,
                 self.world,
                 self.chat_history,
                 self._district_index_fn(),
                 self._districts_ref,
+                self._generation_fn(),
             )
             self._structures_since_save = 0

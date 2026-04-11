@@ -1,8 +1,27 @@
 """Eternal Cities — Configuration."""
 
 import json
+import logging
 import os
 from pathlib import Path
+
+
+def _parse_log_level() -> int:
+    """Root log level from ETERNAL_LOG_LEVEL (DEBUG, INFO, WARNING, ERROR). Default INFO."""
+    raw = os.environ.get("ETERNAL_LOG_LEVEL", "INFO").strip().upper()
+    mapping = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "WARN": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    return mapping.get(raw, logging.INFO)
+
+
+# Root log level (main.py). Verbose diagnostics: ETERNAL_LOG_LEVEL=DEBUG
+LOG_LEVEL = _parse_log_level()
 from typing import Any
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -87,6 +106,7 @@ def _load_llm_defaults(path: Path) -> dict[str, Any]:
         raise ValueError(
             f"LLM defaults xai.model_suggestions must be a non-empty array of strings: {path}"
         )
+    _validate_http_timeout_seconds(xai.get("request_timeout_seconds"), "xai", path)
 
     oi = raw["openai_compatible"]
     if not isinstance(oi, dict):
@@ -105,8 +125,20 @@ def _load_llm_defaults(path: Path) -> dict[str, Any]:
             raise ValueError(
                 f"LLM defaults openai_compatible.model_suggestions must be an array of strings: {path}"
             )
+    _validate_http_timeout_seconds(oi.get("request_timeout_seconds"), "openai_compatible", path)
 
     return raw
+
+
+def _validate_http_timeout_seconds(raw: Any, section: str, path: Path) -> None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(
+            f"LLM defaults {section}.request_timeout_seconds must be a number (seconds): {path}"
+        )
+    if raw < 30 or raw > 3600:
+        raise ValueError(
+            f"LLM defaults {section}.request_timeout_seconds must be between 30 and 3600: {path}"
+        )
 
 
 _LLM_RAW = _load_llm_defaults(_LLM_DEFAULTS_PATH)
@@ -146,6 +178,22 @@ MAX_DISTRICTS = int(os.environ.get("ETERNAL_MAX_DISTRICTS", "12"))
 
 STEP_DELAY = float(os.environ.get("ETERNAL_STEP_DELAY", "0.3"))
 
+# Terrain: max |Δelevation| between orthogonally adjacent tiles (world units per tile step).
+# Large jumps are spread over multiple tiles by iterative edge relaxation (see world.roads).
+_TG_RAW = os.environ.get("ETERNAL_TERRAIN_MAX_GRADIENT", "0.42").strip()
+try:
+    _tg = float(_TG_RAW)
+except ValueError:
+    _tg = 0.42
+TERRAIN_MAX_GRADIENT = 0.05 if _tg < 0.05 else (3.0 if _tg > 3.0 else _tg)
+
+_TGIT_RAW = os.environ.get("ETERNAL_TERRAIN_GRADIENT_ITERATIONS", "48").strip()
+try:
+    _tgit = int(_TGIT_RAW)
+except ValueError:
+    _tgit = 48
+TERRAIN_GRADIENT_ITERATIONS = 8 if _tgit < 8 else (256 if _tgit > 256 else _tgit)
+
 # Global OpenAI-compatible defaults (secrets only via env or UI — never committed).
 OPENAI_COMPATIBLE_BASE_URL = _LLM_RAW["openai_compatible"]["base_url"]
 OPENAI_COMPATIBLE_API_KEY = ""
@@ -155,6 +203,17 @@ OPENAI_COMPATIBLE_MODEL = _LLM_RAW["openai_compatible"]["default_model"]
 XAI_BASE_URL = _LLM_RAW["xai"]["base_url"]
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
 XAI_DEFAULT_MODEL = _LLM_RAW["xai"]["default_model"]
+XAI_HTTP_TIMEOUT_SECONDS = float(_LLM_RAW["xai"]["request_timeout_seconds"])
+OPENAI_COMPATIBLE_HTTP_TIMEOUT_SECONDS = float(_LLM_RAW["openai_compatible"]["request_timeout_seconds"])
+
+_eternal_xai_timeout = os.environ.get("ETERNAL_XAI_HTTP_TIMEOUT_S", "").strip()
+if _eternal_xai_timeout:
+    try:
+        _xo = float(_eternal_xai_timeout)
+        if 30 <= _xo <= 3600:
+            XAI_HTTP_TIMEOUT_SECONDS = _xo
+    except ValueError:
+        pass
 
 # Max concurrent Urbanista CLI calls (design pass; placement streams as each completes).
 # Higher = faster builds but more parallel API calls. 5 is safe for Claude Max plans.
@@ -174,6 +233,17 @@ MAX_BUILDINGS_PER_DISTRICT = int(os.environ.get("ETERNAL_MAX_BUILDINGS_PER_DISTR
 # Persist world to disk every N structures placed. With 7+ minute Urbanista calls,
 # each structure is precious — save after every one to prevent data loss on crash.
 SAVE_STATE_EVERY_N_STRUCTURES = int(os.environ.get("ETERNAL_SAVE_EVERY_N", "1"))
+
+# Debounced save of index + chat after chat/phase messages (see main.schedule_debounced_persist_after_chat).
+CHAT_PERSIST_DEBOUNCE_S = float(os.environ.get("ETERNAL_CHAT_PERSIST_DEBOUNCE_S", "2"))
+
+# Background heartbeat thread interval (stderr + run log); independent of the asyncio event loop.
+_HEARTBEAT_RAW = os.environ.get("ETERNAL_HEARTBEAT_INTERVAL_S", "15").strip()
+try:
+    _hb = float(_HEARTBEAT_RAW)
+except ValueError:
+    _hb = 15.0
+HEARTBEAT_INTERVAL_S = 1.0 if _hb < 1.0 else _hb
 
 # Chunk size for sparse world persistence (tiles per chunk side)
 CHUNK_SIZE = int(os.environ.get("ETERNAL_CHUNK_SIZE", "64"))

@@ -30,6 +30,7 @@ def build_provider_from_spec(spec: dict) -> LlmProvider:
                 or getattr(config, "XAI_API_KEY", None)
             )
             default_model = spec.get("model") or getattr(config, "XAI_DEFAULT_MODEL", None)
+            http_timeout_s = float(getattr(config, "XAI_HTTP_TIMEOUT_SECONDS", 900.0))
         else:
             base = spec.get("openai_base_url")
             if isinstance(base, str) and not base.strip():
@@ -38,11 +39,17 @@ def build_provider_from_spec(spec: dict) -> LlmProvider:
             if isinstance(key, str) and not key.strip():
                 key = None
             default_model = None
+            http_timeout_s = float(getattr(config, "OPENAI_COMPATIBLE_HTTP_TIMEOUT_SECONDS", 180.0))
         if isinstance(base, str) and not base.strip():
             base = None
         if isinstance(key, str) and not key.strip():
             key = None
-        return OpenAICompatibleProvider(base_url=base, api_key=key, default_model=default_model)
+        return OpenAICompatibleProvider(
+            base_url=base,
+            api_key=key,
+            default_model=default_model,
+            http_timeout_s=http_timeout_s,
+        )
     raise ValueError(
         f"Unknown provider {kind!r} in llm_agents -- use 'claude_cli', 'openai_compatible', or 'xai'."
     )

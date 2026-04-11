@@ -21,6 +21,11 @@
         <div>
             <h1>Eternal Cities</h1>
             <div class="subtitle" id="subtitle">AI agents reconstruct a historical city — in real time</div>
+            <div class="header-live-row" aria-label="Connection and server status">
+                <span class="header-wall-clock" id="header-wall-clock" title="Local time">—:—:—</span>
+                <span class="header-live-status" id="header-live-status" title=""></span>
+                <button type="button" class="header-wake-btn" id="header-wake-btn" title="Ping server — confirms the link is alive and refreshes build/engine status">Wake</button>
+            </div>
         </div>
         <div class="agent-status-bar" id="agent-status-bar">
             <div class="agent-status" id="status-cartographus" data-agent="cartographus">
@@ -30,6 +35,7 @@
                 <span class="agent-purpose">(Surveyor)</span>
                 <span class="agent-state">idle</span>
                 <span class="agent-tokens" id="agent-tokens-cartographus" title="Session tokens (all Cartographus model calls)"></span>
+                <span class="agent-detail" id="agent-detail-cartographus" aria-live="polite"></span>
             </div>
             <div class="agent-status" id="status-urbanista" data-agent="urbanista">
                 <span class="agent-dot"></span>
@@ -38,6 +44,7 @@
                 <span class="agent-purpose">(Architect)</span>
                 <span class="agent-state">idle</span>
                 <span class="agent-tokens" id="agent-tokens-urbanista" title="Session tokens (Urbanista)"></span>
+                <span class="agent-detail" id="agent-detail-urbanista" aria-live="polite"></span>
             </div>
         </div>
     </div>

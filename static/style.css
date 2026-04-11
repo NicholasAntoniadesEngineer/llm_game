@@ -113,6 +113,60 @@ body {
     margin-top: 2px;
 }
 
+.header-live-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin-top: 6px;
+    font-size: 0.68rem;
+    color: #9aa8b8;
+    font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+    font-variant-numeric: tabular-nums;
+    max-width: 100%;
+}
+
+.header-wall-clock {
+    color: #c9a84c;
+    font-weight: 600;
+    min-width: 7.5em;
+}
+
+.header-live-status {
+    flex: 1 1 180px;
+    min-width: 0;
+    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.header-wake-btn {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    font-size: 0.65rem;
+    font-family: inherit;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: #c9a84c;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(201, 168, 76, 0.45);
+    border-radius: 12px;
+    cursor: pointer;
+}
+
+.header-wake-btn:hover {
+    background: rgba(201, 168, 76, 0.12);
+    color: #ffd700;
+}
+
+@media (max-width: 640px) {
+    .header-live-status {
+        flex-basis: 100%;
+        white-space: normal;
+    }
+}
+
 /* Agent status bar */
 .agent-status-bar {
     display: flex;
@@ -126,6 +180,7 @@ body {
 
 .agent-status {
     display: inline-flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 5px;
     padding: 3px 8px;
@@ -229,6 +284,21 @@ body {
     display: none;
     min-width: 0;
     margin-left: 0;
+}
+
+.agent-status .agent-detail {
+    flex: 1 0 100%;
+    font-size: 0.65rem;
+    color: #7a8fa3;
+    line-height: 1.25;
+    max-width: min(420px, 100%);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-status .agent-detail:empty {
+    display: none;
 }
 
 /* Per-agent colors for dots */

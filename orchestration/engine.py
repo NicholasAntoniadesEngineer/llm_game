@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
 from world.state import WorldState
 from world.blueprint import CityBlueprint
@@ -14,7 +15,7 @@ from orchestration.debate import DebateProtocol
 from orchestration.proposals import ProposalQueue, WorkProposal
 from orchestration.bus import MessageBus, BusMessage
 from orchestration.task_manager import TaskManager
-from core.run_log import log_event
+from core.run_log import log_event, trace_event
 from core.errors import AgentGenerationError
 from agents.base import BaseAgent
 
@@ -109,6 +110,8 @@ from core.config import (
     URBANISTA_MAX_CONCURRENT,
     MAX_GENERATIONS,
     EXPANSION_COOLDOWN,
+    TERRAIN_GRADIENT_ITERATIONS,
+    TERRAIN_MAX_GRADIENT,
 )
 from orchestration.validation import (
     validate_master_plan,
@@ -161,6 +164,7 @@ class BuildEngine:
         self.urbanista = BaseAgent("urbanista", "Urbanista", load_prompt("urbanista", BUILDING_TYPES=format_building_types(), KEY_COLORS=format_material_palette()), llm_agent_key=KEY_URBANISTA)
         self._source_policy = _source_policy
         self.generation = 0
+        self._trace_snapshot: dict[str, Any] = {"phase": "init"}
         self.blueprint: CityBlueprint | None = None
         self._district_scenery_summaries: dict[str, str] = {}
         self._district_palettes: dict[str, dict] = {}  # {district_name: {primary, secondary, accent}}
@@ -184,6 +188,7 @@ class BuildEngine:
             survey_work_item_fn=lambda di: self.generators.survey_work_item(di),
             set_status_fn=self._set_status,
             district_index_fn=lambda: self.district_index,
+            generation_fn=lambda: self.generation,
         )
 
         # Generators — extracted discovery/survey/expansion methods.
@@ -199,6 +204,11 @@ class BuildEngine:
         self.tasks.running = value
 
     # --- Delegation methods for backward-compat with main.py callers ---
+
+    def update_trace_snapshot(self, **kwargs: Any) -> None:
+        """Merge keys for the heartbeat thread (no asyncio; safe from any thread context that holds the GIL briefly)."""
+        self._trace_snapshot.update(kwargs)
+        self._trace_snapshot["monotonic_s"] = time.monotonic()
 
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario."""
@@ -217,6 +227,7 @@ class BuildEngine:
         # Clear intelligence subsystems
         self.style_memory = StyleMemory()
         self.proposals = ProposalQueue()
+        self._trace_snapshot = {"phase": "reset"}
 
     async def abort_pipeline_tasks(self):
         await self.tasks.abort_pipeline_tasks()
@@ -225,6 +236,8 @@ class BuildEngine:
         await self.tasks.cancel_run_task_join()
 
     async def schedule_run(self) -> asyncio.Task:
+        trace_event("engine", "schedule_run — creating asyncio task for run()")
+        self.update_trace_snapshot(phase="schedule_run")
         return await self.tasks.schedule_run(self.run)
 
     async def broadcast_all_agents_idle(self) -> None:
@@ -247,11 +260,25 @@ class BuildEngine:
                       scenario=str(config_module.SCENARIO.get("location", "?") if config_module.SCENARIO else "none"),
                       period=str(config_module.SCENARIO.get("period", "?") if config_module.SCENARIO else "none"),
                       grid=f"{GRID_WIDTH}x{GRID_HEIGHT}")
+            trace_event(
+                "engine",
+                "run() entered — main build loop",
+                scenario=str(config_module.SCENARIO.get("location", "?") if config_module.SCENARIO else "none"),
+                districts_loaded=len(self.districts),
+            )
+            self.update_trace_snapshot(phase="run", step="after_start")
 
             # ─── PHASE 0: initial district discovery ───
             if not self.districts:
+                self.update_trace_snapshot(phase="discover_districts", step="calling_generators")
+                trace_event("engine", "Phase 0 — no districts loaded; starting discover_districts()")
                 discovery_ok = await self.generators.discover_districts()
                 if not discovery_ok:
+                    trace_event(
+                        "engine",
+                        "Phase 0 — discover_districts failed or paused",
+                        auto_retry=bool(getattr(self, "_auto_retry_pending", False)),
+                    )
                     if getattr(self, "_auto_retry_pending", False):
                         self._auto_retry_pending = False
                         logger.info("Auto-retry: re-entering run() after discovery failure")
@@ -259,7 +286,16 @@ class BuildEngine:
                         return
                     self.running = False
                     return
+                trace_event("engine", "Phase 0 — discover_districts finished", ok=True, districts=len(self.districts))
+                self.update_trace_snapshot(phase="post_discovery", districts=len(self.districts))
             else:
+                trace_event(
+                    "engine",
+                    "Phase 0 — skipped (districts already loaded)",
+                    districts=len(self.districts),
+                    district_index=self.district_index,
+                )
+                self.update_trace_snapshot(phase="resume_loaded_districts", districts=len(self.districts))
                 self._fused_seed_master_plan = None
                 if self.tasks._map_refine_task is None or self.tasks._map_refine_task.done():
                     cached = load_districts_cache()
@@ -269,6 +305,7 @@ class BuildEngine:
                     asyncio.create_task(self.generators.find_map_image())
 
             # ─── BLUEPRINT: create city coherence data ───
+            self.update_trace_snapshot(phase="blueprint", has_blueprint=self.blueprint is not None)
             if self.blueprint is None:
                 # Try loading persisted blueprint first
                 bp_data = load_blueprint()
@@ -292,6 +329,9 @@ class BuildEngine:
                             "type": "terrain_data",
                             "hills": self.blueprint.hills,
                             "water": self.blueprint.water,
+                            "roads": self.blueprint.roads,
+                            "max_gradient": TERRAIN_MAX_GRADIENT,
+                            "gradient_iterations": TERRAIN_GRADIENT_ITERATIONS,
                         })
                         # Broadcast the road tiles so clients see them immediately
                         road_tiles = [t.to_dict() for t in self.world.tiles.values()
@@ -303,9 +343,19 @@ class BuildEngine:
                             })
 
             await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts, self.generation)
+            trace_event("engine", "Entering infinite generation loop", generation=self.generation, district_index=self.district_index)
+            self.update_trace_snapshot(phase="generation_loop", step="pre_while")
 
             # ─── INFINITE GENERATION LOOP ───
             while self.running:
+                self.update_trace_snapshot(phase="generation_loop", generation=self.generation, district_index=self.district_index)
+                trace_event(
+                    "engine",
+                    "Generation loop iteration — calling _build_generation()",
+                    generation=self.generation,
+                    district_index=self.district_index,
+                    districts_total=len(self.districts),
+                )
                 # Build all unbuilt districts (two-wave)
                 build_ok = await self._build_generation()
                 if not self.running or not build_ok:
@@ -313,6 +363,13 @@ class BuildEngine:
 
                 await self.broadcast({"type": "generation_complete", "generation": self.generation})
                 log_event("engine", f"Generation {self.generation} complete — {len(self.districts)} districts")
+                trace_event(
+                    "engine",
+                    f"Generation {self.generation} wave build finished",
+                    generation=self.generation,
+                    districts=len(self.districts),
+                )
+                self.update_trace_snapshot(phase="post_build_generation", generation=self.generation)
 
                 # Check generation cap
                 if MAX_GENERATIONS > 0 and self.generation >= MAX_GENERATIONS:
@@ -320,15 +377,21 @@ class BuildEngine:
                     break
 
                 # ─── EXPANSION: discover new edge districts ───
+                trace_event("engine", "Calling expand_city()", generation_before=self.generation)
+                self.update_trace_snapshot(phase="expand_city", generation=self.generation)
                 await self.broadcast({"type": "expanding", "generation": self.generation + 1})
                 expanded = await self.generators.expand_city()
                 if not expanded:
+                    trace_event("engine", "expand_city returned False — cooldown before retry", generation=self.generation)
+                    self.update_trace_snapshot(phase="expansion_cooldown", generation=self.generation)
                     await self._chat("cartographus", "info",
                                      "City fully built for this era. Waiting before next expansion attempt...")
                     await asyncio.sleep(EXPANSION_COOLDOWN)
                     continue
 
+                trace_event("engine", "expand_city returned True — incrementing generation", districts=len(self.districts))
                 self.generation += 1
+                self.update_trace_snapshot(phase="post_expansion", generation=self.generation)
                 await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts, self.generation)
 
             await self.tasks.await_map_refine_task()
@@ -345,6 +408,14 @@ class BuildEngine:
 
     async def _build_generation(self) -> bool:
         """Build all unbuilt districts in two waves. Returns False if cancelled."""
+        trace_event(
+            "engine",
+            "_build_generation() start",
+            generation=self.generation,
+            district_index=self.district_index,
+            districts_total=len(self.districts),
+        )
+        self.update_trace_snapshot(phase="_build_generation", step="start", generation=self.generation)
         self.tasks._survey_task_by_index.clear()
         self.tasks.start_survey_tasks_from_index(self.district_index, self.district_index + 1)
         if len(self.districts) > self.district_index + 1:
@@ -398,7 +469,22 @@ class BuildEngine:
                 })
                 await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
 
+                self.update_trace_snapshot(
+                    phase="build_wave",
+                    wave=wave_label,
+                    district_index=di,
+                    district=district_name,
+                    generation=self.generation,
+                )
                 if di not in district_plans:
+                    self.update_trace_snapshot(phase="await_survey", district_index=di, district=district_name, wave=wave_label)
+                    trace_event(
+                        "engine",
+                        "Awaiting survey master plan",
+                        district_index=di,
+                        district=district_name,
+                        wave=wave_label,
+                    )
                     plan = await _get_plan(di)
                     if plan is None:
                         if getattr(self, "_auto_retry_pending", False):
@@ -418,6 +504,19 @@ class BuildEngine:
                     continue
 
                 logger.info(f"=== {wave_label}: {district_name} ({len(wave_plan)} structures) ===")
+                trace_event(
+                    "engine",
+                    "Calling _build_district()",
+                    district=district_name,
+                    wave=wave_label,
+                    structures=len(wave_plan),
+                )
+                self.update_trace_snapshot(
+                    phase="build_district_call",
+                    district=district_name,
+                    wave=wave_label,
+                    structure_count=len(wave_plan),
+                )
                 district_ok = await self._build_district(district, wave_plan)
                 if not district_ok:
                     if getattr(self, "_auto_retry_pending", False):
@@ -439,6 +538,14 @@ class BuildEngine:
         manual pause.
         """
         pause_detail = (pause_detail or "").strip()
+        trace_event(
+            "engine",
+            "pause_for_api_issue invoked",
+            reason=pause_reason,
+            agent=agent_role,
+            detail_preview=(pause_detail[:240] + "…") if len(pause_detail) > 240 else pause_detail,
+        )
+        self.update_trace_snapshot(phase="pause_api", reason=pause_reason, agent=agent_role)
 
         # Auto-retry for transient/retriable errors
         AUTO_RETRY_MAX = 3
@@ -480,7 +587,14 @@ class BuildEngine:
         self.running = False
         await self.tasks.stop_token_telemetry()
         # Always save on pause — ensures no progress is lost
-        await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
+        await asyncio.to_thread(
+            save_state,
+            self.world,
+            self.chat_history,
+            self.district_index,
+            self.districts,
+            self.generation,
+        )
         self.tasks._structures_since_save = 0
         await self.tasks._cancel_survey_and_refine_tasks()
         summaries = {
@@ -653,6 +767,13 @@ class BuildEngine:
 
     async def _build_district(self, district: dict, master_plan: list) -> bool:
         district_key = district.get("name", "unknown")
+        trace_event(
+            "engine",
+            "_build_district() entered",
+            district=district_key,
+            master_plan_structures=len(master_plan),
+        )
+        self.update_trace_snapshot(phase="build_district_inner", district=district_key, structures=len(master_plan))
         if not master_plan:
             await self._pause_for_api_issue(
                 "unknown",
@@ -837,9 +958,8 @@ class BuildEngine:
             # Compute elevation from blueprint hills (authoritative) instead of AI-specified values
             # which are on a different scale. This prevents buildings creating sinkholes in terrain.
             if self.blueprint and self.blueprint.hills:
-                from world.roads import compute_elevation as _compute_elev
                 tile_elevations = [
-                    round(_compute_elev(self.blueprint.hills, t["x"], t["y"]), 2)
+                    round(self.blueprint.elevation_at(t["x"], t["y"]), 2)
                     for t in tiles
                 ]
             else:
@@ -863,8 +983,7 @@ class BuildEngine:
                     if x is not None and y is not None:
                         # Use hill gaussian for elevation (authoritative)
                         if self.blueprint and self.blueprint.hills:
-                            from world.roads import compute_elevation as _ce
-                            td["elevation"] = round(_ce(self.blueprint.hills, x, y), 2)
+                            td["elevation"] = round(self.blueprint.elevation_at(x, y), 2)
                         elif "elevation" not in td or td["elevation"] is None:
                             td["elevation"] = district.get("elevation", 0.0)
                         td["period"] = district.get("period", "")
@@ -969,7 +1088,11 @@ class BuildEngine:
         placed_count = 0
 
         if urban_jobs:
-            await self._set_status("urbanista", "thinking")
+            await self._set_status(
+                "urbanista",
+                "thinking",
+                detail=f"Designing {len(urban_jobs)} structure(s) — each AI call may take minutes.",
+            )
 
             # ── Group consecutive batchable jobs ──
             work_units: list[dict] = []  # {"type": "single"|"batch", "indices": [int]}
@@ -1158,12 +1281,20 @@ class BuildEngine:
                             except Exception as fix_err:
                                 logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
 
-                    await self._set_status("urbanista", "speaking")
+                    await self._set_status("urbanista", "speaking", detail="Sharing design commentary.")
                     commentary = arch_result.get("commentary", "Design ready.")
                     if len(commentary) > 400:
                         commentary = commentary[:397] + "..."
                     await self._chat("urbanista", "design", commentary)
-                    await self._set_status("urbanista", "thinking" if placed_count < len(urban_jobs) else "idle")
+                    await self._set_status(
+                        "urbanista",
+                        "thinking" if placed_count < len(urban_jobs) else "idle",
+                        detail=(
+                            f"Progress {placed_count}/{len(urban_jobs)} — {name} placed; continuing…"
+                            if placed_count < len(urban_jobs)
+                            else None
+                        ),
+                    )
 
                     # Place tiles
                     final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []))
@@ -1186,13 +1317,18 @@ class BuildEngine:
                         is_terrain = job["btype"] in OPEN_TERRAIN_TYPES
                         for (mx, my) in missing_coords:
                             if is_terrain:
+                                fill_elev = (
+                                    round(self.blueprint.elevation_at(mx, my), 2)
+                                    if self.blueprint and self.blueprint.hills
+                                    else avg_elevation
+                                )
                                 sec_tile = {
                                     "x": mx, "y": my,
                                     "terrain": job["btype"],
                                     "building_name": template_td.get("building_name", name),
                                     "building_type": job["btype"],
                                     "description": f"Part of {name}",
-                                    "elevation": avg_elevation,
+                                    "elevation": fill_elev,
                                 }
                                 t_spec = template_td.get("spec")
                                 if t_spec and isinstance(t_spec, dict):
@@ -1236,7 +1372,9 @@ class BuildEngine:
                     for td in final_tiles:
                         x, y = td.get("x"), td.get("y")
                         if x is not None and y is not None:
-                            if "elevation" not in td or td["elevation"] is None:
+                            if self.blueprint and self.blueprint.hills:
+                                td["elevation"] = round(self.blueprint.elevation_at(int(x), int(y)), 3)
+                            elif "elevation" not in td or td["elevation"] is None:
                                 td["elevation"] = district_elev
                             td["period"] = district.get("period", "")
                             td["placed_by"] = "faber"
@@ -1291,7 +1429,14 @@ class BuildEngine:
             await self._set_status("urbanista", "idle")
 
         if self.tasks._structures_since_save > 0:
-            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts)
+            await asyncio.to_thread(
+                save_state,
+                self.world,
+                self.chat_history,
+                self.district_index,
+                self.districts,
+                self.generation,
+            )
             self.tasks._structures_since_save = 0
 
         if skipped:
@@ -1381,7 +1526,7 @@ class BuildEngine:
             data["approved"] = approved
         await self.broadcast(data)
 
-    async def _set_status(self, agent, status):
+    async def _set_status(self, agent, status, detail=None):
         payload = {"type": "agent_status", "agent": agent, "status": status}
         if status == "thinking":
             if agent not in self.tasks._agent_thinking_started:
@@ -1389,4 +1534,9 @@ class BuildEngine:
             payload["thinking_started_at_s"] = self.tasks._agent_thinking_started[agent]
         else:
             self.tasks._agent_thinking_started.pop(agent, None)
+        if detail is not None:
+            d = str(detail).strip()
+            payload["detail"] = d[:280] if d else ""
+        elif status == "idle":
+            payload["detail"] = ""
         await self.broadcast(payload)

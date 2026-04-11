@@ -554,14 +554,21 @@ class TestPersistenceSaveLoad:
         }
 
         chat = [{"type": "chat", "text": "hello"}]
-        persistence.save_state(world, chat, district_index=2, districts=[{"name": "Forum"}])
+        persistence.save_state(
+            world,
+            chat,
+            district_index=2,
+            districts=[{"name": "Forum"}],
+            generation=3,
+        )
 
         # Load into a fresh world
         world2 = WorldState()
         result = persistence.load_state(world2)
         assert result is not None
-        loaded_chat, loaded_idx, loaded_districts = result
+        loaded_chat, loaded_idx, loaded_districts, loaded_gen = result
         assert loaded_idx == 2
+        assert loaded_gen == 3
         assert loaded_chat == chat
         assert len(loaded_districts) == 1
         assert world2.current_period == "Republican Rome"

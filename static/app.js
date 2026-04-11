@@ -110,6 +110,24 @@ let isPaused = false;
 /** Track last manual camera interaction — flyTo respects user control. */
 let lastManualCameraMs = 0;
 
+/** Header strip: local clock + seconds since last WebSocket message + pong snapshot. */
+let _lastServerMessageAt = Date.now();
+/** Ignores keepalive pong so long LLM waits still show growing "since event" seconds. */
+let _lastNonPingMessageAt = Date.now();
+let _lastServerMessageType = "";
+let _lastPongEngineRunning = null;
+let _lastPongScenario = null;
+
+/** Message types that should not drive "since event" or "last:" (telemetry / keepalive / partial UI). */
+const _HEADER_NOISE_TYPES = new Set([
+    "pong",
+    "token_usage",
+    "typing",
+    "agent_activity",
+    "agent_status",
+    "chat",
+]);
+
 /** District tracking for minimap overlays and 3D labels. */
 let _knownDistricts = [];
 /** Current district progress — updated by phase and build_progress messages. */
@@ -324,6 +342,11 @@ function connect() {
         hideReconnectingBanner();
         reconnectDelay = 1000;
         updateAiSettingsConnectionStatus();
+        try {
+            ws.send(JSON.stringify({ type: "ping" }));
+        } catch (e) {
+            /* ignore */
+        }
         // Only send pending actions on the FIRST connect (not on auto-reconnects).
         // Pending flags are one-shot: cleared after sending.
         if (pendingResetOnOpen) {
@@ -365,6 +388,9 @@ function connect() {
     ws.onclose = (ev) => {
         wsLog(seq, `CLOSE — code=${ev.code} reason=${ev.reason || "(none)"} wasClean=${ev.wasClean} nextDelay=${reconnectDelay}ms`);
         setConnectionStatus(false);
+        _lastPongEngineRunning = null;
+        _lastPongScenario = null;
+        updateHeaderLiveStatus();
         showReconnectingBanner(reconnectDelay);
         updateAiSettingsConnectionStatus();
         clearWebSocketReconnectTimer();
@@ -401,7 +427,100 @@ function connect() {
     }, 30000);
 }
 
+function coerceTriBool(value) {
+    if (value === true || value === 1) return true;
+    if (value === false || value === 0) return false;
+    if (typeof value === "string") {
+        const s = value.trim().toLowerCase();
+        if (s === "true" || s === "1") return true;
+        if (s === "false" || s === "0") return false;
+    }
+    return null;
+}
+
+function applyEngineSnapshotFromServer(msg) {
+    if (!msg || typeof msg !== "object") return;
+    const er = coerceTriBool(msg.engine_running);
+    if (er !== null) _lastPongEngineRunning = er;
+    const sa = coerceTriBool(msg.scenario_active);
+    if (sa !== null) _lastPongScenario = sa;
+}
+
+function recordServerActivity(msg) {
+    _lastServerMessageAt = Date.now();
+    const t = msg && msg.type;
+    if (typeof t === "string" && !_HEADER_NOISE_TYPES.has(t)) {
+        _lastNonPingMessageAt = Date.now();
+        _lastServerMessageType = t;
+    }
+    updateHeaderLiveStatus();
+}
+
+function updateHeaderLiveStatus() {
+    const clockEl = document.getElementById("header-wall-clock");
+    const statusEl = document.getElementById("header-live-status");
+    if (clockEl) {
+        clockEl.textContent = new Date().toLocaleTimeString(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+    if (!statusEl) return;
+    const wsState = !ws ? "no socket" :
+        ws.readyState === WebSocket.OPEN ? "WS OK" :
+        ws.readyState === WebSocket.CONNECTING ? "WS …" : "WS down";
+    const idleEventSec = Math.max(0, Math.floor((Date.now() - _lastNonPingMessageAt) / 1000));
+    const idleLinkSec = Math.max(0, Math.floor((Date.now() - _lastServerMessageAt) / 1000));
+    let engineStr = "build ?";
+    if (_lastPongEngineRunning === true) engineStr = "build running";
+    else if (_lastPongEngineRunning === false) engineStr = "build idle";
+    let scenStr = "";
+    if (_lastPongScenario === true) scenStr = " · scenario";
+    else if (_lastPongScenario === false) scenStr = " · no scenario";
+    const typeShort = (_lastServerMessageType || "—").slice(0, 28);
+    const line = `${wsState} · ${idleEventSec}s since event · ${engineStr}${scenStr} · last: ${typeShort}`;
+    statusEl.textContent = line;
+    let titleExtra = `link ${idleLinkSec}s (incl. ping)`;
+    if (_lastPongEngineRunning === null && wsState === "WS OK") {
+        titleExtra += " · tap Wake if build ? stays";
+    }
+    statusEl.title = `${line} · ${titleExtra}`;
+}
+
+function startHeaderClockAndStatus() {
+    if (window._headerClockInterval) clearInterval(window._headerClockInterval);
+    window._headerClockInterval = setInterval(updateHeaderLiveStatus, 1000);
+    updateHeaderLiveStatus();
+}
+
+function sendWakePing() {
+    const statusEl = document.getElementById("header-live-status");
+    try {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            if (statusEl) {
+                statusEl.textContent = "Pinging server…";
+                statusEl.title = "Waiting for pong from server";
+            }
+            ws.send(JSON.stringify({ type: "ping" }));
+        } else {
+            if (statusEl) {
+                statusEl.textContent = "Reconnecting socket…";
+                statusEl.title = "";
+            }
+            reconnectDelay = 1000;
+            connect();
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = "Wake failed — see console";
+        console.error(e);
+    }
+}
+
 function handleMessage(msg) {
+    if (!msg || typeof msg !== "object") return;
+    applyEngineSnapshotFromServer(msg);
+    recordServerActivity(msg);
     switch (msg.type) {
         case "world_state":
             if (typeof msg.width === "number" && msg.width > 0) worldGridWidth = msg.width;
@@ -446,7 +565,10 @@ function handleMessage(msg) {
 
         case "terrain_data":
             if (renderer && renderer.setTerrainData) {
-                renderer.setTerrainData(msg.hills || [], msg.water || []);
+                renderer.setTerrainData(msg.hills || [], msg.water || [], msg.roads || [], {
+                    maxGradient: typeof msg.max_gradient === "number" ? msg.max_gradient : undefined,
+                    gradientIterations: typeof msg.gradient_iterations === "number" ? msg.gradient_iterations : undefined,
+                });
             }
             break;
 
@@ -536,8 +658,12 @@ function handleMessage(msg) {
             break;
 
         case "agent_status":
-            setAgentStatus(msg.agent, msg.status, msg.thinking_started_at_s);
+            setAgentStatus(msg.agent, msg.status, msg.thinking_started_at_s, msg.detail);
             if (msg.status !== "thinking") hideLoading();
+            break;
+
+        case "agent_activity":
+            setAgentActivityDetail(msg.agent, msg.detail);
             break;
 
         case "agent_prompt":
@@ -550,7 +676,7 @@ function handleMessage(msg) {
 
         case "loading":
             showLoading(msg.agent, msg.message);
-            setAgentStatus(msg.agent, "thinking");
+            setAgentStatus(msg.agent, "thinking", undefined, msg.message || "");
             break;
 
         case "master_plan": {
@@ -646,6 +772,9 @@ function handleMessage(msg) {
         case "llm_settings_saved":
             appendSystemMessage("AI backend settings saved for next run.");
             closeLlmSettingsOverlay();
+            break;
+
+        case "pong":
             break;
     }
 }
@@ -1056,7 +1185,17 @@ function formatThinkingDuration(elapsedMs) {
     return `${m}m ${sec}s`;
 }
 
-function setAgentStatus(agent, status, thinkingStartedAtS) {
+function setAgentActivityDetail(agent, detail) {
+    const el = document.getElementById(`status-${agent}`);
+    if (!el) return;
+    const detailEl = el.querySelector(".agent-detail");
+    if (!detailEl) return;
+    const text = detail == null ? "" : String(detail);
+    detailEl.textContent = text;
+    detailEl.title = text;
+}
+
+function setAgentStatus(agent, status, thinkingStartedAtS, detail) {
     const el = document.getElementById(`status-${agent}`);
     if (!el) return;
 
@@ -1067,6 +1206,17 @@ function setAgentStatus(agent, status, thinkingStartedAtS) {
     if (stateEl) {
         stateEl.textContent = status === "thinking" ? "thinking..." :
                               status === "speaking" ? "speaking" : "idle";
+    }
+
+    const detailEl = el.querySelector(".agent-detail");
+    if (detailEl) {
+        if (detail !== undefined && detail !== null) {
+            detailEl.textContent = String(detail);
+            detailEl.title = String(detail);
+        } else if (status === "idle") {
+            detailEl.textContent = "";
+            detailEl.title = "";
+        }
     }
 
     const timerEl = el.querySelector(".agent-timer");
@@ -1096,7 +1246,7 @@ function setAgentStatus(agent, status, thinkingStartedAtS) {
 
 function resetAllAgentStatus() {
     for (const agent of ["cartographus", "urbanista"]) {
-        setAgentStatus(agent, "idle");
+        setAgentStatus(agent, "idle", undefined, "");
     }
 }
 
@@ -2437,6 +2587,9 @@ async function initEternalCitiesSession() {
 document.addEventListener("DOMContentLoaded", () => {
     const container = document.getElementById("world-container");
     renderer = new WorldRenderer(container);
+    startHeaderClockAndStatus();
+    const wakeBtn = document.getElementById("header-wake-btn");
+    if (wakeBtn) wakeBtn.addEventListener("click", () => sendWakePing());
 
     // Track manual camera interactions so auto-fly respects user control
     for (const evt of ["mousedown", "wheel", "touchstart"]) {

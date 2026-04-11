@@ -1,0 +1,36 @@
+{
+  "district_index": 0,
+  "districts": [],
+  "generation": 0,
+  "turn": 0,
+  "current_period": "around 585",
+  "current_year": 585,
+  "min_x": 0,
+  "max_x": 0,
+  "min_y": 0,
+  "max_y": 0,
+  "chat_history": [
+    {
+      "type": "chat",
+      "sender": "cartographus",
+      "msg_type": "research",
+      "content": "Phase 1 \u2014 district skeleton for Alexandria (around 585). A detailed map narrative will follow in the background while we build.",
+      "turn": 0
+    }
+  ],
+  "run_started_at_s": 1775937469.6087139,
+  "scenario": {
+    "location": "Alexandria",
+    "description": "Founded by Alexander the Great. Center of Hellenistic learning. Home of the Great Library and Pharos Lighthouse.",
+    "features": "Pharos Lighthouse, Great Library/Mouseion, Serapeum, Royal Quarter (Bruchion), Heptastadion causeway, Lake Mareotis",
+    "grid_note": "Coastal city on Mediterranean. Harbor to the north. Pharos island connected by causeway. Grid plan by Dinocrates.",
+    "period": "around 585",
+    "focus_year": 585,
+    "started_at_s": 1775937469.6087139,
+    "year_start": 560,
+    "year_end": 610,
+    "ruler": "Research who ruled and what the city looked like at this exact time",
+    "climate": null
+  },
+  "chunk_size": 64
+}

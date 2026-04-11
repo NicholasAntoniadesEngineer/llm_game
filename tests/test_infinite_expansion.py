@@ -605,7 +605,7 @@ class TestPersistenceScaling:
             ws2 = WorldState()
             result = load_state(ws2)
             if result is not None:
-                loaded_chat, di, loaded_districts = result
+                loaded_chat, di, loaded_districts, _gen = result
                 assert di == 1
                 assert len(loaded_districts) == 1
         finally:

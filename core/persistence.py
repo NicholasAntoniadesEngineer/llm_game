@@ -104,14 +104,34 @@ def save_state(world: WorldState, chat_history: list[dict],
     _atomic_write(INDEX_FILE, json.dumps(index, indent=2))
 
     total_tiles = sum(len(t) for t in chunk_tiles.values())
-    logger.info(f"Saved: {total_tiles} tiles in {chunks_written} chunks, "
-                f"district #{district_index}, generation {generation}")
+    scen_loc = ""
+    if isinstance(scenario, dict):
+        scen_loc = str(scenario.get("location") or "")
+    logger.info(
+        "Saved: %s tiles in %s chunks | district_index=%s generation=%s turn=%s | "
+        "chat_msgs=%s districts=%s world_bounds=(%s..%s,%s..%s) scenario=%s",
+        total_tiles,
+        chunks_written,
+        district_index,
+        generation,
+        world.turn,
+        len(chat_history),
+        len(districts or []),
+        world.min_x,
+        world.max_x,
+        world.min_y,
+        world.max_y,
+        scen_loc or "(none)",
+    )
 
 
 # ─── Load ───────────────────────────────────────────────────────────
 
-def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
-    """Load from chunked format. Returns (chat_history, district_index, districts) or None."""
+def load_state(world: WorldState) -> tuple[list[dict], int, list[dict], int] | None:
+    """Load from chunked format.
+
+    Returns (chat_history, district_index, districts, generation) or None.
+    """
     if not INDEX_FILE.exists():
         return None
 
@@ -136,6 +156,8 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
     chat_history = index["chat_history"]
     district_index = index["district_index"]
     districts = index["districts"]
+    gen_raw = index.get("generation", 0)
+    generation = int(gen_raw) if isinstance(gen_raw, (int, float)) else 0
 
     scen = index.get("scenario")
     if isinstance(scen, dict) and scen:
@@ -156,8 +178,14 @@ def load_state(world: WorldState) -> tuple[list[dict], int, list[dict]] | None:
         if fy is not None:
             world.current_year = int(fy)
 
-    logger.info(f"Loaded: {tile_count} tiles, district #{district_index}, {len(districts)} districts")
-    return chat_history, district_index, districts
+    logger.info(
+        "Loaded: %s tiles, district #%s, %s districts, generation %s",
+        tile_count,
+        district_index,
+        len(districts),
+        generation,
+    )
+    return chat_history, district_index, districts, generation
 
 
 def clear_saves():

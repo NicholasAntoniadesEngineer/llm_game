@@ -327,6 +327,13 @@ class WorldRenderer {
         this._cullSphere = new THREE.Sphere();
         this._cullCenter = new THREE.Vector3();
         this._instDummy = new THREE.Object3D();
+        /** @type {{name?: string, type?: string, points?: [number, number][]}[]} */
+        this._blueprintRoads = [];
+        /** Max |Δheight| between adjacent corner samples (matches server ``TERRAIN_MAX_GRADIENT``). */
+        this._terrainMaxGradient = 0.42;
+        this._terrainGradientIterations = 48;
+        this._tmpTerrainUp = new THREE.Vector3();
+        this._tmpWorldUp = new THREE.Vector3(0, 1, 0);
 
         // Scene — sky / IBL set in _setupIblAndBackground() after renderer exists
         this.scene = new THREE.Scene();
@@ -1569,6 +1576,7 @@ class WorldRenderer {
         group.position.set(centerX, elevation, centerZ);
         group.scale.set(S, S, S);
         group.userData = { tile, baseY: elevation, placeholder: true, error: errorMsg };
+        this._alignGroupToLocalTerrain(group, centerX, centerZ, tile);
 
         // Muted terracotta placeholder — visible but not garish
         const boxW = Math.max(0.3, tileW - 0.2);
@@ -1608,13 +1616,67 @@ class WorldRenderer {
      */
     // ─── Terrain Data from Blueprint (hills/water) ───
 
-    setTerrainData(hills, water) {
+    /**
+     * @param {unknown[]} hills
+     * @param {unknown[]} water
+     * @param {unknown[]} [roads] — blueprint road polylines; used for grade blending + sloped road meshes
+     * @param {{ maxGradient?: number, gradientIterations?: number }} [opts] — slope limit for heightfield (server sends same values)
+     */
+    setTerrainData(hills, water, roads, opts) {
         this._blueprintHills = hills || [];
         this._blueprintWater = water || [];
+        this._blueprintRoads = Array.isArray(roads) ? roads : [];
+        if (opts && typeof opts.maxGradient === "number" && opts.maxGradient > 0) {
+            this._terrainMaxGradient = opts.maxGradient;
+        }
+        if (opts && typeof opts.gradientIterations === "number" && opts.gradientIterations >= 1) {
+            this._terrainGradientIterations = Math.min(256, opts.gradientIterations | 0);
+        }
         if (this.grid) {
             this._cornerHeights = this._computeCornerHeightGrid();
             this._rebuildTerrainMesh();
         }
+    }
+
+    /**
+     * Orthogonal edge relaxation: match server ``smooth_elevation_max_gradient`` so mesh corners
+     * do not jump when raw Gaussians sampled at adjacent corners differ too much.
+     * @param {number[][]} H — corner rows [j][i], mutated in place
+     */
+    _relaxHeightEdge(H, i0, j0, i1, j1, maxStep) {
+        let va = H[j0][i0];
+        let vb = H[j1][i1];
+        if (va > vb + maxStep) {
+            const excess = (va - vb - maxStep) / 2;
+            H[j0][i0] = va - excess;
+            H[j1][i1] = vb + excess;
+        } else if (vb > va + maxStep) {
+            const excess = (vb - va - maxStep) / 2;
+            H[j0][i0] = va + excess;
+            H[j1][i1] = vb - excess;
+        }
+    }
+
+    /** @param {number[][]} H */
+    _enforceMaxGradientOnCornerGrid(H) {
+        const maxStep = this._terrainMaxGradient;
+        const iters = Math.max(1, this._terrainGradientIterations | 0);
+        if (!H || !H.length || maxStep <= 0) return H;
+        const rows = H.length;
+        const cols = H[0].length;
+        for (let iter = 0; iter < iters; iter++) {
+            for (let j = 0; j < rows; j++) {
+                for (let i = 0; i < cols - 1; i++) {
+                    this._relaxHeightEdge(H, i, j, i + 1, j, maxStep);
+                }
+            }
+            for (let j = 0; j < rows - 1; j++) {
+                for (let i = 0; i < cols; i++) {
+                    this._relaxHeightEdge(H, i, j, i, j + 1, maxStep);
+                }
+            }
+        }
+        return H;
     }
 
     _rebuildTerrainMesh() {
@@ -1670,29 +1732,125 @@ class WorldRenderer {
         }
 
         // Reposition existing buildings to match new terrain
-        this.buildingGroups.forEach((group, key) => {
+        this._repositionAllBuildingGroupsToTerrain();
+    }
+
+    /** World XZ of tile center (handles multi-tile anchor footprints). */
+    _tileWorldCenterXZ(tile) {
+        const S = TILE_SIZE;
+        let cx = (tile.x + 0.5) * S;
+        let cz = (tile.y + 0.5) * S;
+        const spec = tile && tile.spec;
+        if (spec && spec.anchor && this.grid) {
+            const fp = this._getAnchorFootprint(spec.anchor);
+            cx = (fp.minX + fp.maxX + 1) / 2 * S;
+            cz = (fp.minY + fp.maxY + 1) / 2 * S;
+        }
+        return { cx, cz };
+    }
+
+    /**
+     * After heightfield or grid changes, snap every built tile group to the terrain surface.
+     * Required for buildings, procedural terrain tiles (grass/trees/water props), etc.
+     */
+    _repositionAllBuildingGroupsToTerrain() {
+        this.buildingGroups.forEach((group) => {
             const tile = group.userData && group.userData.tile;
-            if (tile) {
-                const newY = this._surfaceYAtWorldXZ(
-                    (tile.x + 0.5) * S, (tile.y + 0.5) * S
-                );
-                group.position.y = newY;
-                group.userData.baseY = newY;
-            }
+            if (!tile) return;
+            const { cx, cz } = this._tileWorldCenterXZ(tile);
+            const newY = this._surfaceYAtWorldXZ(cx, cz);
+            group.position.set(cx, newY, cz);
+            group.userData.baseY = newY;
+            this._alignGroupToLocalTerrain(group, cx, cz, tile);
         });
     }
 
-    _computeElevationFromHills(tileX, tileZ) {
-        let elev = 0;
-        for (const hill of (this._blueprintHills || [])) {
-            const dx = tileX - hill.cx;
-            const dz = tileZ - hill.cy;
-            const distSq = dx * dx + dz * dz;
-            const sigma = hill.radius || 5;
-            elev += (hill.peak || 2) * Math.exp(-distSq / (2 * sigma * sigma));
+    /**
+     * Rotate group so local +Y follows terrain slope (roads/paths get stronger tilt than monuments).
+     */
+    _alignGroupToLocalTerrain(group, cx, cz, tile) {
+        const terrain = tile && tile.terrain;
+        let maxTilt = 0.14;
+        if (terrain === "road") maxTilt = 0.45;
+        else if (terrain === "forum") maxTilt = 0.28;
+        else if (terrain === "garden" || terrain === "grass") maxTilt = 0.34;
+        else if (terrain === "water") maxTilt = 0.22;
+        const e = 0.26 * TILE_SIZE;
+        const h = (x, z) => this._surfaceYAtWorldXZ(x, z);
+        const dhdx = (h(cx + e, cz) - h(cx - e, cz)) / (2 * e);
+        const dhdz = (h(cx, cz + e) - h(cx, cz - e)) / (2 * e);
+        const nx = -dhdx;
+        const ny = 1;
+        const nz = -dhdz;
+        const len = Math.hypot(nx, ny, nz);
+        if (len < 1e-8) return;
+        const up = this._tmpTerrainUp;
+        up.set(nx / len, ny / len, nz / len);
+        const worldUp = this._tmpWorldUp;
+        worldUp.set(0, 1, 0);
+        const dot = Math.max(-1, Math.min(1, worldUp.dot(up)));
+        const angle = Math.acos(dot);
+        if (angle > maxTilt) {
+            up.lerpVectors(worldUp, up, maxTilt / angle).normalize();
         }
-        // Carve rivers
-        for (const w of (this._blueprintWater || [])) {
+        group.quaternion.setFromUnitVectors(worldUp, up);
+    }
+
+    /** Keep the lake/sea plane slightly below the lowest terrain vertex. */
+    _syncWaterPlaneToTerrain() {
+        if (!this._cornerHeights || !this._cornerHeights.length) return;
+        const S = TILE_SIZE;
+        let minH = Infinity;
+        for (const row of this._cornerHeights) {
+            for (const v of row) {
+                if (v < minH) minH = v;
+            }
+        }
+        if (!Number.isFinite(minH)) minH = 0;
+        const waterY = minH * S - S * 0.35;
+        if (this._waterPlane) {
+            this._waterPlane.position.y = waterY;
+            this._waterPlaneBaseY = waterY;
+        }
+        if (this._riverWaterPlane) {
+            this._riverWaterPlane.position.y = minH * S - 0.06 * S;
+        }
+    }
+
+    /**
+     * Distance from (px,pz) to segment (ax,ay)-(bx,by) in tile space; t ∈ [0,1] along segment.
+     */
+    _pointSegmentDistance2D(px, pz, ax, ay, bx, by) {
+        const abx = bx - ax;
+        const abz = by - ay;
+        const apx = px - ax;
+        const apz = pz - ay;
+        const abLenSq = abx * abx + abz * abz;
+        let t = abLenSq > 1e-12 ? (apx * abx + apz * abz) / abLenSq : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * abx;
+        const cz = ay + t * abz;
+        const dx = px - cx;
+        const dz = pz - cz;
+        return { dist: Math.sqrt(dx * dx + dz * dz), t };
+    }
+
+    /** Gaussian hills + foothill octave + river carving (no road grade — used to sample waypoints). */
+    _hillBaseElevation(tileX, tileZ) {
+        let elev = 0;
+        for (const hill of this._blueprintHills || []) {
+            const cx = hill.cx != null ? Number(hill.cx) : 0;
+            const cy = hill.cy != null ? Number(hill.cy) : 0;
+            const dx = tileX - cx;
+            const dz = tileZ - cy;
+            const distSq = dx * dx + dz * dz;
+            const sigma = hill.radius != null ? Number(hill.radius) : 5;
+            const peak = hill.peak != null ? Number(hill.peak) : 2;
+            elev += peak * Math.exp(-distSq / (2 * sigma * sigma));
+            const sigma2 = sigma * 2.5;
+            elev += peak * 0.22 * Math.exp(-distSq / (2 * sigma2 * sigma2));
+        }
+        for (const w of this._blueprintWater || []) {
             if (w.type === "river" && w.points && w.points.length >= 2) {
                 const dist = this._distToPolyline(tileX, tileZ, w.points);
                 const riverWidth = 1.5;
@@ -1702,6 +1860,46 @@ class WorldRenderer {
             }
         }
         return elev;
+    }
+
+    /**
+     * Blend height toward linear grade along nearest blueprint road so paths follow slopes smoothly.
+     */
+    _blendRoadGradeTowardPathways(tx, tz, baseElev) {
+        const roads = this._blueprintRoads;
+        if (!roads || !roads.length) return baseElev;
+        const influence = 2.65;
+        let bestW = 0;
+        let bestGrade = baseElev;
+        for (const road of roads) {
+            const pts = road.points || [];
+            for (let i = 0; i < pts.length - 1; i++) {
+                const p0 = pts[i];
+                const p1 = pts[i + 1];
+                const ax = Array.isArray(p0) ? Number(p0[0]) : Number(p0.x);
+                const ay = Array.isArray(p0) ? Number(p0[1]) : Number(p0.y);
+                const bx = Array.isArray(p1) ? Number(p1[0]) : Number(p1.x);
+                const by = Array.isArray(p1) ? Number(p1[1]) : Number(p1.y);
+                const seg = this._pointSegmentDistance2D(tx, tz, ax, ay, bx, by);
+                if (seg.dist >= influence) continue;
+                const w = (1 - seg.dist / influence) ** 1.75;
+                const eA = this._hillBaseElevation(ax, ay);
+                const eB = this._hillBaseElevation(bx, by);
+                const grade = eA + seg.t * (eB - eA);
+                if (w > bestW) {
+                    bestW = w;
+                    bestGrade = grade;
+                }
+            }
+        }
+        if (bestW <= 0) return baseElev;
+        const mix = 0.36 * bestW;
+        return baseElev * (1 - mix) + bestGrade * mix;
+    }
+
+    _computeElevationFromHills(tileX, tileZ) {
+        const base = this._hillBaseElevation(tileX, tileZ);
+        return this._blendRoadGradeTowardPathways(tileX, tileZ, base);
     }
 
     _distToPolyline(px, pz, points) {
@@ -1763,6 +1961,9 @@ class WorldRenderer {
                 }
             }
             H.push(row);
+        }
+        if (hasHills && this._terrainMaxGradient > 0) {
+            this._enforceMaxGradientOnCornerGrid(H);
         }
         return H;
     }
@@ -2279,8 +2480,9 @@ class WorldRenderer {
             this._expandGrid(newW, newH);
         }
 
-        // Recompute terrain heightfield with new tile elevations so buildings sit on ground
+        // 1) Merge incoming tiles into the grid and queue meshes to rebuild.
         let heightsDirty = false;
+        const renderQueue = [];
         for (const tile of tiles) {
             if (tile.x >= 0 && tile.y >= 0 && tile.x < this.width && tile.y < this.height) {
                 const old = this.grid[tile.y][tile.x];
@@ -2293,15 +2495,17 @@ class WorldRenderer {
                         if (anchor.y < this.height && anchor.x < this.width) {
                             const anchorTile = this.grid[anchor.y][anchor.x];
                             if (anchorTile && anchorTile.terrain && anchorTile.terrain !== "empty") {
-                                this._buildFromSpec(anchorTile, true);
+                                renderQueue.push(anchorTile);
                             }
                         }
                     } else {
-                        this._buildFromSpec(tile, true);
+                        renderQueue.push(tile);
                     }
                 }
             }
         }
+
+        // 2) Refresh heightfield *before* _buildFromSpec so _surfaceYAtWorldXZ matches the terrain mesh.
         if (heightsDirty) {
             this._cornerHeights = this._computeCornerHeightGrid();
             if (this._terrainMesh) {
@@ -2319,6 +2523,17 @@ class WorldRenderer {
                 this._terrainMesh = this._buildTerrainHeightfieldMesh(S, earth, minH, maxH);
                 this.scene.add(this._terrainMesh);
             }
+            this._repositionAllBuildingGroupsToTerrain();
+            this._syncWaterPlaneToTerrain();
+        }
+
+        // 3) Build/update meshes at the correct elevation (dedupe multi-tile anchors).
+        const seen = new Set();
+        for (const t of renderQueue) {
+            const key = t.spec && t.spec.anchor ? `${t.spec.anchor.x},${t.spec.anchor.y}` : `${t.x},${t.y}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            this._buildFromSpec(t, true);
         }
     }
 
@@ -2368,6 +2583,8 @@ class WorldRenderer {
             }
             this._terrainMesh = this._buildTerrainHeightfieldMesh(S, 0x9a7b52, minH, maxH);
             this.scene.add(this._terrainMesh);
+            this._repositionAllBuildingGroupsToTerrain();
+            this._syncWaterPlaneToTerrain();
         }
         console.log(`Grid expanded: ${oldW}×${oldH} → ${newWidth}×${newHeight}`);
     }
@@ -2949,6 +3166,8 @@ class WorldRenderer {
         group.traverse((c) => {
             if (c.userData && c.userData.isWater) this._waterMeshes.push(c);
         });
+
+        this._alignGroupToLocalTerrain(group, centerX, centerZ, tile);
 
         if (animate) {
             group.userData.animStartY = elevation - 2 * S;
@@ -4193,6 +4412,20 @@ class WorldRenderer {
             group.add(mesh);
         }
         return maxTop;
+    }
+
+    /**
+     * Context for freestanding placement (statues, fountains) relative to foundation/walls.
+     * @param {Record<string, object[]>} buckets — stack_role buckets from {@link _buildComponents}
+     * @returns {{ ground_level_freestanding: boolean }}
+     */
+    _buildComponentRelationships(buckets) {
+        const structural = buckets.structural || [];
+        const hasWalls = structural.some((c) => c && c.type === "walls");
+        const hasFoundation = (buckets.foundation || []).length > 0;
+        return {
+            ground_level_freestanding: hasFoundation || hasWalls || structural.length > 0,
+        };
     }
 
     _buildComponents(group, components, w, d, proportionRules) {

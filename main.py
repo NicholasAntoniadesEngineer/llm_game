@@ -16,8 +16,10 @@ Static assets are cache-busted on each server restart (`?v=…`).
 import asyncio
 import functools
 import os
+import sys
 import time
 import logging
+from typing import Any
 from contextlib import asynccontextmanager
 import uvicorn
 from pathlib import Path
@@ -36,16 +38,26 @@ from core.persistence import (
     save_llm_settings,
     save_state,
 )
-from core.config import create_scenario
+from core.config import CHAT_PERSIST_DEBOUNCE_S, HEARTBEAT_INTERVAL_S, LOG_LEVEL, create_scenario
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(message)s",
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stderr,
+    force=True,
 )
 
 from core.run_log import init_run_log
+from core.heartbeat import start_heartbeat, stop_heartbeat
+
 init_run_log()
+logging.info(
+    "Eternal Cities startup | ETERNAL_LOG_LEVEL=%s effective=%s argv=%s",
+    os.environ.get("ETERNAL_LOG_LEVEL", "INFO"),
+    logging.getLevelName(LOG_LEVEL),
+    " ".join(sys.argv[:6]),
+)
 
 # Touched by POST /api/restart-server when ETERNAL_CITIES_RELOAD=1 so uvicorn --reload picks up a restart request.
 RELOAD_SENTINEL = Path(__file__).resolve().parent / "reload_trigger.txt"
@@ -86,13 +98,53 @@ _server_state_mod.broadcast_fn = broadcast
 
 engine = BuildEngine(state.world, state.bus, broadcast, state.chat_history)
 
+_heartbeat_thread = None
+
+
+def _make_heartbeat_snapshot() -> dict[str, Any]:
+    """Read-only snapshot for the background heartbeat (must not touch the asyncio loop)."""
+    scen = getattr(config, "SCENARIO", None)
+    loc = ""
+    if isinstance(scen, dict):
+        loc = str(scen.get("location") or "")
+    agents: dict[str, str] = {}
+    try:
+        for agent_key, msg in (state.agent_status_by_agent or {}).items():
+            if isinstance(msg, dict):
+                st = msg.get("status", "?")
+                det = msg.get("detail")
+                if det:
+                    agents[str(agent_key)] = f"{st}: {str(det)[:60]}"
+                else:
+                    agents[str(agent_key)] = str(st)
+    except Exception:
+        pass
+    trace_snap = getattr(engine, "_trace_snapshot", None)
+    if not isinstance(trace_snap, dict):
+        trace_snap = {}
+    return {
+        "running": engine.running,
+        "generation": engine.generation,
+        "district_index": engine.district_index,
+        "districts_count": len(engine.districts),
+        "tiles_count": len(engine.world.tiles),
+        "turn": engine.world.turn,
+        "scenario_location": loc,
+        "chat_messages": len(state.chat_history),
+        "ws_clients": len(state.ws_connections),
+        "trace": dict(trace_snap),
+        "agents": agents,
+    }
+
+
 # Load saved state if available (tiles, chat, districts, scenario — survives server restarts)
 saved = load_state(state.world)
 if saved:
-    loaded_chat, district_index, districts = saved
+    loaded_chat, district_index, districts, loaded_generation = saved
     state.chat_history.extend(loaded_chat)
     engine.district_index = district_index
     engine.districts = districts
+    engine.generation = loaded_generation
     logging.info(
         "Restored from disk: district #%s, %s districts, %s chat messages — world + scenario kept for restart",
         district_index,
@@ -104,6 +156,38 @@ else:
 
 
 _engine_action_lock = asyncio.Lock()
+
+# After chat/phase messages, persist index + chat to disk (debounced) so long LLM waits
+# do not leave only stale snapshots if the process dies before the next tile save.
+_persist_chat_generation = 0
+
+
+async def _debounced_persist_after_chat(gen: int) -> None:
+    await asyncio.sleep(CHAT_PERSIST_DEBOUNCE_S)
+    if gen != _persist_chat_generation:
+        return
+    async with _engine_action_lock:
+        if not getattr(config, "SCENARIO", None):
+            return
+        await asyncio.to_thread(
+            save_state,
+            state.world,
+            state.chat_history,
+            engine.district_index,
+            engine.districts,
+            engine.generation,
+        )
+
+
+def schedule_debounced_persist_after_chat() -> None:
+    global _persist_chat_generation
+    _persist_chat_generation += 1
+    gen = _persist_chat_generation
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(_debounced_persist_after_chat(gen))
 
 
 async def handle_start(city_name, year):
@@ -143,7 +227,7 @@ async def _handle_start_inner(city_name, year):
     # Delete old caches
     clear_saves()
 
-    # Broadcast scenario to all clients
+    # Broadcast scenario to all clients (engine UI fields added in server.broadcast.attach_engine_ui_to_message)
     await broadcast(state.world.to_dict())
     # Include climate data for atmosphere system
     climate = config.SCENARIO.get("climate")
@@ -220,6 +304,7 @@ async def _handle_pause_inner():
         state.chat_history,
         engine.district_index,
         engine.districts,
+        engine.generation,
     )
     await broadcast({
         "type": "paused",
@@ -286,6 +371,7 @@ async def handle_restart_server() -> dict:
             state.chat_history,
             engine.district_index,
             engine.districts,
+            engine.generation,
         )
 
     async def _touch_reload_sentinel_after_response() -> None:
@@ -317,6 +403,7 @@ async def handle_reset_timeline() -> dict:
             state.chat_history,
             engine.district_index,
             engine.districts,
+            engine.generation,
         )
     await broadcast(
         {
@@ -340,14 +427,18 @@ state.llm_settings_callback = handle_llm_settings_save
 state.restart_server_callback = handle_restart_server
 state.reset_timeline_callback = handle_reset_timeline
 state.engine_is_running = lambda: engine.running
+state.schedule_debounced_persist_after_chat = schedule_debounced_persist_after_chat
 
 
 @asynccontextmanager
 async def _app_lifespan(_app):
     print(BANNER)
+    global _heartbeat_thread
     # Restored world/scenario may exist on disk, but the build does not start until the user clicks
     # "Continue current session" in the UI (WebSocket `resume`) or starts a new city.
+    _heartbeat_thread = start_heartbeat(_make_heartbeat_snapshot, HEARTBEAT_INTERVAL_S)
     yield
+    stop_heartbeat(_heartbeat_thread)
     await engine.graceful_shutdown()
     logging.info("Build engine stopped (server shutdown or reload)")
 

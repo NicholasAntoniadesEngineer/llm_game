@@ -11,8 +11,17 @@ from core.config import (
     GRID_WIDTH,
     GRID_HEIGHT,
     SURVEY_BUILDINGS_PER_CHUNK,
+    TERRAIN_GRADIENT_ITERATIONS,
+    TERRAIN_MAX_GRADIENT,
 )
-from core.persistence import save_districts_cache, load_districts_cache, load_surveys_cache, save_surveys_cache
+from core.run_log import trace_event
+from core.persistence import (
+    load_districts_cache,
+    load_surveys_cache,
+    save_districts_cache,
+    save_state,
+    save_surveys_cache,
+)
 from orchestration.spatial import enforce_spacing, get_district_spacing, occupancy_summary_for_survey
 
 logger = logging.getLogger("eternal.generators")
@@ -308,12 +317,17 @@ class Generators:
             self.districts, map_desc = cached
             self._fused_seed_master_plan = None
             logger.info(f"Using cached districts: {len(self.districts)}")
+            trace_event("discovery", "Using cached districts layout", districts=len(self.districts))
+            self.engine.update_trace_snapshot(phase="discover_cached", districts=len(self.districts))
             await self._chat("cartographus", "research",
                 f"Using cached survey of {config_module.SCENARIO['location']} — {len(self.districts)} districts mapped.")
             if map_desc:
                 await self.broadcast({"type": "map_description", "description": map_desc})
             asyncio.create_task(self.find_map_image())
             return True
+
+        trace_event("discovery", "No district cache — running skeleton planner (long-running)", location=config_module.SCENARIO.get("location", ""))
+        self.engine.update_trace_snapshot(phase="skeleton_planner", step="before_generate")
 
         await self.broadcast({
             "type": "loading",
@@ -323,7 +337,11 @@ class Generators:
         await self._chat("cartographus", "research",
             f"Phase 1 — district skeleton for {config_module.SCENARIO['location']} ({config_module.SCENARIO['period']}). "
             f"A detailed map narrative will follow in the background while we build.")
-        await self._set_status("cartographus", "thinking")
+        await self._set_status(
+            "cartographus",
+            "thinking",
+            detail="Mapping districts — first AI pass can take several minutes.",
+        )
         plan_prompt = (
             f"Research and map the city of {config_module.SCENARIO['location']} during {config_module.SCENARIO['period']}.\n"
             f"Time span: {config_module.SCENARIO['year_start']} to {config_module.SCENARIO['year_end']}.\n"
@@ -342,6 +360,8 @@ class Generators:
         )
         for attempt in range(2):
             try:
+                trace_event("discovery", "Calling planner_skeleton.generate() for district skeleton", attempt=attempt)
+                self.engine.update_trace_snapshot(phase="skeleton_planner", step="generate_in_progress", attempt=attempt)
                 result = await asyncio.wait_for(
                     self.planner_skeleton.generate(plan_prompt), timeout=300  # 5 min (CLI may do web searches)
                 )
@@ -365,7 +385,14 @@ class Generators:
                     await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
                 return False
 
-        await self._set_status("cartographus", "speaking")
+        await self._set_status("cartographus", "speaking", detail="Sharing district map narrative.")
+        trace_event(
+            "discovery",
+            "Skeleton planner returned",
+            districts_count=len(result.get("districts") or []),
+            keys=sorted(result.keys()),
+        )
+        self.engine.update_trace_snapshot(phase="skeleton_planner", step="after_generate", districts=len(result.get("districts") or []))
         logger.info(
             "Skeleton planner result keys=%s districts_count=%s commentary_len=%s",
             sorted(result.keys()),
@@ -421,6 +448,9 @@ class Generators:
         if not scenario:
             return False
 
+        trace_event("expansion", "expand_city() start", generation=self.engine.generation, districts=len(self.districts))
+        self.engine.update_trace_snapshot(phase="expand_city", step="start")
+
         city_name = scenario.get("location", "Unknown")
         period = scenario.get("period", "")
         year = scenario.get("focus_year", 0)
@@ -469,21 +499,34 @@ class Generators:
             DIRECTION_HINT=direction_hint,
         )
 
-        await self._set_status("cartographus", "thinking")
+        await self._set_status(
+            "cartographus",
+            "thinking",
+            detail="Discovering new districts at the city edge…",
+        )
         await self._chat("cartographus", "info", f"Expanding city — generation {self.engine.generation + 1}...")
 
         # Use skeleton planner agent for expansion (same LLM routing)
         try:
+            trace_event("expansion", "Calling planner_skeleton.generate() for expansion")
+            self.engine.update_trace_snapshot(phase="expand_city", step="planner_generate")
             result = await self.planner_skeleton.generate(prompt)
         except AgentGenerationError as err:
+            trace_event(
+                "expansion",
+                "expand_city planner raised AgentGenerationError",
+                pause_reason=getattr(err, "pause_reason", ""),
+            )
             await self._chat("cartographus", "warning", f"Expansion failed: {err}")
             await self._set_status("cartographus", "idle")
             return False
 
         new_districts = result.get("districts", [])
+        trace_event("expansion", "Expansion planner returned", proposed=len(new_districts))
         if not new_districts:
             await self._chat("cartographus", "info", "No expansion districts found.")
             await self._set_status("cartographus", "idle")
+            self.engine.update_trace_snapshot(phase="expand_city", step="no_new_districts")
             return False
 
         # Validate new districts: no overlap with existing, no water regions
@@ -540,11 +583,22 @@ class Generators:
 
         # Save expanded districts cache
         await asyncio.to_thread(save_districts_cache, self.districts, "")
+        # Align index.json with expanded district list (crash safety before new tiles)
+        await asyncio.to_thread(
+            save_state,
+            self.engine.world,
+            self.engine.chat_history,
+            self.engine.district_index,
+            self.engine.districts,
+            self.engine.generation,
+        )
 
         # Start surveys for new districts
         self.engine.tasks.start_survey_tasks_from_index(self.engine.district_index, len(self.districts))
 
         logger.info(f"Expansion: +{len(validated)} districts, total now {len(self.districts)}")
+        trace_event("expansion", "expand_city() validated new districts", added=len(validated), total_districts=len(self.districts))
+        self.engine.update_trace_snapshot(phase="expand_city", step="done", added=len(validated))
 
         # Send updated world bounds so client can expand its grid
         await self.broadcast(self.world.to_dict())
@@ -560,6 +614,9 @@ class Generators:
                 "type": "terrain_data",
                 "hills": bp.hills,
                 "water": bp.water,
+                "roads": bp.roads,
+                "max_gradient": TERRAIN_MAX_GRADIENT,
+                "gradient_iterations": TERRAIN_GRADIENT_ITERATIONS,
             })
 
         return True
@@ -689,14 +746,18 @@ class Generators:
                 return master_plan
             logger.warning("Fused seed_master_plan invalid — running full survey for first district.")
 
-        await self._set_status("cartographus", "thinking")
+        await self._set_status(
+            "cartographus",
+            "thinking",
+            detail=f"Surveying {district_key} — listing structures…",
+        )
         try:
             master_plan = await self.survey_district_with_chunking(district)
         except AgentGenerationError:
             await self._set_status("cartographus", "idle")
             raise
 
-        await self._set_status("cartographus", "speaking")
+        await self._set_status("cartographus", "speaking", detail="Summarizing survey results.")
         await self._chat("cartographus", "survey", f"Survey complete for {district_key}: {len(master_plan)} structures.")
         await self._set_status("cartographus", "idle")
 

@@ -16,7 +16,7 @@ from core.config import (
     CHAT_REPLAY_MAX_MESSAGES,
 )
 from server.state import AppState
-from server.broadcast import broadcast
+from server.broadcast import attach_engine_ui_to_message, broadcast
 
 logger = logging.getLogger("eternal.server")
 
@@ -180,18 +180,20 @@ def build_app(state: AppState, lifespan=None):
             from core import config as config_module
 
             logger.info(f"[ws#{conn_id}] send world_state")
-            await websocket.send_json(state.world.to_dict())
+            _world_payload = attach_engine_ui_to_message(state, state.world.to_dict())
+            await websocket.send_json(_world_payload)
             # Send scenario if already started (reconnect case)
             if config_module.SCENARIO:
                 logger.info(f"[ws#{conn_id}] send scenario city={config_module.SCENARIO.get('location')} period={config_module.SCENARIO.get('period')}")
-                await websocket.send_json({
+                _scenario_payload = {
                     "type": "scenario",
                     "city": config_module.SCENARIO["location"],
                     "period": config_module.SCENARIO["period"],
                     "year": config_module.SCENARIO.get("focus_year"),
                     "description": config_module.SCENARIO.get("description", ""),
                     "started_at_s": config_module.SCENARIO.get("started_at_s"),
-                })
+                }
+                await websocket.send_json(attach_engine_ui_to_message(state, _scenario_payload))
             # Do not replay old "paused" messages: they re-open the error overlay on every refresh
             # even when the build has moved on. If the engine is actually stopped on pause, we send
             # the latest paused payload once below.
@@ -203,7 +205,10 @@ def build_app(state: AppState, lifespan=None):
             if replay:
                 logger.info(f"[ws#{conn_id}] replay messages count={len(replay)} (paused excluded)")
             for msg in replay:
-                await websocket.send_json(msg)
+                if isinstance(msg, dict):
+                    await websocket.send_json(attach_engine_ui_to_message(state, dict(msg)))
+                else:
+                    await websocket.send_json(msg)
 
             if state.agent_status_by_agent:
                 if state.engine_is_running is not None and not state.engine_is_running():
@@ -228,13 +233,12 @@ def build_app(state: AppState, lifespan=None):
 
             tu = token_aggregate_for_ui()
             if any((v.get("total_tokens") or 0) > 0 for v in tu.values()):
-                await websocket.send_json(
-                    {
-                        "type": "token_usage",
-                        "by_ui_agent": tu,
-                        "by_llm_key": token_usage_store.to_payload(),
-                    }
-                )
+                _tu_payload = {
+                    "type": "token_usage",
+                    "by_ui_agent": tu,
+                    "by_llm_key": token_usage_store.to_payload(),
+                }
+                await websocket.send_json(attach_engine_ui_to_message(state, _tu_payload))
 
             # Only reopen the pause overlay if the *latest* persisted event is still "paused".
             # Scanning the whole history for any old paused message made every refresh show a stale
@@ -250,6 +254,26 @@ def build_app(state: AppState, lifespan=None):
                 paused_payload = dict(state.chat_history[-1])
                 paused_payload["suggest_auto_resume"] = True
                 await websocket.send_json(paused_payload)
+
+            _engine_snap = False
+            if state.engine_is_running is not None:
+                try:
+                    _engine_snap = bool(state.engine_is_running())
+                except Exception:
+                    _engine_snap = False
+            _token_sent = any((v.get("total_tokens") or 0) > 0 for v in tu.values())
+            logger.info(
+                "[ws#%s] initial burst summary: world_tiles=%s scenario=%s replay_msgs=%s "
+                "agent_status_cached=%s token_usage_sent=%s engine_running=%s chat_history_len=%s",
+                conn_id,
+                len(state.world.tiles),
+                bool(config_module.SCENARIO),
+                len(replay),
+                len(state.agent_status_by_agent),
+                _token_sent,
+                _engine_snap,
+                len(state.chat_history),
+            )
         except Exception:
             dur = round(time.time() - conn_start, 1)
             logger.exception(f"[ws#{conn_id}] DISCONNECTED (initial send error) after {dur}s total={len(state.ws_connections)}")
@@ -264,7 +288,8 @@ def build_app(state: AppState, lifespan=None):
             while True:
                 data = await websocket.receive_json()
                 msg_type = data.get("type")
-                logger.info(f"[ws#{conn_id}] recv type={msg_type}")
+                if msg_type != "ping":
+                    logger.info(f"[ws#{conn_id}] recv type={msg_type}")
                 if msg_type == "tile_info":
                     tile = state.world.get_tile(data.get("x", 0), data.get("y", 0))
                     if tile:
@@ -327,7 +352,22 @@ def build_app(state: AppState, lifespan=None):
                             {"type": "reset_timeline_result", "ok": False, "error": "not configured"}
                         )
                 elif msg_type == "ping":
-                    pass  # Keepalive — no response needed
+                    from core import config as config_module
+
+                    engine_running = False
+                    if state.engine_is_running is not None:
+                        try:
+                            engine_running = bool(state.engine_is_running())
+                        except Exception:
+                            engine_running = False
+                    await websocket.send_json(
+                        {
+                            "type": "pong",
+                            "server_time": time.time(),
+                            "engine_running": engine_running,
+                            "scenario_active": bool(getattr(config_module, "SCENARIO", None)),
+                        }
+                    )
                 else:
                     logger.info(f"[ws#{conn_id}] ignored unknown message type={msg_type}")
         except WebSocketDisconnect:

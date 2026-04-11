@@ -39,6 +39,7 @@ def _openai_compatible_request_sync(
     model: str,
     system_prompt: str,
     user_text: str,
+    timeout_s: float,
 ) -> tuple[int, str, str]:
     """Returns (http_status, response_body, error_body_if_any)."""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -57,7 +58,7 @@ def _openai_compatible_request_sync(
     }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             return resp.getcode(), raw, ""
     except urllib.error.HTTPError as e:
@@ -75,6 +76,7 @@ class OpenAICompatibleProvider:
         base_url: str | None = None,
         api_key: str | None = None,
         default_model: str | None = None,
+        http_timeout_s: float | None = None,
     ):
         self.base_url = (
             base_url
@@ -93,6 +95,11 @@ class OpenAICompatibleProvider:
             or os.environ.get("OPENAI_COMPATIBLE_MODEL")
             or getattr(config, "OPENAI_COMPATIBLE_MODEL", "")
             or ""
+        )
+        self.http_timeout_s = float(
+            http_timeout_s
+            if http_timeout_s is not None
+            else getattr(config, "OPENAI_COMPATIBLE_HTTP_TIMEOUT_SECONDS", 180.0)
         )
 
     async def complete(
@@ -125,10 +132,11 @@ class OpenAICompatibleProvider:
 
         base_log = self.base_url if len(self.base_url) <= 96 else self.base_url[:93] + "..."
         logger.info(
-            "[%s] OpenAI-compatible POST /chat/completions | base=%s | model=%s | system=%s user=%s chars",
+            "[%s] OpenAI-compatible POST /chat/completions | base=%s | model=%s | http_timeout=%ss | system=%s user=%s chars",
             role,
             base_log,
             use_model,
+            self.http_timeout_s,
             len(system_prompt),
             len(user_text),
         )
@@ -140,6 +148,7 @@ class OpenAICompatibleProvider:
             use_model,
             system_prompt,
             user_text,
+            self.http_timeout_s,
         )
         if status != 200:
             detail = (err or body)[:800]
