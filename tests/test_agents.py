@@ -10,6 +10,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 from agents import llm_routing as llm_agents
+from core import config
 
 
 class TestLlmRouting:
@@ -49,7 +50,7 @@ class TestLlmRouting:
         })
         llm_agents.set_runtime_overrides(None)
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
-        assert spec["model"] == "haiku"  # back to default
+        assert spec["model"] == config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]["model"]
 
     def test_runtime_overrides_ignores_unknown_keys(self):
         llm_agents.set_runtime_overrides({
@@ -77,7 +78,7 @@ class TestLlmRouting:
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
         assert spec["model"] == "opus"
         assert spec["openai_base_url"] == "http://localhost:1234"
-        assert spec["provider"] == "claude_cli"  # unchanged from base
+        assert spec["provider"] == config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]["provider"]
 
     def test_blank_openai_api_key_not_applied(self):
         llm_agents.set_runtime_overrides({
@@ -102,10 +103,10 @@ class TestLlmRouting:
         for key in llm_agents.AGENT_LLM:
             assert key in llm_agents.AGENT_LLM_LABELS
 
-    def test_claude_cli_model_choices(self):
-        assert isinstance(llm_agents.CLAUDE_CLI_MODEL_CHOICES, tuple)
-        assert "haiku" in llm_agents.CLAUDE_CLI_MODEL_CHOICES
-        assert len(llm_agents.CLAUDE_CLI_MODEL_CHOICES) > 0
+    def test_xai_model_suggestions_in_config(self):
+        assert isinstance(config.XAI_MODEL_SUGGESTIONS, tuple)
+        assert len(config.XAI_MODEL_SUGGESTIONS) > 0
+        assert all(isinstance(x, str) and x.strip() for x in config.XAI_MODEL_SUGGESTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +148,9 @@ class TestProviderFactory:
         with pytest.raises(ValueError, match="Unknown provider"):
             build_provider_from_spec({"provider": "deepseek_custom", "model": "v3"})
 
-    def test_default_provider_is_claude_cli(self):
-        p = build_provider_from_spec({"model": "haiku"})
-        assert isinstance(p, ClaudeCliProvider)
+    def test_default_provider_is_xai(self):
+        p = build_provider_from_spec({"model": "grok-4.20-reasoning"})
+        assert isinstance(p, OpenAICompatibleProvider)
 
     def test_blank_claude_binary_defaults(self):
         p = build_provider_from_spec({"provider": "claude_cli", "model": "h", "claude_binary": "  "})

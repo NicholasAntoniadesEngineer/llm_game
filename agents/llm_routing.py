@@ -1,47 +1,36 @@
 """
-Default LLM routing per agent (used before any UI-saved settings exist).
+LLM routing per agent (defaults from data/llm_defaults.json via core.config).
 
-**Users configure providers and models only in the web app** — “Configure AI” on the start
-screen or toolbar — not by editing this file. The server persists UI choices separately.
+**Runtime overrides:** “Configure AI” in the web app; persisted in data/llm_settings.json.
 
 Keys must match what BuildEngine passes as llm_agent_key.
 
-Optional override fields (from UI or advanced use):
-  - claude_binary: Claude CLI executable
-  - openai_base_url / openai_api_key: for OpenAI-compatible endpoints (incl. xAI)
-  - xai support via provider="xai" (auto-sets https://api.x.ai/v1 and uses XAI_API_KEY env or config)
+Optional override fields (from UI):
+  - openai_base_url / openai_api_key: for OpenAI-compatible and xAI endpoints
+  - claude_binary: only if an old save still uses provider claude_cli
 
 provider values:
-  - "claude_cli" — Anthropic Claude Code CLI (subprocess)
-  - "openai_compatible" — OpenAI Chat Completions API (LM Studio, vLLM, OpenAI, etc.)
-  - "xai" or "grok" — xAI Grok API (https://api.x.ai/v1, requires XAI_API_KEY)
+  - "xai" or "grok" — default; Grok model ids and suggestions in data/llm_defaults.json
+  - "openai_compatible" — OpenAI Chat Completions–compatible APIs
+  - "claude_cli" — still supported for legacy persisted settings (factory)
 """
 
 from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from core.config import LLM_AGENT_DEFAULTS as AGENT_LLM, LLM_AGENT_LABELS as AGENT_LLM_LABELS
+
 
 class AgentLlmSpec(TypedDict, total=False):
     """Per-agent LLM routing."""
 
     provider: str  # claude_cli | openai_compatible | xai
-    model: str  # Claude CLI model id or API model id (e.g. grok-beta for xAI)
+    model: str  # Claude CLI model id or API model id (e.g. grok-4.20-reasoning for xAI)
     claude_binary: str | None
     openai_base_url: str | None
     openai_api_key: str | None
 
-
-# Short names / aliases accepted by `claude --model` (Claude Code CLI). Exposed to the web UI as a dropdown.
-# Users can still pick "Other…" and type any id the CLI accepts.
-CLAUDE_CLI_MODEL_CHOICES: tuple[str, ...] = (
-    "haiku",
-    "sonnet",
-    "opus",
-    "claude-3-5-haiku-20241022",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-opus-20240229",
-)
 
 # Logical agent keys (do not rename without updating orchestration/engine.py).
 KEY_CARTOGRAPHUS_SKELETON = "cartographus_skeleton"
@@ -49,34 +38,7 @@ KEY_CARTOGRAPHUS_REFINE = "cartographus_refine"
 KEY_CARTOGRAPHUS_SURVEY = "cartographus_survey"
 KEY_URBANISTA = "urbanista"
 
-AGENT_LLM: dict[str, AgentLlmSpec] = {
-    KEY_CARTOGRAPHUS_SKELETON: {
-        "provider": "claude_cli",
-        "model": "haiku",
-    },
-    KEY_CARTOGRAPHUS_REFINE: {
-        "provider": "claude_cli",
-        "model": "haiku",
-    },
-    KEY_CARTOGRAPHUS_SURVEY: {
-        "provider": "claude_cli",
-        "model": "haiku",
-    },
-    KEY_URBANISTA: {
-        "provider": "claude_cli",
-        "model": "haiku",
-    },
-}
-
-# Short labels for UI (same keys as AGENT_LLM).
-AGENT_LLM_LABELS: dict[str, str] = {
-    KEY_CARTOGRAPHUS_SKELETON: "Cartographus — district skeleton",
-    KEY_CARTOGRAPHUS_REFINE: "Cartographus — map refine",
-    KEY_CARTOGRAPHUS_SURVEY: "Cartographus — survey",
-    KEY_URBANISTA: "Urbanista",
-}
-
-# Patches loaded from roma_llm_settings.json or set at runtime (UI). Merged over AGENT_LLM.
+# Patches loaded from data/llm_settings.json or set at runtime (UI). Merged over AGENT_LLM.
 _RUNTIME_OVERRIDES: dict[str, dict[str, Any]] = {}
 
 

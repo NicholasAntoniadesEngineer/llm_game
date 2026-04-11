@@ -10,7 +10,7 @@ from core import config
 
 def build_provider_from_spec(spec: dict) -> LlmProvider:
     """Construct a provider instance from one llm_agents.AGENT_LLM entry."""
-    kind = (spec.get("provider") or "claude_cli").strip().lower()
+    kind = (spec.get("provider") or "xai").strip().lower()
     if kind in ("claude", "claude_cli"):
         binary = spec.get("claude_binary")
         if binary is None or (isinstance(binary, str) and not binary.strip()):

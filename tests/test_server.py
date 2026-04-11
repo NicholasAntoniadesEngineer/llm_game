@@ -294,7 +294,8 @@ class TestBuildLlmSettingsPayload:
         assert "agents" in payload
         assert "labels" in payload
         assert "token_usage" in payload
-        assert "claude_cli_models" in payload
+        assert "xai_model_suggestions" in payload
+        assert "model_id_suggestions" in payload
 
     def test_agents_have_provider_and_model(self):
         payload = _build_llm_settings_payload()

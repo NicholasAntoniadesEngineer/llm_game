@@ -347,6 +347,7 @@ def build_app(state: AppState, lifespan=None):
 def _build_llm_settings_payload() -> dict:
     """Same shape as WebSocket message type llm_settings (for UI)."""
     from agents import llm_routing as llm_agents
+    from core import config
     from core.token_usage import STORE as TOKEN_USAGE_STORE
 
     agents_payload = {}
@@ -359,10 +360,17 @@ def _build_llm_settings_payload() -> dict:
             else:
                 row[k] = v
         agents_payload[key] = row
+
+    combined_suggestions = list(
+        dict.fromkeys(list(config.XAI_MODEL_SUGGESTIONS) + list(config.OPENAI_COMPATIBLE_MODEL_SUGGESTIONS))
+    )
+
     return {
         "type": "llm_settings",
         "agents": agents_payload,
         "labels": llm_agents.AGENT_LLM_LABELS,
         "token_usage": TOKEN_USAGE_STORE.to_payload(),
-        "claude_cli_models": list(llm_agents.CLAUDE_CLI_MODEL_CHOICES),
+        "xai_model_suggestions": list(config.XAI_MODEL_SUGGESTIONS),
+        "openai_compatible_model_suggestions": list(config.OPENAI_COMPATIBLE_MODEL_SUGGESTIONS),
+        "model_id_suggestions": combined_suggestions,
     }

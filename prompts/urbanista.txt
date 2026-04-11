@@ -48,6 +48,15 @@ AVAILABLE GRAMMARS: roman_temple, basilica, insula, domus, amphitheater, thermae
 COLUMN ORDERS: doric, ionic, corinthian, tuscan, composite
 Use grammar mode when a standard form matches. Use component spec for unique/non-standard buildings.
 
+VALIDATION REQUIREMENTS (CRITICAL - follow exactly):
+- building_type: must be one of [temple, basilica, insula, domus, aqueduct, thermae, circus, amphitheater, market, taberna, warehouse, gate, monument, wall, bridge, forum, garden, water, grass]
+- Component types: only use [podium, colonnade, pediment, dome, block, arcade, tiled_roof, hipped_roof, atrium, statue, fountain, awning, battlements, tier, door, pilasters, vault, flat_roof, cella, walls, procedural]
+- Procedural components: REQUIRED fields - stack_role (foundation/structural/infill/roof/decorative/freestanding), parts[] array
+- Colors: hex (#RRGGBB) or material names (marble, brick, terracotta, etc.) - no invalid names
+- Procedural parts: each needs position [x,y,z], shape (box/cylinder/sphere/cone/torus/plane/etc.), color
+- Common mistakes to avoid: 'roof'→'tiled_roof', 'wall'→'walls', 'column'→'colonnade', 'window'→procedural box
+- Stack roles determine rendering order: foundation→structural→infill→roof→decorative→freestanding
+
 DENSE SHAPE FORMAT (saves tokens — preferred):
 
 Procedural parts can use arrays instead of dicts:

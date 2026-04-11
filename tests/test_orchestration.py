@@ -10,6 +10,8 @@ import json
 from agents import llm_routing as llm_agents
 from agents.providers import build_provider_from_spec
 from agents.providers.claude_cli import ClaudeCliProvider
+from agents.providers.openai_compatible import OpenAICompatibleProvider
+from core import config
 from orchestration import reference_db
 from orchestration.placement import (
     check_functional_placement,
@@ -235,11 +237,16 @@ class LlmAgentsConfigTests(unittest.TestCase):
             self.assertIn("provider", spec)
             self.assertIn("model", spec)
 
-    def test_default_specs_resolve_to_claude_cli(self):
+    def test_default_specs_match_llm_defaults_file(self):
+        base = config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
-        self.assertEqual(spec.get("provider"), "claude_cli")
+        self.assertEqual(spec.get("provider"), base["provider"])
+        self.assertEqual(spec.get("model"), base["model"])
         p = build_provider_from_spec(spec)
-        self.assertIsInstance(p, ClaudeCliProvider)
+        if base["provider"] in ("xai", "grok"):
+            self.assertIsInstance(p, OpenAICompatibleProvider)
+        else:
+            self.assertIsInstance(p, ClaudeCliProvider)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

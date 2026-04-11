@@ -86,11 +86,14 @@ def _validate_optional_pbr(comp: dict, ctx: str) -> None:
 
 
 def _validate_procedural_component(comp: dict, ctx: str) -> None:
+    # stack_role is required for procedural components - validation should be strict
     role = comp.get("stack_role")
-    if role not in STACK_ROLES:
+    if not role or role not in STACK_ROLES:
         raise UrbanistaValidationError(
-            f"{ctx}: type procedural requires stack_role in {sorted(STACK_ROLES)}"
+            f"{ctx}: procedural component missing or invalid stack_role {role!r}; "
+            f"required: one of {sorted(STACK_ROLES)}. This should be auto-fixed by sanitization."
         )
+
     parts = comp.get("parts")
     if not isinstance(parts, list) or len(parts) == 0:
         raise UrbanistaValidationError(f"{ctx}: procedural requires non-empty parts array")
@@ -410,10 +413,25 @@ def _validate_component(comp: dict, ctx: str) -> None:
         raise UrbanistaValidationError(f"{ctx}: component must be an object")
     ct = comp.get("type")
     if not isinstance(ct, str) or not ct.strip():
-        raise UrbanistaValidationError(f"{ctx}: component missing type")
+        raise UrbanistaValidationError(f"{ctx}: component missing 'type' field (required string)")
     if ct not in RENDERER_COMPONENT_TYPES:
+        # Provide helpful suggestions for common mistakes
+        suggestions = []
+        if ct in ("roof", "tile_roof"):
+            suggestions.append("use 'tiled_roof' instead")
+        elif ct in ("hip_roof", "hipped"):
+            suggestions.append("use 'hipped_roof' instead")
+        elif ct in ("wall", "exterior_wall"):
+            suggestions.append("use 'walls' instead")
+        elif ct in ("column", "pillar"):
+            suggestions.append("use 'colonnade' or procedural parts")
+        elif ct in ("window", "opening"):
+            suggestions.append("use procedural parts with box shapes")
+
+        suggestion_text = f" Suggestions: {', '.join(suggestions)}" if suggestions else ""
         raise UrbanistaValidationError(
-            f"{ctx}: unknown component type {ct!r}; use a known type or type procedural with parts[]"
+            f"{ctx}: unknown component type {ct!r}; allowed types: {sorted(RENDERER_COMPONENT_TYPES)}. "
+            f"Use 'procedural' with parts[] for custom shapes.{suggestion_text}"
         )
     if ct == "procedural":
         _validate_procedural_component(comp, ctx)
@@ -493,9 +511,19 @@ def sanitize_urbanista_output(arch_result: dict) -> dict:
                 if not comp.get("stack_role"):
                     comp["stack_role"] = "structural"
                 fixes += 1
-            # Fix missing stack_role on procedural
+            # Fix missing stack_role on procedural - assign based on context
             if comp.get("type") == "procedural" and not comp.get("stack_role"):
-                comp["stack_role"] = "structural"
+                # Try to infer from component position in list and other components
+                comps_list = spec.get("components", [])
+                comp_idx = comps_list.index(comp) if comp in comps_list else 0
+
+                # First component is often foundation, last is often roof
+                if comp_idx == 0 and len(comps_list) > 1:
+                    comp["stack_role"] = "foundation"
+                elif comp_idx == len(comps_list) - 1:
+                    comp["stack_role"] = "roof"
+                else:
+                    comp["stack_role"] = "structural"
                 fixes += 1
         # Fix color names / material names in procedural parts
         # Also ensure every part has an explicit position to prevent silent [0,0,0] defaults

@@ -181,7 +181,7 @@ class BaseAgent:
         try:
             spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
             model = spec["model"]
-            provider_kind = str(spec.get("provider") or "claude_cli")
+            provider_kind = str(spec.get("provider") or "xai")
             provider = (
                 self._provider_override
                 if self._provider_override is not None
@@ -305,7 +305,7 @@ class BaseAgent:
         try:
             spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
             model = spec["model"]
-            provider_kind = str(spec.get("provider") or "claude_cli")
+            provider_kind = str(spec.get("provider") or "xai")
             provider = (
                 self._provider_override
                 if self._provider_override is not None

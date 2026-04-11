@@ -757,13 +757,17 @@ function closeLlmSettingsOverlay() {
 }
 
 function llmProviderDisplayName(providerRaw) {
-    const p = (providerRaw || "claude_cli").toLowerCase();
+    const p = (providerRaw || "xai").toLowerCase();
     if (p === "xai" || p === "grok") {
         return "xAI Grok";
     }
-    return p === "openai_compatible" || p === "openai" || p === "chatgpt"
-        ? "OpenAI-compatible API"
-        : "Claude CLI";
+    if (p === "openai_compatible" || p === "openai" || p === "chatgpt") {
+        return "OpenAI-compatible API";
+    }
+    if (p === "claude_cli" || p === "claude") {
+        return "Claude CLI (legacy)";
+    }
+    return p;
 }
 
 function formatTokenUsageLine(usageEntry) {
@@ -789,49 +793,6 @@ function formatTokenUsageLine(usageEntry) {
     return `Tokens: ${parts.join(" · ") || "—"}`;
 }
 
-function fillClaudeModelSelect(fieldset, currentModel, choices) {
-    const sel = fieldset.querySelector(".llm-claude-model-select");
-    const custom = fieldset.querySelector(".llm-claude-model-custom");
-    if (!sel || !custom) return;
-    const list = Array.isArray(choices) && choices.length ? choices : ["haiku", "sonnet", "opus"];
-    sel.innerHTML = "";
-    list.forEach((m) => {
-        const o = document.createElement("option");
-        o.value = m;
-        o.textContent = m;
-        sel.appendChild(o);
-    });
-    if (currentModel && !list.includes(currentModel)) {
-        const o = document.createElement("option");
-        o.value = currentModel;
-        o.textContent = `${currentModel} (saved)`;
-        sel.appendChild(o);
-    }
-    const oOther = document.createElement("option");
-    oOther.value = "__custom__";
-    oOther.textContent = "Other…";
-    sel.appendChild(oOther);
-
-    const applySelection = () => {
-        if (list.includes(currentModel)) {
-            sel.value = currentModel;
-        } else if (currentModel) {
-            sel.value = currentModel;
-        } else {
-            sel.value = list[0] || "haiku";
-        }
-    };
-    applySelection();
-
-    const syncCustom = () => {
-        const useCustom = sel.value === "__custom__";
-        custom.style.display = useCustom ? "block" : "none";
-        if (useCustom) custom.value = "";
-    };
-    sel.addEventListener("change", syncCustom);
-    syncCustom();
-}
-
 function renderLlmSettings(msg) {
     const container = document.getElementById("llm-settings-rows");
     if (!container) return;
@@ -842,14 +803,17 @@ function renderLlmSettings(msg) {
     }
     const labels = msg.labels || {};
     const tokenUsage = msg.token_usage || {};
-    const claudeCliModels = msg.claude_cli_models || [];
+    const modelSuggestions = msg.model_id_suggestions || msg.xai_model_suggestions || [];
     container.innerHTML = "";
     for (const [key, spec] of Object.entries(msg.agents)) {
         const label = labels[key] || key;
-        const prov = spec.provider || "claude_cli";
-        let provSelect = prov;
-        if (!["claude_cli", "openai_compatible", "xai", "grok"].includes(prov)) {
-            provSelect = "claude_cli";
+        const prov = spec.provider || "xai";
+        let provSelect = prov === "grok" ? "xai" : prov;
+        if (provSelect === "claude_cli" || provSelect === "claude") {
+            provSelect = "xai";
+        }
+        if (!["openai_compatible", "xai"].includes(provSelect)) {
+            provSelect = "xai";
         }
         const model = spec.model || "";
         const baseUrl = spec.openai_base_url || "";
@@ -861,8 +825,13 @@ function renderLlmSettings(msg) {
         fieldset.className = "llm-agent-row";
         fieldset.dataset.agentKey = key;
         const tokensLine = formatTokenUsageLine(tokenUsage[key]);
+        const datalistId = `llm-model-datalist-${key.replace(/[^a-z0-9_-]/gi, "_")}`;
+        const datalistOptions = modelSuggestions
+            .map((m) => `<option value="${escapeHtml(m)}"></option>`)
+            .join("");
         fieldset.innerHTML = `
             <legend class="llm-legend">${escapeHtml(label)}</legend>
+            <datalist id="${datalistId}">${datalistOptions}</datalist>
             <div class="llm-two-col">
                 <div class="llm-current-block">
                     <div class="llm-col-title">Current</div>
@@ -882,21 +851,13 @@ function renderLlmSettings(msg) {
                         <label class="llm-label">
                             <span class="llm-label-text">Provider</span>
                             <select class="llm-provider">
-                                <option value="claude_cli">Claude CLI</option>
-                                <option value="openai_compatible">OpenAI-compatible API</option>
                                 <option value="xai">xAI Grok</option>
+                                <option value="openai_compatible">OpenAI-compatible API</option>
                             </select>
-                        </label>
-                        <label class="llm-label llm-claude-model-wrap">
-                            <span class="llm-label-text">Model</span>
-                            <div class="llm-claude-model-controls">
-                                <select class="llm-claude-model-select" aria-label="Claude model"></select>
-                                <input type="text" class="llm-claude-model-custom" placeholder="Custom model id" autocomplete="off" />
-                            </div>
                         </label>
                         <label class="llm-label llm-openai-model-wrap">
                             <span class="llm-label-text">Model id</span>
-                            <input type="text" class="llm-model-openai" placeholder="e.g. grok-beta or gpt-4o-mini" />
+                            <input type="text" class="llm-model-openai" list="${datalistId}" placeholder="Type or pick a suggestion (editable)" autocomplete="off" />
                         </label>
                         <div class="llm-openai-fields">
                             <label class="llm-label">
@@ -917,7 +878,6 @@ function renderLlmSettings(msg) {
         sel.value = provSelect;
         newBlock.querySelector(".llm-openai-base").value = baseUrl;
         newBlock.querySelector(".llm-model-openai").value = model;
-        fillClaudeModelSelect(fieldset, model, claudeCliModels);
         sel.addEventListener("change", () => updateLlmRowOpenAiVisibility(fieldset));
         updateLlmRowOpenAiVisibility(fieldset);
         fieldset.querySelectorAll(".llm-current-openai-only").forEach((el) => {
@@ -933,9 +893,7 @@ function updateLlmRowOpenAiVisibility(fieldset) {
     const isOpenAiLike = prov === "openai_compatible" || prov === "xai" || prov === "grok";
     const wrap = newBlock.querySelector(".llm-openai-fields");
     if (wrap) wrap.style.display = isOpenAiLike ? "block" : "none";
-    const claudeModelWrap = newBlock.querySelector(".llm-claude-model-wrap");
     const openaiModelWrap = newBlock.querySelector(".llm-openai-model-wrap");
-    if (claudeModelWrap) claudeModelWrap.style.display = prov === "claude_cli" ? "" : "none";
     if (openaiModelWrap) openaiModelWrap.style.display = isOpenAiLike ? "" : "none";
 }
 
@@ -948,23 +906,8 @@ async function saveLlmSettingsFromForm() {
         const newBlock = row.querySelector(".llm-new-block");
         if (!newBlock) continue;
         const provider = newBlock.querySelector(".llm-provider").value;
-        let model = "";
-        if (provider === "claude_cli") {
-            const csel = newBlock.querySelector(".llm-claude-model-select");
-            const ccustom = newBlock.querySelector(".llm-claude-model-custom");
-            if (csel && csel.value === "__custom__") {
-                model = ccustom ? ccustom.value.trim() : "";
-                if (!model) {
-                    window.alert("Enter a custom model id, or pick a model from the list.");
-                    return;
-                }
-            } else if (csel) {
-                model = csel.value.trim();
-            }
-        } else {
-            const minp = newBlock.querySelector(".llm-model-openai");
-            model = minp ? minp.value.trim() : "";
-        }
+        const minp = newBlock.querySelector(".llm-model-openai");
+        const model = minp ? minp.value.trim() : "";
         const patch = { provider, model };
         if (provider === "openai_compatible" || provider === "xai" || provider === "grok") {
             const base = newBlock.querySelector(".llm-openai-base").value.trim();
