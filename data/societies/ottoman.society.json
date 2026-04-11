@@ -1,0 +1,88 @@
+{
+  "name": "Ottoman",
+  "period": "medieval",
+  "characteristics": ["domed_mosques", "tile_revêtement", "arabesque_decoration", "courtyard_geometry", "minaret_silhouettes"],
+  "building_types": {
+    "mosque": {
+      "style": "central_domed",
+      "roof_style": "domed",
+      "foundation": "elevated_platform",
+      "materials": ["marble", "tile", "brick"]
+    },
+    "palace": {
+      "style": "courtyard_complex",
+      "roof_style": "vaulted",
+      "foundation": "terraced",
+      "materials": ["marble", "tile", "cedar"]
+    },
+    "hamam": {
+      "style": "bath_complex",
+      "roof_style": "domed",
+      "foundation": "subterranean",
+      "materials": ["marble", "brick", "tile"]
+    },
+    "caravanserai": {
+      "style": "courtyard_inn",
+      "roof_style": "vaulted",
+      "foundation": "elevated",
+      "materials": ["stone", "brick", "tile"]
+    }
+  },
+  "proportions": {
+    "dome_diameter_ratio": 0.75,
+    "courtyard_ratio": 0.6,
+    "minaret_height_ratio": 1.8,
+    "iwan_depth_ratio": 0.4
+  },
+  "color_palette": ["#8B4513", "#DAA520", "#228B22", "#4169E1", "#DC143C"],
+  "adaptation_rules": {
+    "climate_mediterranean": {"courtyard_shading": true, "water_features": true, "thermal_mass": true},
+    "climate_desert": {"thick_walls": true, "minimal_openings": true, "wind_towers": true},
+    "terrain_mountain": {"terraced_construction": true, "defensive_positioning": true}
+  },
+  "building_components": {
+    "mosque": {
+      "ref_w": 4.0,
+      "ref_d": 4.0,
+      "components": [
+        {"type": "central_dome", "radius": 0.7, "color": "#DAA520", "roughness": 0.4, "metalness": 0.3},
+        {"type": "minarets", "count": 4, "height": 1.2, "color": "#F5E6C8", "roughness": 0.6},
+        {"type": "courtyard", "size": 0.6, "color": "#F5E6C8", "roughness": 0.8},
+        {"type": "tile_work", "coverage": 0.9, "color": "#4169E1", "roughness": 0.3},
+        {"type": "ablution_fountain", "radius": 0.15, "color": "#F5E6C8", "roughness": 0.5}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Ottoman mosques feature large central domes with multiple minarets",
+      "Tile revetment (çini) was a hallmark of Ottoman decorative arts",
+      "Courtyard geometry was central to Ottoman architectural planning",
+      "Public buildings often included social functions like fountains and madrasas"
+    ],
+    "material_alternatives": {
+      "wood": "tile and brick for durability, cedar for decorative elements"
+    },
+    "scale_hints": {
+      "mosque": "Mosques ranged from small neighborhood masjids to imperial complexes",
+      "palace": "Palaces were vast complexes with multiple courts and specialized functions"
+    },
+    "grammar_types": ["mosque", "palace", "hamam", "caravanserai"]
+  },
+  "template_adaptations": {
+    "ottoman_mosque": {
+      "cultural_modifiers": {
+        "description": "Ottoman mosque with central dome, minarets, and tile decoration",
+        "cultural_context": "Ottoman Islamic architecture",
+        "complexity": "high"
+      }
+    },
+    "ottoman_palace": {
+      "cultural_modifiers": {
+        "description": "Ottoman palace complex with courtyards and ceremonial spaces",
+        "cultural_context": "Ottoman imperial architecture",
+        "complexity": "very_high"
+      }
+    }
+  }
+}

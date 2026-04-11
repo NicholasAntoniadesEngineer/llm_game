@@ -14,6 +14,25 @@ from core import config
 logger = logging.getLogger("eternal.agents.provider")
 
 
+def _is_xai_multi_agent_model_forbidden(base_url: str, model: str) -> str | None:
+    """
+    xAI multi-agent models (e.g. grok-4.20-multi-agent-*) must use /v1/responses or the xAI SDK,
+    not OpenAI-compatible /v1/chat/completions. Return an error message if this combo is used.
+    """
+    b = (base_url or "").lower()
+    m = (model or "").lower()
+    if "x.ai" not in b:
+        return None
+    if "multi-agent" not in m:
+        return None
+    return (
+        "This app uses POST /v1/chat/completions. xAI models whose id contains "
+        "'multi-agent' are not allowed on that endpoint (use the Responses API or xAI SDK instead). "
+        "In AI Settings, pick a chat-completions model such as grok-4.20-reasoning, "
+        "grok-4.20-non-reasoning, or grok-4-1-fast-reasoning (see xAI docs for current ids)."
+    )
+
+
 def _openai_compatible_request_sync(
     base_url: str,
     api_key: str,
@@ -99,6 +118,10 @@ class OpenAICompatibleProvider:
         use_model = model
         if self.default_model:
             use_model = self.default_model
+
+        forbidden = _is_xai_multi_agent_model_forbidden(self.base_url, use_model)
+        if forbidden:
+            raise AgentGenerationError("api_error", forbidden)
 
         base_log = self.base_url if len(self.base_url) <= 96 else self.base_url[:93] + "..."
         logger.info(

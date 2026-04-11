@@ -1,0 +1,102 @@
+{
+  "name": "Roman",
+  "period": "classical",
+  "characteristics": ["concrete_innovation", "arch_vault", "urban_planning", "imperial_scale"],
+  "building_types": {
+    "temple": {
+      "orders": ["corinthian", "composite"],
+      "roof_style": "tiled",
+      "foundation": "podium",
+      "materials": ["marble", "travertine", "terracotta"]
+    },
+    "basilica": {
+      "orders": ["corinthian", "ionic"],
+      "roof_style": "vaulted",
+      "foundation": "elevated",
+      "materials": ["marble", "brick", "concrete"]
+    },
+    "villa": {
+      "orders": ["doric", "tuscan"],
+      "roof_style": "tiled",
+      "foundation": "stylobate",
+      "materials": ["stucco", "brick", "marble"]
+    },
+    "thermae": {
+      "orders": ["corinthian"],
+      "roof_style": "domed",
+      "foundation": "subterranean",
+      "materials": ["marble", "concrete", "mosaic"]
+    }
+  },
+  "proportions": {
+    "column_height_to_diameter": 8.0,
+    "entablature_to_column_height": 0.25,
+    "pediment_rise_to_width": 0.12
+  },
+  "color_palette": ["#F0F0F0", "#C8B070", "#8B4513", "#DAA520", "#2F4F4F"],
+  "adaptation_rules": {
+    "climate_desert": {"materials": ["sandstone", "limestone"], "roof_pitch": 0.3},
+    "climate_tropical": {"ventilation": true, "courtyard": true},
+    "terrain_hills": {"terracing": true, "retaining_walls": true},
+    "terrain_water": {"stilts": true, "waterfront_adaptations": true}
+  },
+  "building_components": {
+    "temple": {
+      "ref_w": 3.6,
+      "ref_d": 2.7,
+      "components": [
+        {"type": "podium", "steps": 3, "height": 0.08, "color": "#C4A77D", "roughness": 0.85},
+        {"type": "block", "stories": 1, "storyHeight": 0.4, "color": "#6B4226", "windows": 4, "windowColor": "#1A1008", "roughness": 0.7},
+        {"type": "colonnade", "columns": 6, "style": "doric", "height": 0.35, "color": "#6B4226", "radius": 0.025, "roughness": 0.65},
+        {"type": "tiled_roof", "height": 0.18, "color": "#2A2A2A", "roughness": 0.5},
+        {"type": "door", "width": 0.14, "height": 0.25, "color": "#CC3333", "roughness": 0.4}
+      ]
+    },
+    "basilica": {
+      "ref_w": 4.5,
+      "ref_d": 2.7,
+      "components": [
+        {"type": "podium", "steps": 5, "height": 0.12, "color": "#C4A77D", "roughness": 0.85},
+        {"type": "block", "stories": 1, "storyHeight": 0.5, "color": "#CC3333", "windows": 6, "windowColor": "#1A1008", "roughness": 0.6},
+        {"type": "colonnade", "columns": 8, "style": "doric", "height": 0.4, "color": "#CC3333", "radius": 0.03, "roughness": 0.55},
+        {"type": "tiled_roof", "height": 0.22, "color": "#DAA520", "roughness": 0.45}
+      ]
+    },
+    "gate": {
+      "ref_w": 2.7,
+      "ref_d": 1.8,
+      "components": [
+        {"type": "podium", "steps": 2, "height": 0.06, "color": "#C4A77D", "roughness": 0.85},
+        {"type": "arcade", "arches": 3, "height": 0.5, "color": "#C4A77D", "roughness": 0.75},
+        {"type": "block", "stories": 1, "storyHeight": 0.3, "color": "#CC3333", "windows": 3, "windowColor": "#1A1008"},
+        {"type": "tiled_roof", "height": 0.15, "color": "#2A2A2A"},
+        {"type": "battlements", "height": 0.06, "color": "#C4A77D"}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Republican basilicas often have simpler doric columns",
+      "High Empire basilicas often have composite columns",
+      "Imperial thermae are grand complexes with multiple halls"
+    ],
+    "material_alternatives": {
+      "stone": "brick or concrete for public buildings",
+      "brick": "travertine or marble for important structures"
+    },
+    "scale_hints": {
+      "temple": "Roman temples vary significantly - some wide and low, others tall with columns",
+      "insula": "Insulae heights vary by city - Pompeii examples reach 4-5 stories"
+    },
+    "grammar_types": ["temple", "basilica", "insula", "domus", "thermae", "aqueduct", "circus", "forum", "amphitheater"]
+  },
+  "template_adaptations": {
+    "roman_villa": {
+      "cultural_modifiers": {
+        "description": "Elegant Roman villa with central atrium and peristyle garden",
+        "cultural_context": "Ancient Roman domestic architecture",
+        "complexity": "high"
+      }
+    }
+  }
+}

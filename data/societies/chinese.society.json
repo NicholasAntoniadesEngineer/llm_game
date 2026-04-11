@@ -1,0 +1,47 @@
+{
+  "name": "Chinese",
+  "period": "ancient",
+  "characteristics": ["curved_roofs", "bracket_system", "courtyard", "feng_shui"],
+  "building_types": {
+    "temple": {
+      "style": "bracketed",
+      "roof_style": "curved",
+      "foundation": "platform",
+      "materials": ["timber", "tile", "brick"]
+    },
+    "palace": {
+      "style": "courtyard",
+      "roof_style": "multi_eaved",
+      "foundation": "terraced",
+      "materials": ["timber", "tile", "stone"]
+    }
+  },
+  "proportions": {
+    "roof_curve_ratio": 0.15,
+    "bracket_spacing": 0.25,
+    "courtyard_hierarchy": 0.7
+  },
+  "color_palette": ["#8B4513", "#DAA520", "#228B22", "#4169E1"],
+  "adaptation_rules": {
+    "climate_monsoon": {"raised_floors": true, "wide_eaves": true},
+    "terrain_mountain": {"terraced_siting": true}
+  },
+  "building_components": {},
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {
+      "wood": "tile roofs with wooden structures"
+    },
+    "scale_hints": {},
+    "grammar_types": ["temple", "palace"]
+  },
+  "template_adaptations": {
+    "chinese_pagoda": {
+      "cultural_modifiers": {
+        "description": "Traditional Chinese pagoda with curved roofs and multiple stories",
+        "cultural_context": "Chinese Buddhist architecture",
+        "complexity": "high"
+      }
+    }
+  }
+}

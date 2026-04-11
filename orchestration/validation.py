@@ -171,6 +171,178 @@ def _validate_procedural_component(comp: dict, ctx: str) -> None:
             ctx, len(parts),
         )
 
+    # Enhanced architectural coherence validation
+    _validate_architectural_coherence(parts, ctx)
+
+
+def _validate_architectural_coherence(parts: list, ctx: str) -> None:
+    """Validate architectural coherence of procedural parts.
+
+    Checks for:
+    1. Proper base-to-top stacking (foundation at bottom, roof at top)
+    2. Structural integrity (walls support roofs, doors in walls)
+    3. Scale relationships (proportions make architectural sense)
+    4. Material consistency within architectural roles
+    5. Opening placement (doors/windows in appropriate locations)
+    """
+    if not parts:
+        return
+
+    # Analyze Y positions for stacking coherence
+    y_positions = []
+    for i, part in enumerate(parts):
+        pos = part.get("position", [0, 0, 0])
+        if isinstance(pos, list) and len(pos) >= 2:
+            try:
+                y = float(pos[1])
+                y_positions.append((y, i, part))
+            except (TypeError, ValueError):
+                continue
+
+    y_positions.sort(key=lambda x: x[0])  # Sort by Y position
+
+    # Check for proper architectural layering
+    base_parts = []
+    middle_parts = []
+    top_parts = []
+
+    for y, idx, part in y_positions:
+        shape = part.get("shape", "")
+        if y < 0.1:  # Near ground level
+            base_parts.append((y, idx, part))
+        elif y > 0.5:  # High up
+            top_parts.append((y, idx, part))
+        else:  # Middle
+            middle_parts.append((y, idx, part))
+
+    # Validate foundation exists
+    has_foundation = any(
+        part.get("shape") in ("box", "cylinder") and
+        part.get("position", [0, 0, 0])[1] < 0.05
+        for _, _, part in base_parts
+    )
+
+    if len(parts) > 3 and not has_foundation:
+        logger.warning(
+            "%s: Large building (%d parts) lacks clear foundation/base structure. "
+            "Consider adding a base platform or podium at Y=0.",
+            ctx, len(parts)
+        )
+
+    # Check for structural walls if there are openings
+    has_walls = any(
+        part.get("shape") == "box" and
+        max(part.get("width", 0), part.get("depth", 0)) > min(part.get("width", 0), part.get("depth", 0)) * 2
+        for _, _, part in base_parts + middle_parts
+    )
+
+    door_parts = [part for _, _, part in y_positions if part.get("shape") == "box" and
+                 part.get("position", [0, 0, 0])[1] < 0.3 and
+                 part.get("width", 0) < 0.3 and part.get("height", 0) < 0.4]
+
+    if door_parts and not has_walls:
+        logger.warning(
+            "%s: Door-like openings detected but no enclosing walls found. "
+            "Doors should be placed within wall structures.",
+            ctx
+        )
+
+    # Check scale relationships
+    volumes = []
+    for _, _, part in y_positions:
+        try:
+            if part.get("shape") == "box":
+                w = float(part.get("width", 0.2))
+                h = float(part.get("height", 0.2))
+                d = float(part.get("depth", w))
+                volumes.append(w * h * d)
+            elif part.get("shape") in ("cylinder", "cone"):
+                r = float(part.get("radius", 0.1))
+                h = float(part.get("height", 0.2))
+                volumes.append(3.14159 * r * r * h)
+            elif part.get("shape") == "sphere":
+                r = float(part.get("radius", 0.1))
+                volumes.append(4/3 * 3.14159 * r * r * r)
+        except (TypeError, ValueError):
+            continue
+
+    if volumes:
+        avg_volume = sum(volumes) / len(volumes)
+        max_volume = max(volumes)
+        min_volume = min(volumes)
+
+        # Warn if volume ratios are extreme
+        if max_volume / min_volume > 50:
+            logger.warning(
+                "%s: Extreme size differences between parts (ratio %.1f:1). "
+                "Consider more consistent architectural proportions.",
+                ctx, max_volume / min_volume
+            )
+
+        # Check for parts that are too small relative to the building
+        tiny_parts = sum(1 for v in volumes if v < avg_volume * 0.01)
+        if tiny_parts > len(volumes) * 0.3:
+            logger.warning(
+                "%s: Many parts are very small (%d/%d < 1%% of average volume). "
+                "Consider consolidating tiny details or increasing their scale.",
+                ctx, tiny_parts, len(volumes)
+            )
+
+    # Validate material consistency by architectural role
+    material_roles = {}
+    for _, _, part in y_positions:
+        y_pos = part.get("position", [0, 0, 0])[1]
+        color = part.get("color", "").lower()
+
+        # Infer architectural role from position and shape
+        if y_pos < 0.1:
+            role = "foundation"
+        elif y_pos > 0.6:
+            role = "roof"
+        elif part.get("shape") in ("cylinder", "cone") and part.get("radius", 0) < 0.05:
+            role = "column"
+        elif part.get("shape") == "box" and part.get("height", 0) > part.get("width", 0) * 2:
+            role = "wall"
+        else:
+            role = "general"
+
+        if role not in material_roles:
+            material_roles[role] = []
+        material_roles[role].append(color)
+
+    # Check for inconsistent materials within roles
+    for role, colors in material_roles.items():
+        if len(colors) > 1:
+            # Simple check: warn if too many different colors for same role
+            unique_colors = set(colors)
+            if len(unique_colors) > 3 and len(colors) > 5:
+                logger.warning(
+                    "%s: %s elements use %d different colors. "
+                    "Consider more consistent material usage within architectural roles.",
+                    ctx, role, len(unique_colors)
+                )
+
+    # Check for openings without proper framing
+    opening_shapes = ["box"]  # Could expand to include arch shapes
+    openings = [part for _, _, part in y_positions
+               if part.get("shape") in opening_shapes and
+               part.get("position", [0, 0, 0])[1] < 0.4 and
+               max(part.get("width", 0), part.get("depth", 0)) < 0.4]
+
+    if openings and len(parts) > 5:
+        # Look for surrounding structural elements
+        structural_count = sum(1 for _, _, part in y_positions
+                              if part.get("shape") in ("box", "cylinder") and
+                              part.get("position", [0, 0, 0])[1] < 0.5 and
+                              max(part.get("width", 0), part.get("depth", 0)) > 0.3)
+
+        if structural_count < 2:
+            logger.warning(
+                "%s: Openings detected but insufficient surrounding structure. "
+                "Openings should be framed by walls or structural elements.",
+                ctx
+            )
+
 
 def _validate_template(tmpl: dict, ctx: str) -> None:
     if not isinstance(tmpl, dict):
@@ -715,6 +887,103 @@ def check_component_collisions(spec: dict, footprint_w: float, footprint_d: floa
         logger.info("Geometry check: %d issues found — %s", len(collisions), "; ".join(collisions[:3]))
 
     return collisions
+
+
+def generate_architectural_feedback(spec: dict, footprint_w: float, footprint_d: float) -> str:
+    """Generate detailed feedback for the Urbanista LLM about architectural issues.
+
+    Analyzes the building spec and provides actionable suggestions for improvement
+    based on architectural coherence, proportion, and structural integrity.
+    """
+    comps = spec.get("components", [])
+    if not isinstance(comps, list):
+        return ""
+
+    feedback_parts = []
+
+    # Analyze component types and roles
+    component_types = {}
+    stack_roles = {}
+    for comp in comps:
+        if not isinstance(comp, dict):
+            continue
+        ctype = comp.get("type", "")
+        role = comp.get("stack_role", "")
+
+        component_types[ctype] = component_types.get(ctype, 0) + 1
+        if role:
+            stack_roles[role] = stack_roles.get(role, 0) + 1
+
+    # Check for architectural completeness
+    has_foundation = any(c.get("stack_role") == "foundation" for c in comps)
+    has_structural = any(c.get("stack_role") == "structural" for c in comps)
+    has_roof = any(c.get("stack_role") == "roof" for c in comps)
+
+    if not has_foundation and len(comps) > 2:
+        feedback_parts.append("Add a foundation component (podium, walls, or platform) at the base for structural stability.")
+
+    if not has_structural and len(comps) > 3:
+        feedback_parts.append("Include structural components to support the building mass.")
+
+    if not has_roof:
+        feedback_parts.append("Add a roof component (tiled_roof, flat_roof, dome, etc.) to complete the building.")
+
+    # Check for procedural component issues
+    procedural_comps = [c for c in comps if c.get("type") == "procedural"]
+    for i, comp in enumerate(procedural_comps):
+        parts = comp.get("parts", [])
+        if len(parts) > 10:
+            feedback_parts.append(f"Procedural component {i+1} has {len(parts)} parts - consider consolidating small details.")
+
+        # Check for vertical stacking issues
+        y_positions = []
+        for part in parts:
+            if isinstance(part, dict):
+                pos = part.get("position", [0, 0, 0])
+                if isinstance(pos, list) and len(pos) > 1:
+                    y_positions.append(pos[1])
+
+        if len(set(y_positions)) <= 2 and len(parts) > 3:
+            feedback_parts.append(f"Procedural component {i+1} parts are mostly at the same height - distribute vertically for better architectural form.")
+
+    # Check for material consistency
+    materials = []
+    for comp in comps:
+        color = comp.get("color", "").lower()
+        if color and not color.startswith("#"):
+            materials.append(color)
+
+    unique_materials = set(materials)
+    if len(unique_materials) > 5:
+        feedback_parts.append(f"Using {len(unique_materials)} different materials - consider limiting to 2-3 for architectural harmony.")
+
+    # Check for scale relationships
+    heights = []
+    for comp in comps:
+        if "height" in comp:
+            heights.append(comp["height"])
+        elif comp.get("type") == "block" and "stories" in comp:
+            heights.append(comp["stories"] * comp.get("storyHeight", 0.3))
+
+    if heights and max(heights) / min(heights) > 3:
+        feedback_parts.append("Height variations are extreme - ensure proportions create a coherent architectural form.")
+
+    # Check for openings without context
+    openings = sum(1 for c in comps if c.get("type") in ("door", "arcade"))
+    structural_elements = sum(1 for c in comps if c.get("stack_role") in ("structural", "foundation"))
+
+    if openings > 0 and structural_elements == 0:
+        feedback_parts.append("Openings (doors/arcades) need surrounding structural elements for architectural context.")
+
+    # Check for collision issues
+    collisions = check_component_collisions(spec, footprint_w, footprint_d)
+    if collisions:
+        feedback_parts.append("Geometry conflicts detected - adjust component positions to prevent overlaps.")
+
+    if feedback_parts:
+        return " ".join(feedback_parts)
+    else:
+        return "Building design is structurally sound and architecturally coherent."
 
 
 def validate_master_plan(

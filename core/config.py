@@ -28,6 +28,11 @@ OPENAI_COMPATIBLE_API_KEY = ""
 # Optional global override for openai_compatible model (prefer setting model in llm_agents.py per agent).
 OPENAI_COMPATIBLE_MODEL = ""
 
+# xAI / Grok support (uses the OpenAICompatibleProvider; set via XAI_API_KEY env var or UI "Configure AI")
+XAI_BASE_URL = "https://api.x.ai/v1"
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+XAI_DEFAULT_MODEL = "grok-beta"
+
 # Max concurrent Urbanista CLI calls (design pass; placement streams as each completes).
 # Higher = faster builds but more parallel API calls. 5 is safe for Claude Max plans.
 URBANISTA_MAX_CONCURRENT = int(os.environ.get("ETERNAL_URBANISTA_MAX_CONCURRENT", "5"))

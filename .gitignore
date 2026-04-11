@@ -12,6 +12,7 @@ roma_save.json.backup
 roma_districts_cache.json
 roma_surveys_cache.json
 roma_llm_settings.json
+data/llm_settings.json
 reload_trigger.txt
 
 # OS artifacts

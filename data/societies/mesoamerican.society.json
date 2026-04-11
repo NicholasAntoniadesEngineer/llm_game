@@ -1,0 +1,62 @@
+{
+  "name": "Mesoamerican",
+  "period": "ancient",
+  "characteristics": ["stepped_pyramid", "ceremonial", "astronomical", "limestone_megalithic"],
+  "building_types": {
+    "pyramid": {
+      "style": "stepped",
+      "roof_style": "platform",
+      "foundation": "platform_base",
+      "materials": ["limestone", "volcanic_tuff"]
+    },
+    "palace": {
+      "style": "courtyard",
+      "roof_style": "flat",
+      "foundation": "platform",
+      "materials": ["limestone", "stucco"]
+    }
+  },
+  "proportions": {
+    "step_height": 0.15,
+    "platform_width_ratio": 0.8,
+    "stair_angle": 0.5
+  },
+  "color_palette": ["#F5E6C8", "#D4A574", "#8B7355", "#228B22"],
+  "adaptation_rules": {
+    "climate_tropical": {"rain_collection": true, "ventilation": true},
+    "terrain_volcanic": {"earthquake_resistant": true}
+  },
+  "building_components": {
+    "temple": {
+      "ref_w": 4.5,
+      "ref_d": 4.5,
+      "components": [
+        {"type": "podium", "steps": 8, "height": 0.35, "color": "#C4A77D", "roughness": 0.9, "surface_detail": 0.7},
+        {"type": "podium", "steps": 6, "height": 0.25, "color": "#C4A77D", "roughness": 0.85, "surface_detail": 0.6},
+        {"type": "podium", "steps": 4, "height": 0.15, "color": "#CC5533", "roughness": 0.8},
+        {"type": "block", "stories": 1, "storyHeight": 0.25, "color": "#CC5533", "windows": 0, "windowColor": "#1A1008"},
+        {"type": "flat_roof", "color": "#C4A77D", "overhang": 0.02}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Mesoamerican pyramids have stepped construction with temples at summit",
+      "Palaces often have multiple courtyards and corbelled arches"
+    ],
+    "material_alternatives": {},
+    "scale_hints": {
+      "pyramid": "Pyramids scale dramatically - larger ceremonial centers have bigger structures"
+    },
+    "grammar_types": ["pyramid", "palace"]
+  },
+  "template_adaptations": {
+    "mesoamerican_pyramid": {
+      "cultural_modifiers": {
+        "description": "Majestic stepped pyramid with temple sanctuary at the summit",
+        "cultural_context": "Mesoamerican ceremonial architecture",
+        "complexity": "high"
+      }
+    }
+  }
+}

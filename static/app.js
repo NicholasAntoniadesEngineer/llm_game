@@ -758,6 +758,9 @@ function closeLlmSettingsOverlay() {
 
 function llmProviderDisplayName(providerRaw) {
     const p = (providerRaw || "claude_cli").toLowerCase();
+    if (p === "xai" || p === "grok") {
+        return "xAI Grok";
+    }
     return p === "openai_compatible" || p === "openai" || p === "chatgpt"
         ? "OpenAI-compatible API"
         : "Claude CLI";
@@ -844,13 +847,16 @@ function renderLlmSettings(msg) {
     for (const [key, spec] of Object.entries(msg.agents)) {
         const label = labels[key] || key;
         const prov = spec.provider || "claude_cli";
-        const provSelect = prov === "openai_compatible" ? "openai_compatible" : "claude_cli";
+        let provSelect = prov;
+        if (!["claude_cli", "openai_compatible", "xai", "grok"].includes(prov)) {
+            provSelect = "claude_cli";
+        }
         const model = spec.model || "";
         const baseUrl = spec.openai_base_url || "";
         const hasKey = !!spec.has_openai_api_key;
         const currentBaseDisplay = baseUrl.trim() ? escapeHtml(baseUrl) : "—";
         const currentKeyDisplay = hasKey ? "Saved on server (hidden)" : "Not set";
-        const showCurrentOpenAi = provSelect === "openai_compatible";
+        const showCurrentOpenAi = prov === "openai_compatible" || prov === "xai" || prov === "grok";
         const fieldset = document.createElement("fieldset");
         fieldset.className = "llm-agent-row";
         fieldset.dataset.agentKey = key;
@@ -878,6 +884,7 @@ function renderLlmSettings(msg) {
                             <select class="llm-provider">
                                 <option value="claude_cli">Claude CLI</option>
                                 <option value="openai_compatible">OpenAI-compatible API</option>
+                                <option value="xai">xAI Grok</option>
                             </select>
                         </label>
                         <label class="llm-label llm-claude-model-wrap">
@@ -889,12 +896,12 @@ function renderLlmSettings(msg) {
                         </label>
                         <label class="llm-label llm-openai-model-wrap">
                             <span class="llm-label-text">Model id</span>
-                            <input type="text" class="llm-model-openai" placeholder="e.g. gpt-4o-mini" />
+                            <input type="text" class="llm-model-openai" placeholder="e.g. grok-beta or gpt-4o-mini" />
                         </label>
                         <div class="llm-openai-fields">
                             <label class="llm-label">
                                 <span class="llm-label-text">Base URL (optional)</span>
-                                <input type="text" class="llm-openai-base" placeholder="https://api.openai.com/v1" />
+                                <input type="text" class="llm-openai-base" placeholder="https://api.x.ai/v1 or https://api.openai.com/v1" />
                             </label>
                             <label class="llm-label">
                                 <span class="llm-label-text">API key (blank = keep current)</span>
@@ -923,12 +930,13 @@ function updateLlmRowOpenAiVisibility(fieldset) {
     const newBlock = fieldset.querySelector(".llm-new-block");
     if (!newBlock) return;
     const prov = newBlock.querySelector(".llm-provider").value;
+    const isOpenAiLike = prov === "openai_compatible" || prov === "xai" || prov === "grok";
     const wrap = newBlock.querySelector(".llm-openai-fields");
-    if (wrap) wrap.style.display = prov === "openai_compatible" ? "block" : "none";
+    if (wrap) wrap.style.display = isOpenAiLike ? "block" : "none";
     const claudeModelWrap = newBlock.querySelector(".llm-claude-model-wrap");
     const openaiModelWrap = newBlock.querySelector(".llm-openai-model-wrap");
     if (claudeModelWrap) claudeModelWrap.style.display = prov === "claude_cli" ? "" : "none";
-    if (openaiModelWrap) openaiModelWrap.style.display = prov === "openai_compatible" ? "" : "none";
+    if (openaiModelWrap) openaiModelWrap.style.display = isOpenAiLike ? "" : "none";
 }
 
 async function saveLlmSettingsFromForm() {
@@ -958,11 +966,11 @@ async function saveLlmSettingsFromForm() {
             model = minp ? minp.value.trim() : "";
         }
         const patch = { provider, model };
-        if (provider === "openai_compatible") {
+        if (provider === "openai_compatible" || provider === "xai" || provider === "grok") {
             const base = newBlock.querySelector(".llm-openai-base").value.trim();
             const apiKey = newBlock.querySelector(".llm-openai-key").value;
             if (base) patch.openai_base_url = base;
-            if (apiKey) patch.openai_api_key = apiKey;
+            if (apiKey && apiKey.trim()) patch.openai_api_key = apiKey.trim();
         }
         overrides[key] = patch;
     }

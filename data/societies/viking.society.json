@@ -1,0 +1,98 @@
+{
+  "name": "Viking Norse",
+  "period": "medieval",
+  "characteristics": ["longhouse_geometry", "ship_inspired_forms", "runic_decoration", "timber_construction", "defensive_posture"],
+  "building_types": {
+    "longhouse": {
+      "style": "rectangular_hall",
+      "roof_style": "pitched",
+      "foundation": "earth_berm",
+      "materials": ["timber", "thatch", "stone"]
+    },
+    "mead_hall": {
+      "style": "feasting_hall",
+      "roof_style": "pitched",
+      "foundation": "elevated",
+      "materials": ["timber", "thatch", "carved_wood"]
+    },
+    "temple": {
+      "style": "sacred_grove",
+      "roof_style": "open_air",
+      "foundation": "natural",
+      "materials": ["wood", "stone", "bone"]
+    },
+    "fortress": {
+      "style": "defensive_ring",
+      "roof_style": "pitched",
+      "foundation": "motte_bailey",
+      "materials": ["timber", "earth", "stone"]
+    }
+  },
+  "proportions": {
+    "length_width_ratio": 3.5,
+    "roof_pitch_angle": 35.0,
+    "door_height_ratio": 0.7,
+    "post_spacing": 0.8
+  },
+  "color_palette": ["#8B4513", "#2F4F4F", "#228B22", "#4169E1", "#DC143C"],
+  "adaptation_rules": {
+    "climate_cold": {"insulation": true, "low_openings": true, "central_hearth": true},
+    "climate_coastal": {"elevated_foundations": true, "storm_resistant": true},
+    "terrain_forest": {"timber_abundance": true, "clearing_sites": true}
+  },
+  "building_components": {
+    "longhouse": {
+      "ref_w": 2.8,
+      "ref_d": 8.4,
+      "components": [
+        {"type": "timber_frame", "height": 0.8, "color": "#8B4513", "roughness": 0.9},
+        {"type": "thatch_roof", "pitch": 35.0, "color": "#228B22", "roughness": 0.95},
+        {"type": "central_hearth", "radius": 0.3, "color": "#2F4F4F", "roughness": 0.8},
+        {"type": "carved_posts", "count": 12, "height": 0.6, "color": "#8B4513", "roughness": 0.85},
+        {"type": "runic_carvings", "density": 0.4, "color": "#2F4F4F", "roughness": 0.9}
+      ]
+    },
+    "mead_hall": {
+      "ref_w": 3.2,
+      "ref_d": 12.0,
+      "components": [
+        {"type": "grand_entrance", "width": 0.8, "height": 0.7, "color": "#8B4513", "roughness": 0.8},
+        {"type": "feasting_tables", "length": 2.0, "color": "#8B4513", "roughness": 0.9},
+        {"type": "high_seat", "elevation": 0.3, "color": "#DAA520", "roughness": 0.7},
+        {"type": "shield_walls", "height": 0.5, "color": "#4169E1", "roughness": 0.8}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Viking longhouses were rectangular timber structures with thatched roofs",
+      "Mead halls were grand feasting spaces with high seats and central hearths",
+      "Ship-inspired curved forms appeared in boat burials and architectural details",
+      "Runic carvings and animal motifs decorated important timber elements"
+    ],
+    "material_alternatives": {
+      "stone": "timber was preferred where available, stone for foundations only"
+    },
+    "scale_hints": {
+      "longhouse": "Longhouses ranged from small farmsteads to large chieftain halls",
+      "mead_hall": "Mead halls were communal spaces, larger for important leaders"
+    },
+    "grammar_types": ["longhouse", "mead_hall", "temple", "fortress"]
+  },
+  "template_adaptations": {
+    "viking_longhouse": {
+      "cultural_modifiers": {
+        "description": "Viking longhouse with timber frame, thatched roof, and central hearth",
+        "cultural_context": "Norse domestic architecture",
+        "complexity": "medium"
+      }
+    },
+    "viking_mead_hall": {
+      "cultural_modifiers": {
+        "description": "Grand Viking mead hall for feasting and assemblies",
+        "cultural_context": "Norse communal architecture",
+        "complexity": "high"
+      }
+    }
+  }
+}

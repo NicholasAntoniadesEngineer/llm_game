@@ -1,0 +1,45 @@
+{
+  "name": "Greek",
+  "period": "classical",
+  "characteristics": ["optical_refinements", "peristyle", "acropolis", "democratic_scale"],
+  "building_types": {
+    "temple": {
+      "orders": ["doric", "ionic"],
+      "roof_style": "tiled",
+      "foundation": "crepidoma",
+      "materials": ["marble", "limestone"]
+    },
+    "stoa": {
+      "orders": ["doric", "ionic"],
+      "roof_style": "tiled",
+      "foundation": "stylobate",
+      "materials": ["marble", "poros"]
+    }
+  },
+  "proportions": {
+    "column_height_to_diameter": 6.0,
+    "entablature_to_column_height": 0.2,
+    "pediment_rise_to_width": 0.15
+  },
+  "color_palette": ["#F5F5F0", "#E8DCC8", "#D4A574", "#8B7355"],
+  "adaptation_rules": {
+    "climate_mediterranean": {"optical_corrections": true, "natural_light": true},
+    "terrain_mountain": {"acropolis_siting": true}
+  },
+  "building_components": {},
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Greek temples favor doric order, especially in mainland Greece",
+      "Greek agoras are open marketplaces with surrounding stoas"
+    ],
+    "material_alternatives": {
+      "stone": "marble for temples, limestone for houses",
+      "brick": "marble for public buildings"
+    },
+    "scale_hints": {
+      "temple": "Greek temples maintain proportional harmony - vary width more than height"
+    },
+    "grammar_types": ["temple", "stoa", "agora"]
+  },
+  "template_adaptations": {}
+}

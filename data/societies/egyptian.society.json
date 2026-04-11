@@ -1,0 +1,96 @@
+{
+  "name": "Ancient Egyptian",
+  "period": "ancient",
+  "characteristics": ["monumental_scale", "solar_cult", "hieroglyphic_decoration", "mudbrick_construction", "mastaba_tombs"],
+  "building_types": {
+    "temple": {
+      "style": "hypostyle_hall",
+      "roof_style": "flat",
+      "foundation": "platform",
+      "materials": ["sandstone", "limestone", "granite"]
+    },
+    "pyramid": {
+      "style": "stepped_mastaba",
+      "roof_style": "platform",
+      "foundation": "mastaba_base",
+      "materials": ["limestone", "mudbrick"]
+    },
+    "palace": {
+      "style": "peristyle_court",
+      "roof_style": "flat",
+      "foundation": "elevated",
+      "materials": ["mudbrick", "stone", "cedar"]
+    },
+    "mastaba": {
+      "style": "rectangular_tomb",
+      "roof_style": "flat",
+      "foundation": "mudbrick_base",
+      "materials": ["mudbrick", "limestone"]
+    }
+  },
+  "proportions": {
+    "pyramid_slope": 0.52,
+    "hypostyle_ratio": 0.15,
+    "mastaba_proportion": [1, 2, 1],
+    "column_spacing": 0.25
+  },
+  "color_palette": ["#D4AF37", "#8B7355", "#F5E6C8", "#228B22", "#4169E1"],
+  "adaptation_rules": {
+    "climate_desert": {"thick_walls": true, "minimal_openings": true, "thermal_mass": true},
+    "terrain_river": {"flood_resistant": true, "waterfront_access": true},
+    "terrain_desert": {"wind_protection": true, "shade_structures": true}
+  },
+  "building_components": {
+    "temple": {
+      "ref_w": 4.5,
+      "ref_d": 3.6,
+      "components": [
+        {"type": "pylon", "height": 0.8, "color": "#D4AF37", "roughness": 0.8},
+        {"type": "hypostyle_hall", "columns": 12, "height": 0.6, "color": "#F5E6C8", "roughness": 0.7},
+        {"type": "sanctuary", "depth": 0.4, "color": "#D4AF37", "roughness": 0.6},
+        {"type": "hieroglyphs", "density": 0.3, "color": "#8B7355", "roughness": 0.9}
+      ]
+    },
+    "pyramid": {
+      "ref_w": 6.0,
+      "ref_d": 6.0,
+      "components": [
+        {"type": "mastaba_base", "height": 0.3, "color": "#F5E6C8", "roughness": 0.85},
+        {"type": "stepped_body", "steps": 6, "height": 1.2, "color": "#F5E6C8", "roughness": 0.8},
+        {"type": "casing_stones", "color": "#FFFFFF", "roughness": 0.3, "metalness": 0.1}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [
+      "Egyptian temples often feature hypostyle halls with dense column arrangements",
+      "Pyramids vary greatly in size - from small mastabas to massive monuments",
+      "Mudbrick construction was common for domestic and administrative buildings",
+      "Solar alignment and astronomical considerations influenced temple orientation"
+    ],
+    "material_alternatives": {
+      "stone": "mudbrick for smaller structures, limestone for important buildings"
+    },
+    "scale_hints": {
+      "pyramid": "Pyramids range from small mastaba tombs to massive royal monuments",
+      "temple": "Temple complexes often include multiple courts and halls of varying scale"
+    },
+    "grammar_types": ["temple", "pyramid", "palace", "mastaba"]
+  },
+  "template_adaptations": {
+    "egyptian_temple": {
+      "cultural_modifiers": {
+        "description": "Sacred Egyptian temple with hypostyle hall and solar alignment",
+        "cultural_context": "Ancient Egyptian religious architecture",
+        "complexity": "high"
+      }
+    },
+    "egyptian_pyramid": {
+      "cultural_modifiers": {
+        "description": "Monumental stepped pyramid with astronomical alignment",
+        "cultural_context": "Ancient Egyptian funerary architecture",
+        "complexity": "very_high"
+      }
+    }
+  }
+}

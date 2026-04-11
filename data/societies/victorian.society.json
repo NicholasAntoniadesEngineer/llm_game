@@ -1,0 +1,38 @@
+{
+  "name": "Victorian",
+  "period": "industrial",
+  "characteristics": ["ornamental", "eclectic", "technological", "aspirational"],
+  "building_types": {
+    "mansion": {
+      "style": "eclectic",
+      "roof_style": "mansard",
+      "foundation": "basement",
+      "materials": ["brick", "stone", "cast_iron"]
+    }
+  },
+  "proportions": {
+    "ornament_ratio": 0.3,
+    "bay_window_depth": 0.2,
+    "tower_height_ratio": 1.5
+  },
+  "color_palette": ["#8B4513", "#DAA520", "#228B22", "#4169E1", "#FF6347"],
+  "adaptation_rules": {
+    "climate_temperate": {"insulation": true, "ornamental_details": true}
+  },
+  "building_components": {},
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {},
+    "scale_hints": {},
+    "grammar_types": ["mansion"]
+  },
+  "template_adaptations": {
+    "victorian_mansion": {
+      "cultural_modifiers": {
+        "description": "Ornate Victorian mansion with complex roofline and decorative details",
+        "cultural_context": "19th century Victorian architecture",
+        "complexity": "very_high"
+      }
+    }
+  }
+}

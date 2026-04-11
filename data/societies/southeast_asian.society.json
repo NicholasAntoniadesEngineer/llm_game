@@ -1,0 +1,52 @@
+{
+  "name": "Southeast Asian",
+  "period": "ancient",
+  "characteristics": ["prasat_tower", "temple_mountain", "volcanic_influence", "tropical_adaptation"],
+  "building_types": {
+    "temple": {
+      "style": "prasat",
+      "roof_style": "towered",
+      "foundation": "platform",
+      "materials": ["sandstone", "laterite", "brick"]
+    }
+  },
+  "proportions": {
+    "tower_ratio": 0.7,
+    "platform_steps": 0.15,
+    "cornice_overhang": 0.3
+  },
+  "color_palette": ["#A09880", "#808080", "#DAA520", "#228B22"],
+  "adaptation_rules": {
+    "climate_tropical": {"ventilation": true, "monsoon_protection": true},
+    "terrain_volcanic": {"earthquake_resistant": true}
+  },
+  "building_components": {
+    "temple": {
+      "ref_w": 5.4,
+      "ref_d": 5.4,
+      "components": [
+        {"type": "podium", "steps": 3, "height": 0.06, "color": "#808080", "roughness": 0.85, "surface_detail": 0.7},
+        {"type": "procedural", "stack_role": "foundation", "recipe": "temple_mountain_base",
+         "parts": [
+           {"shape": "box", "width": 0.9, "height": 0.2, "depth": 0.9, "color": "#808080", "position": [0, 0, 0], "roughness": 0.8, "surface_detail": 0.65},
+           {"shape": "box", "width": 0.7, "height": 0.2, "depth": 0.7, "color": "#808080", "position": [0, 0.2, 0], "roughness": 0.75, "surface_detail": 0.6},
+           {"shape": "box", "width": 0.5, "height": 0.2, "depth": 0.5, "color": "#808080", "position": [0, 0.4, 0], "roughness": 0.7, "surface_detail": 0.55}
+         ]},
+        {"type": "procedural", "stack_role": "structural", "recipe": "prasat_tower",
+         "parts": [
+           {"shape": "box", "width": 0.3, "height": 0.4, "depth": 0.3, "color": "#A09880", "position": [0, 0.1, 0], "roughness": 0.7, "surface_detail": 0.6},
+           {"shape": "cone", "radius": 0.18, "height": 0.3, "color": "#A09880", "position": [0, 0.5, 0], "roughness": 0.65},
+           {"shape": "sphere", "radius": 0.05, "color": "#DAA520", "position": [0, 0.75, 0], "roughness": 0.3, "metalness": 0.2}
+         ]},
+        {"type": "door", "width": 0.1, "height": 0.18, "color": "#4A4A4A", "roughness": 0.7}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {},
+    "scale_hints": {},
+    "grammar_types": ["temple"]
+  },
+  "template_adaptations": {}
+}

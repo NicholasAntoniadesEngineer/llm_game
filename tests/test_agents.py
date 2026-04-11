@@ -168,6 +168,24 @@ class TestProviderFactory:
         assert isinstance(ClaudeCliProvider(), LlmProvider)
         assert isinstance(OpenAICompatibleProvider(), LlmProvider)
 
+    @pytest.mark.asyncio
+    async def test_xai_multi_agent_model_rejected_before_http(self):
+        """xAI multi-agent model ids are not valid for /v1/chat/completions."""
+        from core.errors import AgentGenerationError
+
+        p = OpenAICompatibleProvider(
+            base_url="https://api.x.ai/v1",
+            api_key="test-key",
+            default_model=None,
+        )
+        with pytest.raises(AgentGenerationError, match="multi-agent"):
+            await p.complete(
+                role="cartographus",
+                system_prompt="sys",
+                user_text="user",
+                model="grok-4.20-multi-agent-0309-reasoning",
+            )
+
 
 # ---------------------------------------------------------------------------
 # agents.base — _try_decode_json_object and _parse_json

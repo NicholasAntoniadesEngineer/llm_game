@@ -1,0 +1,56 @@
+{
+  "name": "Islamic",
+  "period": "medieval",
+  "characteristics": ["muqarnas", "courtyard", "geometric_patterns", "ablutions"],
+  "building_types": {
+    "mosque": {
+      "style": "hypostyle",
+      "roof_style": "domed",
+      "foundation": "ablution_courts",
+      "materials": ["marble", "tile", "stucco"]
+    },
+    "palace": {
+      "style": "courtyard",
+      "roof_style": "vaulted",
+      "foundation": "elevated",
+      "materials": ["marble", "tile", "muqarnas"]
+    }
+  },
+  "proportions": {
+    "courtyard_ratio": 0.6,
+    "dome_height_to_diameter": 0.8,
+    "minaret_height": 2.0
+  },
+  "color_palette": ["#F0F0F0", "#1E3A6A", "#DAA520", "#8B4513"],
+  "adaptation_rules": {
+    "climate_desert": {"courtyard_shading": true, "water_features": true},
+    "climate_mountain": {"thick_walls": true, "wind_towers": true}
+  },
+  "building_components": {
+    "temple": {
+      "ref_w": 3.6,
+      "ref_d": 2.7,
+      "components": [
+        {"type": "podium", "steps": 2, "height": 0.06, "color": "#F5E6C8", "roughness": 0.8},
+        {"type": "arcade", "arches": 6, "height": 0.4, "color": "#F5E6C8", "roughness": 0.65},
+        {"type": "dome", "radius": 0.3, "color": "#DAA520", "roughness": 0.35, "metalness": 0.15},
+        {"type": "walls", "height": 0.3, "thickness": 0.08, "color": "#F0EAD6", "roughness": 0.7}
+      ]
+    }
+  },
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {},
+    "scale_hints": {},
+    "grammar_types": ["mosque", "palace"]
+  },
+  "template_adaptations": {
+    "islamic_palace": {
+      "cultural_modifiers": {
+        "description": "Elegant Islamic palace with domes, arches, and intricate tile work",
+        "cultural_context": "Islamic architectural tradition",
+        "complexity": "high"
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "name": "Medieval European",
+  "period": "medieval",
+  "characteristics": ["gothic_arch", "fortified", "guild_system", "religious_dominance"],
+  "building_types": {
+    "cathedral": {
+      "style": "gothic",
+      "roof_style": "vaulted",
+      "foundation": "buttressed",
+      "materials": ["limestone", "stained_glass"]
+    },
+    "castle": {
+      "style": "fortified",
+      "roof_style": "conical",
+      "foundation": "motte_and_bailey",
+      "materials": ["stone", "timber"]
+    }
+  },
+  "proportions": {
+    "height_to_width": 2.5,
+    "buttress_spacing": 0.3,
+    "vault_rise": 0.4
+  },
+  "color_palette": ["#E8DCC8", "#8B7355", "#654321", "#2F4F4F"],
+  "adaptation_rules": {
+    "climate_temperate": {"thick_walls": true, "steep_roofs": true},
+    "terrain_hills": {"defensive_positioning": true}
+  },
+  "building_components": {},
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {
+      "brick": "stone for castles and churches"
+    },
+    "scale_hints": {},
+    "grammar_types": ["cathedral", "castle"]
+  },
+  "template_adaptations": {
+    "medieval_castle": {
+      "cultural_modifiers": {
+        "description": "Formidable medieval castle with towers and defensive walls",
+        "cultural_context": "European medieval military architecture",
+        "complexity": "very_high"
+      }
+    },
+    "gothic_cathedral": {
+      "cultural_modifiers": {
+        "description": "Magnificent Gothic cathedral with pointed arches and flying buttresses",
+        "cultural_context": "European Gothic ecclesiastical architecture",
+        "complexity": "very_high"
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "Renaissance",
+  "period": "renaissance",
+  "characteristics": ["classical_orders", "perspective", "symmetry", "humanism"],
+  "building_types": {
+    "palace": {
+      "orders": ["corinthian", "composite"],
+      "roof_style": "mansard",
+      "foundation": "rusticated_base",
+      "materials": ["marble", "stone", "stucco"]
+    }
+  },
+  "proportions": {
+    "facade_proportions": [1, 1.618, 2.618],
+    "column_spacing": 0.25,
+    "pediment_angle": 0.1
+  },
+  "color_palette": ["#F5F5F0", "#E8DCC8", "#D4A574", "#8B7355"],
+  "adaptation_rules": {
+    "climate_mediterranean": {"loggias": true, "thermal_mass": true}
+  },
+  "building_components": {},
+  "prompt_hints": {
+    "variety_suggestions": [],
+    "material_alternatives": {},
+    "scale_hints": {},
+    "grammar_types": ["palace"]
+  },
+  "template_adaptations": {
+    "renaissance_palace": {
+      "cultural_modifiers": {
+        "description": "Grand Renaissance palace with classical proportions and symmetry",
+        "cultural_context": "Italian Renaissance palace architecture",
+        "complexity": "high"
+      }
+    }
+  }
+}

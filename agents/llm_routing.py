@@ -8,11 +8,13 @@ Keys must match what BuildEngine passes as llm_agent_key.
 
 Optional override fields (from UI or advanced use):
   - claude_binary: Claude CLI executable
-  - openai_base_url / openai_api_key: OpenAI-compatible endpoints
+  - openai_base_url / openai_api_key: for OpenAI-compatible endpoints (incl. xAI)
+  - xai support via provider="xai" (auto-sets https://api.x.ai/v1 and uses XAI_API_KEY env or config)
 
 provider values:
   - "claude_cli" — Anthropic Claude Code CLI (subprocess)
-  - "openai_compatible" — OpenAI Chat Completions API (LM Studio, vLLM, etc.)
+  - "openai_compatible" — OpenAI Chat Completions API (LM Studio, vLLM, OpenAI, etc.)
+  - "xai" or "grok" — xAI Grok API (https://api.x.ai/v1, requires XAI_API_KEY)
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from typing import Any, TypedDict
 class AgentLlmSpec(TypedDict, total=False):
     """Per-agent LLM routing."""
 
-    provider: str  # claude_cli | openai_compatible
-    model: str  # Claude CLI model id or API model id
+    provider: str  # claude_cli | openai_compatible | xai
+    model: str  # Claude CLI model id or API model id (e.g. grok-beta for xAI)
     claude_binary: str | None
     openai_base_url: str | None
     openai_api_key: str | None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -141,15 +142,18 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
     return count
 
 
-def compute_elevation(hills: list[dict], x: int, y: int) -> float:
-    """Compute elevation at a point from hills data.
+def compute_elevation(hills: list[dict], x: int, y: int, terrain_features: dict | None = None) -> float:
+    """Compute elevation at a point from hills and terrain features.
 
+    Enhanced with rivers, coastlines, and natural formations.
     Uses gaussian falloff: elev = sum(peak * exp(-dist^2 / (2 * radius^2)))
     """
-    if not hills:
+    if not hills and not terrain_features:
         return 0.0
 
     total = 0.0
+
+    # Basic hill elevation
     for hill in hills:
         cx = hill.get("cx", 0)
         cy = hill.get("cy", 0)
@@ -162,4 +166,217 @@ def compute_elevation(hills: list[dict], x: int, y: int) -> float:
             contribution = peak * math.exp(-dist_sq / sigma_sq)
             total += contribution
 
+    # Enhanced terrain features
+    if terrain_features:
+        total += _compute_river_elevation(x, y, terrain_features.get("rivers", []))
+        total += _compute_coastline_elevation(x, y, terrain_features.get("coastlines", []))
+        total += _compute_valley_elevation(x, y, terrain_features.get("valleys", []))
+        total += _compute_plateau_elevation(x, y, terrain_features.get("plateaus", []))
+
     return total
+
+
+def _compute_river_elevation(x: int, y: int, rivers: list[dict]) -> float:
+    """Compute elevation modification from rivers (typically lower elevation)."""
+    if not rivers:
+        return 0.0
+
+    min_elevation = 0.0
+    for river in rivers:
+        # Rivers follow paths and create valleys
+        path = river.get("path", [])
+        width = river.get("width", 2)
+        depth = river.get("depth", 0.5)
+
+        min_dist = float('inf')
+        for px, py in path:
+            dist = math.sqrt((x - px) ** 2 + (y - py) ** 2)
+            min_dist = min(min_dist, dist)
+
+        if min_dist <= width:
+            # Inside river: lower elevation
+            river_depth = depth * (1 - min_dist / width)
+            min_elevation = min(min_elevation, -river_depth)
+
+    return min_elevation
+
+
+def _compute_coastline_elevation(x: int, y: int, coastlines: list[dict]) -> float:
+    """Compute elevation modification from coastlines (gradual slope to water)."""
+    if not coastlines:
+        return 0.0
+
+    for coastline in coastlines:
+        boundary_y = coastline.get("y_boundary", 0)
+        slope_width = coastline.get("slope_width", 10)
+        water_level = coastline.get("water_level", -0.2)
+
+        if coastline.get("direction", "north") == "north":
+            # Northern coastline: lower elevations as y decreases
+            if y <= boundary_y:
+                return water_level
+            elif y <= boundary_y + slope_width:
+                # Gradual slope up from water
+                progress = (y - boundary_y) / slope_width
+                return water_level + (progress * 0.3)
+        else:
+            # Southern coastline: lower elevations as y increases
+            if y >= boundary_y:
+                return water_level
+            elif y >= boundary_y - slope_width:
+                progress = (boundary_y - y) / slope_width
+                return water_level + (progress * 0.3)
+
+    return 0.0
+
+
+def _compute_valley_elevation(x: int, y: int, valleys: list[dict]) -> float:
+    """Compute elevation modification from valleys (low areas between hills)."""
+    if not valleys:
+        return 0.0
+
+    for valley in valleys:
+        cx = valley.get("cx", 0)
+        cy = valley.get("cy", 0)
+        length = valley.get("length", 20)
+        width = valley.get("width", 5)
+        depth = valley.get("depth", 0.8)
+
+        # Valley as an elongated gaussian depression
+        dx = x - cx
+        dy = y - cy
+
+        # Rotate valley if it has an angle
+        angle = valley.get("angle", 0) * math.pi / 180
+        rotated_dx = dx * math.cos(angle) + dy * math.sin(angle)
+        rotated_dy = -dx * math.sin(angle) + dy * math.cos(angle)
+
+        # Elongated gaussian: wider in length direction, narrower in width
+        sigma_length = length / 3
+        sigma_width = width / 3
+
+        length_factor = math.exp(-(rotated_dx ** 2) / (2 * sigma_length ** 2))
+        width_factor = math.exp(-(rotated_dy ** 2) / (2 * sigma_width ** 2))
+
+        valley_depth = -depth * length_factor * width_factor
+        return valley_depth
+
+    return 0.0
+
+
+def _compute_plateau_elevation(x: int, y: int, plateaus: list[dict]) -> float:
+    """Compute elevation modification from plateaus (flat elevated areas)."""
+    if not plateaus:
+        return 0.0
+
+    for plateau in plateaus:
+        cx = plateau.get("cx", 0)
+        cy = plateau.get("cy", 0)
+        width = plateau.get("width", 10)
+        height = plateau.get("height", 10)
+        elevation = plateau.get("elevation", 0.5)
+
+        # Simple box plateau
+        if abs(x - cx) <= width / 2 and abs(y - cy) <= height / 2:
+            return elevation
+
+    return 0.0
+
+
+def generate_terrain_features(city_size: tuple[int, int], culture: str = "roman") -> dict:
+    """Generate procedural terrain features based on city size and culture.
+
+    Args:
+        city_size: (width, height) of the city area
+        culture: Cultural context for terrain generation
+
+    Returns:
+        Dictionary of terrain features for elevation computation
+    """
+    width, height = city_size
+    center_x, center_y = width // 2, height // 2
+
+    features = {
+        "rivers": [],
+        "coastlines": [],
+        "valleys": [],
+        "plateaus": []
+    }
+
+    # Generate rivers based on culture and geography
+    if culture in ("roman", "greek"):
+        # Mediterranean cultures often have rivers
+        if width > 50:  # Only add rivers to larger cities
+            num_rivers = random.randint(1, 3)
+            for _ in range(num_rivers):
+                # River starting from edge, flowing toward center
+                start_side = random.choice(["north", "south", "east", "west"])
+                if start_side == "north":
+                    start_x = random.randint(0, width - 1)
+                    start_y = 0
+                    end_x = center_x + random.randint(-20, 20)
+                    end_y = height - 1
+                elif start_side == "south":
+                    start_x = random.randint(0, width - 1)
+                    start_y = height - 1
+                    end_x = center_x + random.randint(-20, 20)
+                    end_y = 0
+                elif start_side == "east":
+                    start_x = width - 1
+                    start_y = random.randint(0, height - 1)
+                    end_x = 0
+                    end_y = center_y + random.randint(-20, 20)
+                else:  # west
+                    start_x = 0
+                    start_y = random.randint(0, height - 1)
+                    end_x = width - 1
+                    end_y = center_y + random.randint(-20, 20)
+
+                # Create river path
+                path = bresenham_line(start_x, start_y, end_x, end_y)
+                features["rivers"].append({
+                    "path": path,
+                    "width": random.randint(2, 4),
+                    "depth": random.uniform(0.3, 0.8)
+                })
+
+    # Generate coastlines for coastal cities
+    coastal_cultures = ("greek", "roman", "caral", "olmec")
+    if culture in coastal_cultures and random.random() < 0.4:
+        # 40% chance of coastline
+        boundary_y = random.choice([height // 4, 3 * height // 4])
+        direction = "north" if boundary_y < height // 2 else "south"
+        features["coastlines"].append({
+            "y_boundary": boundary_y,
+            "slope_width": random.randint(8, 15),
+            "water_level": -0.2,
+            "direction": direction
+        })
+
+    # Generate valleys between hills
+    if width > 40:
+        num_valleys = random.randint(0, 2)
+        for _ in range(num_valleys):
+            features["valleys"].append({
+                "cx": random.randint(10, width - 10),
+                "cy": random.randint(10, height - 10),
+                "length": random.randint(15, 30),
+                "width": random.randint(3, 8),
+                "depth": random.uniform(0.4, 0.9),
+                "angle": random.randint(0, 180)
+            })
+
+    # Generate plateaus for elevated ceremonial areas
+    ceremonial_cultures = ("mesoamerican", "andean", "egyptian")
+    if culture in ceremonial_cultures and random.random() < 0.6:
+        num_plateaus = random.randint(1, 3)
+        for _ in range(num_plateaus):
+            features["plateaus"].append({
+                "cx": random.randint(20, width - 20),
+                "cy": random.randint(20, height - 20),
+                "width": random.randint(8, 15),
+                "height": random.randint(8, 15),
+                "elevation": random.uniform(0.3, 0.7)
+            })
+
+    return features

@@ -35,5 +35,99 @@
   "porphyry": {"color": "#6b2d4e", "hex": "#6b2d4e", "roughness": 0.30, "metalness": 0.04},
   "concrete": {"color": "#a89a86", "hex": "#a89a86", "roughness": 0.95, "metalness": 0.01},
   "gilded": {"color": "#daa520", "hex": "#daa520", "roughness": 0.30, "metalness": 0.55},
-  "lead": {"color": "#6b6b6b", "hex": "#6b6b6b", "roughness": 0.70, "metalness": 0.25}
+   "lead": {"color": "#6b6b6b", "hex": "#6b6b6b", "roughness": 0.70, "metalness": 0.25},
+
+   "_aging_profiles": {
+     "pristine": {
+       "roughness_modifier": 0.0,
+       "color_shift": [0.0, 0.0, 0.0],
+       "detail_modifier": 0.0
+     },
+     "weathered": {
+       "roughness_modifier": 0.3,
+       "color_shift": [0.1, 0.05, -0.05],
+       "detail_modifier": 0.4
+     },
+     "ancient": {
+       "roughness_modifier": 0.5,
+       "color_shift": [0.2, 0.1, -0.1],
+       "detail_modifier": 0.7
+     },
+     "ruined": {
+       "roughness_modifier": 0.7,
+       "color_shift": [0.3, 0.15, -0.15],
+       "detail_modifier": 1.0
+     }
+   },
+
+   "_climate_adaptations": {
+     "temperate": {
+       "color_shift": [0.0, 0.0, 0.0],
+       "roughness_modifier": 0.0,
+       "aging_rate": 1.0
+     },
+     "desert": {
+       "color_shift": [0.15, 0.05, -0.1],
+       "roughness_modifier": 0.2,
+       "aging_rate": 1.5
+     },
+     "tropical": {
+       "color_shift": [-0.05, 0.1, 0.05],
+       "roughness_modifier": -0.1,
+       "aging_rate": 1.8
+     },
+     "arctic": {
+       "color_shift": [0.1, 0.1, 0.2],
+       "roughness_modifier": 0.1,
+       "aging_rate": 0.7
+     },
+     "mountain": {
+       "color_shift": [0.05, 0.02, -0.05],
+       "roughness_modifier": 0.25,
+       "aging_rate": 1.2
+     }
+   },
+
+   "_material_aging_rules": {
+     "stone": {
+       "aging_curve": "slow",
+       "climate_sensitivity": {
+         "desert": "bleaches",
+         "tropical": "grows_moss",
+         "arctic": "cracks"
+       }
+     },
+     "marble": {
+       "aging_curve": "medium",
+       "climate_sensitivity": {
+         "desert": "patinates",
+         "tropical": "stains",
+         "arctic": "crystallizes"
+       }
+     },
+     "brick": {
+       "aging_curve": "medium",
+       "climate_sensitivity": {
+         "desert": "fades",
+         "tropical": "crumbles",
+         "arctic": "frost_damage"
+       }
+     },
+     "wood": {
+       "aging_curve": "fast",
+       "climate_sensitivity": {
+         "desert": "dries_cracks",
+         "tropical": "rots",
+         "arctic": "warps"
+       }
+     },
+     "stucco": {
+       "aging_curve": "fast",
+       "climate_sensitivity": {
+         "desert": "cracks",
+         "tropical": "molds",
+         "arctic": "spalls"
+       }
+     }
+   }
 }

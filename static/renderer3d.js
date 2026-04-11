@@ -14,6 +14,243 @@ const PHASE4_STEP_COUNT = 3;
 /** Extra world half-height margin for frustum culling when Phase 4 adds façade extrusions (tile units × TILE_SIZE). */
 const PHASE4_CULL_HEIGHT_EXTRA = 0.12;
 
+/** Enhanced surface generation constants */
+const SURFACE_DETAIL_LEVELS = {
+    LOW: 0.2,
+    MEDIUM: 0.5,
+    HIGH: 0.8,
+    ULTRA: 1.0
+};
+
+const TERRAIN_WEATHERING_TYPES = {
+    FRESH: { roughness: 0.3, detail: 0.2 },
+    WEATHERED: { roughness: 0.7, detail: 0.6 },
+    ANCIENT: { roughness: 0.9, detail: 0.9 },
+    RUINED: { roughness: 0.95, detail: 1.0 }
+};
+
+const MATERIAL_AGING_TYPES = {
+    PRISTINE: { colorShift: 0.0, roughnessIncrease: 0.0, detailIncrease: 0.0 },
+    WEATHERED: { colorShift: 0.15, roughnessIncrease: 0.2, detailIncrease: 0.3 },
+    ANCIENT: { colorShift: 0.3, roughnessIncrease: 0.4, detailIncrease: 0.6 },
+    RUINED: { colorShift: 0.5, roughnessIncrease: 0.6, detailIncrease: 1.0 }
+};
+
+const CLIMATE_MATERIAL_ADAPTATIONS = {
+    DESERT: { colorShift: [0.1, 0.05, -0.1], roughnessIncrease: 0.1, detailIncrease: 0.2 },
+    TROPICAL: { colorShift: [-0.1, 0.1, 0.05], roughnessIncrease: -0.05, detailIncrease: 0.1 },
+    TEMPERATE: { colorShift: [0.0, 0.0, 0.0], roughnessIncrease: 0.0, detailIncrease: 0.0 },
+    ARCTIC: { colorShift: [0.2, 0.2, 0.3], roughnessIncrease: 0.15, detailIncrease: 0.25 },
+    MOUNTAIN: { colorShift: [0.05, 0.02, -0.05], roughnessIncrease: 0.2, detailIncrease: 0.4 }
+};
+
+/** Enhanced surface generation methods */
+class SurfaceGenerator {
+    static generateWeatheredMaterial(baseMaterial, age, climate, exposure) {
+        const material = baseMaterial.clone();
+
+        // Apply aging effects
+        const aging = MATERIAL_AGING_TYPES[age] || MATERIAL_AGING_TYPES.WEATHERED;
+        const climateAdapt = CLIMATE_MATERIAL_ADAPTATIONS[climate] || CLIMATE_MATERIAL_ADAPTATIONS.TEMPERATE;
+
+        // Color weathering
+        const originalColor = material.color.clone();
+        const colorShift = aging.colorShift + climateAdapt.colorShift[0] * exposure;
+        const saturationShift = climateAdapt.colorShift[1] * exposure;
+        const brightnessShift = climateAdapt.colorShift[2] * exposure;
+
+        originalColor.offsetHSL(colorShift, saturationShift, brightnessShift);
+        material.color.copy(originalColor);
+
+        // Roughness and detail changes
+        material.roughness = Math.min(1.0, material.roughness + aging.roughnessIncrease + climateAdapt.roughnessIncrease * exposure);
+
+        // Add surface detail if supported
+        if (material.surface_detail !== undefined) {
+            material.surface_detail = Math.min(1.0, (material.surface_detail || 0) + aging.detailIncrease + climateAdapt.detailIncrease * exposure);
+        }
+
+        return material;
+    }
+
+    static generateProceduralSurfaceTexture(type, size, seed, weathering) {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+
+        // Seed-based pseudo-random
+        let s = seed >>> 0;
+        const rand = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 0xFFFFFFFF; };
+
+        if (type === "cracked_stone") {
+            // Generate cracked stone surface
+            ctx.fillStyle = "#8B7355";
+            ctx.fillRect(0, 0, size, size);
+
+            // Add cracks
+            ctx.strokeStyle = "#6B5A3A";
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 8; i++) {
+                ctx.beginPath();
+                let x = rand() * size;
+                let y = rand() * size;
+                ctx.moveTo(x, y);
+                for (let j = 0; j < 5; j++) {
+                    x += (rand() - 0.5) * 20;
+                    y += (rand() - 0.5) * 20;
+                    ctx.lineTo(Math.max(0, Math.min(size, x)), Math.max(0, Math.min(size, y)));
+                }
+                ctx.stroke();
+            }
+
+            // Add moss/lichen in cracks for weathered look
+            if (weathering > 0.5) {
+                ctx.fillStyle = "#4A6B3A";
+                for (let i = 0; i < 15; i++) {
+                    const x = rand() * size;
+                    const y = rand() * size;
+                    const w = 2 + rand() * 4;
+                    const h = 1 + rand() * 2;
+                    ctx.fillRect(x, y, w, h);
+                }
+            }
+
+        } else if (type === "weathered_brick") {
+            // Generate weathered brick pattern
+            ctx.fillStyle = "#8B4513";
+            ctx.fillRect(0, 0, size, size);
+
+            // Brick pattern
+            const brickW = size / 6;
+            const brickH = size / 12;
+            ctx.fillStyle = "#A0522D";
+            for (let row = 0; row < 12; row++) {
+                const offset = (row % 2) * (brickW / 2);
+                for (let col = 0; col < 7; col++) {
+                    const x = col * brickW + offset;
+                    const y = row * brickH;
+                    ctx.fillRect(x + 1, y + 1, brickW - 2, brickH - 2);
+                }
+            }
+
+            // Add weathering effects
+            if (weathering > 0.3) {
+                ctx.fillStyle = "rgba(139, 69, 19, 0.3)";
+                for (let i = 0; i < 20; i++) {
+                    const x = rand() * size;
+                    const y = rand() * size;
+                    const w = 3 + rand() * 8;
+                    const h = 2 + rand() * 4;
+                    ctx.fillRect(x, y, w, h);
+                }
+            }
+
+        } else if (type === "eroded_earth") {
+            // Generate eroded earth surface
+            const gradient = ctx.createLinearGradient(0, 0, 0, size);
+            gradient.addColorStop(0, "#8B7355");
+            gradient.addColorStop(1, "#6B5A3A");
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, size, size);
+
+            // Add erosion channels
+            ctx.strokeStyle = "#5A4A2A";
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                let x = rand() * size;
+                let y = 0;
+                ctx.moveTo(x, y);
+                for (let j = 0; j < 10; j++) {
+                    y += size / 10;
+                    x += (rand() - 0.5) * 8;
+                    ctx.lineTo(Math.max(0, Math.min(size, x)), y);
+                }
+                ctx.stroke();
+            }
+
+            // Add small rocks/pebbles
+            ctx.fillStyle = "#7A6545";
+            for (let i = 0; i < 30; i++) {
+                const x = rand() * size;
+                const y = rand() * size;
+                const r = 1 + rand() * 2;
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+        texture.needsUpdate = true;
+        return texture;
+    }
+
+    static applyTerrainDetail(mesh, detailLevel, weatheringType) {
+        if (!mesh.material) return;
+
+        const weathering = TERRAIN_WEATHERING_TYPES[weatheringType] || TERRAIN_WEATHERING_TYPES.WEATHERED;
+
+        // Apply enhanced roughness and normal mapping
+        if (mesh.material.roughness !== undefined) {
+            mesh.material.roughness = Math.min(1.0, mesh.material.roughness + weathering.roughness * detailLevel);
+        }
+
+        // Add surface detail if supported
+        if (mesh.material.surface_detail !== undefined) {
+            mesh.material.surface_detail = Math.min(1.0, weathering.detail * detailLevel);
+        }
+
+        // Apply normal map for surface relief
+        if (this._terrainNormalMap && mesh.material.normalMap === undefined) {
+            mesh.material.normalMap = this._terrainNormalMap;
+            mesh.material.normalScale = new THREE.Vector2(0.3 * detailLevel, 0.3 * detailLevel);
+        }
+    }
+
+    static generateAdaptiveFoundation(buildingType, terrainType, slope, climate) {
+        const foundation = {
+            type: "adaptive",
+            height: 0,
+            material: "stone",
+            adaptations: []
+        };
+
+        // Terrain-specific adaptations
+        if (terrainType === "hills" || slope > 0.3) {
+            foundation.adaptations.push("retaining_walls");
+            foundation.height = Math.max(0.2, slope * 0.5);
+        }
+
+        if (terrainType === "water" || terrainType === "marsh") {
+            foundation.adaptations.push("stilts");
+            foundation.height = 0.8;
+            foundation.material = "wood";
+        }
+
+        // Climate-specific adaptations
+        if (climate === "DESERT") {
+            foundation.material = "sandstone";
+            foundation.adaptations.push("thermal_mass");
+        } else if (climate === "TROPICAL") {
+            foundation.adaptations.push("ventilation");
+        } else if (climate === "ARCTIC") {
+            foundation.adaptations.push("insulation");
+            foundation.height = Math.max(foundation.height, 0.3);
+        }
+
+        // Building type specific adaptations
+        if (buildingType === "temple") {
+            foundation.adaptations.push("elevated_platform");
+            foundation.height = Math.max(foundation.height, 0.4);
+        }
+
+        return foundation;
+    }
+}
+
 class WorldRenderer {
     static _VALID_STACK_ROLES = new Set([
         "foundation", "structural", "infill", "roof", "decorative", "freestanding",
@@ -3977,36 +4214,113 @@ class WorldRenderer {
             buckets[k].sort((a, b) => stackPri(a) - stackPri(b));
         }
 
+        // Build component relationship graph for architectural coherence
+        const relationships = this._buildComponentRelationships(buckets);
+
+        // Architectural stacking with relationship awareness
         let baseLevel = 0;
         let structuralTop = 0;
+        let wallHeight = 0;
+        let hasWalls = false;
+        let roofOutline = null; // Track roof footprint for proper component placement
 
+        // Phase 1: Foundation establishes base
         for (const comp of buckets.foundation) {
             const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
             baseLevel = Math.max(baseLevel, topY);
         }
         structuralTop = baseLevel;
 
+        // Phase 2: Structural components - walls establish building envelope
         for (const comp of buckets.structural) {
-            const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
-            structuralTop = Math.max(structuralTop, topY);
+            if (comp.type === "walls") {
+                // Walls define the building height and envelope
+                const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
+                wallHeight = Math.max(wallHeight, topY - baseLevel);
+                structuralTop = Math.max(structuralTop, topY);
+                hasWalls = true;
+            } else if (comp.type === "colonnade") {
+                // Colonnades surround the building at ground level
+                // Position relative to walls if they exist
+                const colonnadeY = hasWalls ? baseLevel : baseLevel;
+                this._invokeBuilder(group, comp, colonnadeY, w, d);
+            } else if (comp.type === "block") {
+                // Multi-story blocks stack on foundation
+                const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
+                structuralTop = Math.max(structuralTop, topY);
+            } else {
+                // Other structural elements
+                const topY = this._invokeBuilder(group, comp, baseLevel, w, d);
+                structuralTop = Math.max(structuralTop, topY);
+            }
         }
 
+        // Phase 3: Infill components - placed inside structural envelope
         for (const comp of buckets.infill) {
-            this._invokeBuilder(group, comp, baseLevel, w, d);
+            if (comp.type === "atrium" || comp.type === "cella") {
+                // Interior spaces at ground level, constrained by walls
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            } else {
+                // Other infill at appropriate levels
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            }
         }
 
+        // Phase 4: Roof components - placed on structural top, establish roof outline
         for (const comp of buckets.roof) {
             const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
             structuralTop = Math.max(structuralTop, topY);
+            // Track roof outline for subsequent component placement
+            if (!roofOutline && comp.type === "tiled_roof") {
+                roofOutline = { width: w, depth: d, height: topY - structuralTop };
+            }
         }
 
+        // Phase 5: Decorative components - positioned based on architectural context and relationships
         for (const comp of buckets.decorative) {
-            this._invokeBuilder(group, comp, baseLevel, w, d);
+            if (comp.type === "door") {
+                // Doors at ground level in walls - find wall relationships
+                const doorY = baseLevel;
+                // Position door relative to wall openings
+                this._invokeBuilder(group, comp, doorY, w, d);
+            } else if (comp.type === "pilasters" || comp.type === "battlements") {
+                // Architectural details on walls - position relative to wall height
+                if (hasWalls) {
+                    const detailY = comp.type === "battlements" ? structuralTop - wallHeight * 0.2 : baseLevel + wallHeight * 0.8;
+                    this._invokeBuilder(group, comp, detailY, w, d);
+                } else {
+                    this._invokeBuilder(group, comp, baseLevel, w, d);
+                }
+            } else if (comp.type === "staircase") {
+                // External stairs - position based on building access points
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            } else {
+                // Other decorative elements at base level
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            }
         }
 
+        // Phase 6: Freestanding components - positioned based on relationships and context
         for (const comp of buckets.freestanding) {
-            const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
-            structuralTop = Math.max(structuralTop, topY);
+            if (comp.type === "statue") {
+                if (comp.roof_mounted && roofOutline) {
+                    // Roof-mounted statues positioned on roof
+                    const topY = this._invokeBuilder(group, comp, structuralTop, w, d);
+                    structuralTop = Math.max(structuralTop, topY);
+                } else if (relationships.ground_level_freestanding) {
+                    // Ground-level statues positioned in open areas
+                    this._invokeBuilder(group, comp, baseLevel, w, d);
+                } else {
+                    // Default ground level placement
+                    this._invokeBuilder(group, comp, baseLevel, w, d);
+                }
+            } else if (comp.type === "fountain") {
+                // Fountains typically at ground level in courtyards
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            } else {
+                // Other freestanding elements
+                this._invokeBuilder(group, comp, baseLevel, w, d);
+            }
         }
 
         // Ground contact shadow — prevents "floating building" look

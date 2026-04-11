@@ -48,11 +48,12 @@ class CityBlueprint:
     # ── Topography ────────────────────────────────────────────────────
 
     def populate_elevation(self, world: WorldState) -> int:
-        """Set tile elevation from hills data using gaussian falloff.
+        """Set tile elevation from hills data using gaussian falloff with terrain analysis.
 
         Returns number of tiles updated.
         """
         from world.roads import compute_elevation
+        from core.terrain_system import terrain_analyzer, TerrainCell, TerrainType, ClimateType
 
         if not self.hills:
             return 0
@@ -64,10 +65,49 @@ class CityBlueprint:
             if elev > 0.01:
                 self.elevation_map[(x, y)] = elev
                 tile.elevation = round(elev, 3)
+
+                # Create comprehensive terrain cell
+                neighbors = self._get_neighbor_elevations(x, y, world)
+                slope, aspect = terrain_analyzer.calculate_slope(elev, neighbors)
+                roughness = terrain_analyzer.calculate_roughness([elev] + neighbors)
+
+                # Determine terrain type
+                terrain_type = terrain_analyzer.classify_terrain(
+                    elev, slope, neighbors,
+                    moisture=getattr(tile, 'moisture', 0.5),
+                    temperature=getattr(tile, 'temperature', 20.0)
+                )
+
+                # Assess stability
+                soil_type = getattr(tile, 'soil_type', 'loam')
+                moisture = getattr(tile, 'moisture', 0.5)
+                stability = terrain_analyzer.assess_stability(terrain_type, slope, soil_type, moisture)
+
+                # Store terrain data in tile
+                tile.terrain_type = terrain_type.value
+                tile.slope = slope
+                tile.aspect = aspect
+                tile.roughness = roughness
+                tile.stability = stability
+
                 updated += 1
 
-        logger.info("Elevation populated: %d tiles from %d hills", updated, len(self.hills))
+        logger.info("Elevation and terrain populated: %d tiles from %d hills", updated, len(self.hills))
         return updated
+
+    def _get_neighbor_elevations(self, x: int, y: int, world: WorldState) -> List[float]:
+        """Get elevations of neighboring tiles for terrain analysis."""
+        neighbors = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor_tile = world.get_tile(x + dx, y + dy)
+                if neighbor_tile:
+                    neighbors.append(neighbor_tile.elevation)
+                else:
+                    neighbors.append(0.0)  # Default for missing neighbors
+        return neighbors
 
     def apply_elevation_to_world(self, world: WorldState) -> int:
         """Apply pre-computed elevation_map to any new tiles in the world.
@@ -204,6 +244,190 @@ class CityBlueprint:
         if not facings:
             return ""
         return "FACE:" + ",".join(f"{k}={v}" for k, v in facings.items())
+
+    def get_adaptive_foundation(self, building_type: str, x: int, y: int, world: WorldState) -> Dict[str, Any]:
+        """Generate adaptive foundation based on terrain, climate, and building type.
+
+        Returns foundation specification with height, material, and adaptations.
+        """
+        # Get local terrain characteristics
+        local_elevation = self.elevation_map.get((x, y), 0.0)
+        slope = self._calculate_local_slope(x, y)
+
+        # Determine terrain type
+        terrain_type = self._classify_terrain_at(x, y, world)
+
+        # Get climate context
+        climate = self._determine_climate_context(x, y)
+
+        # Base foundation specification
+        foundation = {
+            "type": "adaptive",
+            "height": 0.0,
+            "material": "stone",
+            "adaptations": [],
+            "terrain_type": terrain_type,
+            "climate": climate,
+            "slope": slope
+        }
+
+        # Terrain-specific adaptations
+        if terrain_type in ["hills", "mountain"] or slope > 0.3:
+            foundation["adaptations"].append("retaining_walls")
+            foundation["height"] = max(foundation["height"], 0.2 + slope * 0.3)
+            foundation["material"] = "stone"
+
+        if terrain_type in ["water", "marsh", "swamp"]:
+            foundation["adaptations"].extend(["stilts", "waterproofing"])
+            foundation["height"] = max(foundation["height"], 0.8)
+            foundation["material"] = "wood"
+
+        if terrain_type == "sand" or climate == "desert":
+            foundation["adaptations"].append("thermal_mass")
+            foundation["material"] = "sandstone"
+
+        # Climate-specific adaptations
+        if climate == "tropical":
+            foundation["adaptations"].extend(["ventilation", "termite_resistant"])
+            foundation["material"] = "concrete" if foundation["material"] == "stone" else foundation["material"]
+
+        elif climate == "arctic":
+            foundation["adaptations"].extend(["insulation", "frost_protection"])
+            foundation["height"] = max(foundation["height"], 0.3)
+            foundation["material"] = "stone"
+
+        elif climate == "mountain":
+            foundation["adaptations"].append("avalanche_protection")
+            foundation["material"] = "stone"
+
+        # Building type specific adaptations
+        if building_type in ["temple", "monument", "palace"]:
+            foundation["adaptations"].append("elevated_platform")
+            foundation["height"] = max(foundation["height"], 0.4)
+
+        elif building_type in ["warehouse", "barracks"]:
+            foundation["adaptations"].append("load_bearing")
+            foundation["material"] = "stone"
+
+        elif building_type in ["thermae", "aqueduct"]:
+            foundation["adaptations"].extend(["waterproofing", "drainage"])
+            foundation["material"] = "concrete"
+
+        # Ensure minimum foundation height
+        foundation["height"] = max(foundation["height"], 0.1)
+
+        return foundation
+
+    def _calculate_local_slope(self, x: int, y: int) -> float:
+        """Calculate the local terrain slope at a position."""
+        elevations = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                elev = self.elevation_map.get((x + dx, y + dy), 0.0)
+                elevations.append(elev)
+
+        if len(elevations) < 3:
+            return 0.0
+
+        # Calculate standard deviation as slope measure
+        mean = sum(elevations) / len(elevations)
+        variance = sum((e - mean) ** 2 for e in elevations) / len(elevations)
+        return math.sqrt(variance)  # Standard deviation as slope measure
+
+    def _classify_terrain_at(self, x: int, y: int, world: WorldState) -> str:
+        """Classify the terrain type at a specific location."""
+        # Check immediate tile
+        tile = world.get_tile(x, y)
+        if tile and tile.terrain != "empty":
+            return tile.terrain
+
+        # Check elevation-based terrain
+        elevation = self.elevation_map.get((x, y), 0.0)
+        if elevation > 2.0:
+            return "mountain"
+        elif elevation > 1.0:
+            return "hills"
+        elif elevation < -0.5:
+            return "water"
+
+        # Check nearby tiles for terrain influence
+        nearby_terrain = []
+        for dx in range(-2, 3):
+            for dy in range(-2, 3):
+                if dx == 0 and dy == 0:
+                    continue
+                nearby_tile = world.get_tile(x + dx, y + dy)
+                if nearby_tile and nearby_tile.terrain not in ["empty", "road"]:
+                    nearby_terrain.append(nearby_tile.terrain)
+
+        # Return most common nearby terrain or default
+        if nearby_terrain:
+            from collections import Counter
+            most_common = Counter(nearby_terrain).most_common(1)[0][0]
+            return most_common
+
+        return "grass"  # Default terrain
+
+    def _determine_climate_context(self, x: int, y: int) -> str:
+        """Determine the climate context for a location."""
+        # Simple climate determination based on position and elevation
+        elevation = self.elevation_map.get((x, y), 0.0)
+
+        if elevation > 3.0:
+            return "mountain"
+        elif elevation > 1.5:
+            return "temperate"
+        elif x > 50:  # East side = potentially different climate
+            return "desert"
+        elif y < 25:  # North side = cooler
+            return "temperate"
+        else:
+            return "temperate"  # Default
+
+    def apply_terrain_modifications(self, building_spec: Dict[str, Any], x: int, y: int, world: WorldState) -> Dict[str, Any]:
+        """Apply terrain-based modifications to building specifications."""
+        modified_spec = building_spec.copy()
+
+        # Get adaptive foundation
+        foundation = self.get_adaptive_foundation(
+            building_spec.get("building_type", "building"),
+            x, y, world
+        )
+
+        # Add foundation component if not present
+        has_foundation = any(comp.get("stack_role") == "foundation" for comp in modified_spec.get("components", []))
+        if not has_foundation and foundation["height"] > 0.1:
+            foundation_component = {
+                "type": "podium",
+                "height": foundation["height"],
+                "color": foundation["material"],
+                "stack_role": "foundation",
+                "adaptations": foundation["adaptations"]
+            }
+            modified_spec["components"].insert(0, foundation_component)
+
+        # Apply terrain-specific building modifications
+        terrain_type = foundation["terrain_type"]
+        climate = foundation["climate"]
+
+        # Modify building based on terrain constraints
+        if terrain_type in ["water", "marsh"]:
+            # Buildings over water need special considerations
+            modified_spec["water_adapted"] = True
+
+        if terrain_type == "mountain" or foundation["slope"] > 0.5:
+            # Steep terrain buildings need terracing
+            modified_spec["terraced"] = True
+
+        # Climate-specific material adaptations
+        if climate == "desert":
+            # Desert buildings use heat-resistant materials
+            modified_spec["climate_materials"] = ["sandstone", "adobe", "terracotta"]
+        elif climate == "arctic":
+            # Arctic buildings need insulation
+            modified_spec["insulated"] = True
+
+        return modified_spec
 
     def get_geography_context(self) -> str:
         """Compact geography summary for expansion prompts (< 50 tokens).

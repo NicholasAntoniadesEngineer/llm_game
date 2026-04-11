@@ -15,6 +15,7 @@ from typing import Any
 from agents.golden_specs import get_golden_example_for_culture
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
 from orchestration.schema import format_compact_neighbors as _fmt_compact_nb
+from orchestration.cultural_adaptation import cultural_system
 from prompts import format_pbr_hint, format_composition_directive
 
 
@@ -47,55 +48,87 @@ def clear_variety_history() -> None:
     _RECENT_BUILDS.clear()
 
 
-def _generate_variety_hint(btype: str) -> str:
-    """Generate a compact variety suggestion based on recent builds.
+def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "classical") -> str:
+    """Generate a compact variety suggestion based on recent builds and cultural context.
 
-    Returns a short string (~15-25 tokens) or empty string if no
-    useful suggestion can be made.
+    Enhanced with cultural and historical awareness for more appropriate variety suggestions.
     """
     if not _RECENT_BUILDS:
         return ""
 
     hints: list[str] = []
 
-    # 1. Column order rotation for temples/basilicas
+    # Cultural context adjustments
+    cultural_hints = _get_cultural_variety_hints(btype, culture, period)
+    hints.extend(cultural_hints)
+
+    # 1. Column order rotation for temples/basilicas (culturally appropriate)
     if btype in ("temple", "basilica", "monument"):
         recent_orders = [b["order"] for b in _RECENT_BUILDS
                          if b.get("order") and b["btype"] in ("temple", "basilica")]
         if recent_orders:
             last_order = recent_orders[-1]
-            # Suggest a different order
-            alternatives = [o for o in _COLUMN_ORDERS if o != last_order]
+            # Suggest culturally appropriate alternatives
+            alternatives = _get_culturally_appropriate_orders(culture, period, last_order)
             if alternatives:
-                hints.append(f"Prefer {alternatives[0]} or {alternatives[1]} columns (last used {last_order})")
+                hints.append(f"Prefer {alternatives[0]} columns (last used {last_order})")
 
-    # 2. Color/material temperature alternation
-    recent_colors = [b["color"] for b in _RECENT_BUILDS if b.get("color")]
-    if len(recent_colors) >= 3:
-        last_3 = recent_colors[-3:]
+    # 2. Material variety with cultural awareness
+    recent_materials = []
+    for b in _RECENT_BUILDS:
+        color = b.get("color", "").lower()
+        if color:
+            # Infer material from color naming
+            if any(mat in color for mat in ("marble", "travertine", "limestone")):
+                recent_materials.append("stone")
+            elif any(mat in color for mat in ("brick", "terracotta")):
+                recent_materials.append("brick")
+            elif "wood" in color:
+                recent_materials.append("wood")
+            else:
+                recent_materials.append("other")
+
+    if len(recent_materials) >= 3:
+        last_3 = recent_materials[-3:]
         if len(set(last_3)) == 1:
-            hints.append("Use a contrasting wall material — last 3 buildings share a color")
+            material = last_3[0]
+            alternative = _suggest_alternative_material(material, culture, period)
+            if alternative:
+                hints.append(f"Use {alternative} instead of {material} — diversify materials")
 
-    # 3. Height variation
+    # 3. Scale variation with cultural proportions
     recent_heights = [b["height"] for b in _RECENT_BUILDS
                       if b.get("height") and b["height"] > 0]
-    if recent_heights:
+    if recent_heights and len(recent_heights) >= 2:
         avg_h = sum(recent_heights) / len(recent_heights)
         last_h = recent_heights[-1]
-        if last_h > 0 and abs(last_h - avg_h) < avg_h * 0.1:
-            hints.append("Vary height +/-30% from neighbors")
+        if last_h > 0 and abs(last_h - avg_h) < avg_h * 0.15:  # Stricter check
+            cultural_scale_hint = _get_cultural_scale_hint(btype, culture, period)
+            if cultural_scale_hint:
+                hints.append(cultural_scale_hint)
+            else:
+                hints.append("Vary height +/-25% from neighbors for visual interest")
 
-    # 4. Grammar mode suggestion for standard types
-    grammar_types = {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
+    # 4. Grammar mode suggestion with cultural appropriateness
+    grammar_types = _get_grammar_types_for_culture(culture, period)
     if btype in grammar_types:
         recent_grammar_use = sum(1 for b in _RECENT_BUILDS if b["btype"] in grammar_types)
-        if recent_grammar_use > 0 and recent_grammar_use % 3 == 0:
-            hints.append(f"Consider grammar mode for this {btype}")
+        if recent_grammar_use > 0 and recent_grammar_use % 4 == 0:  # Less frequent
+            hints.append(f"Consider standard {btype} form for this {culture} {period} context")
+
+    # 5. Functional relationship hints
+    functional_hint = _generate_functional_relationship_hint(btype, _RECENT_BUILDS)
+    if functional_hint:
+        hints.append(functional_hint)
 
     if not hints:
         return ""
-    # Return only the most relevant hint to stay compact
-    return "VARY: " + hints[0]
+
+    # Prioritize hints by cultural relevance
+    prioritized_hints = _prioritize_hints_by_culture(hints, culture, period)
+
+    # Return most relevant hint, keeping it compact
+    return "VARY: " + prioritized_hints[0]
 
 
 # ── Urban intelligence hints ────────────────────────────────────────────
@@ -352,6 +385,101 @@ def build_compact_neighbor_desc(neighbors: list[dict]) -> str:
     if isinstance(neighbors, str):
         return neighbors
     return _fmt_compact_nb(neighbors)
+
+
+def _get_cultural_variety_hints(btype: str, culture: str, period: str) -> list[str]:
+    """Get variety hints specific to cultural and historical context."""
+    if culture not in cultural_system.cultures:
+        return []
+
+    culture_data = cultural_system.cultures[culture]
+    hints = culture_data.get("prompt_hints", {}).get("variety_suggestions", [])
+    return hints
+
+
+def _get_culturally_appropriate_orders(culture: str, period: str, exclude_order: str) -> list[str]:
+    """Get column orders appropriate for the culture and period."""
+    if culture not in cultural_system.cultures:
+        return [order for order in ["doric", "ionic", "corinthian"] if order != exclude_order]
+
+    culture_data = cultural_system.cultures[culture]
+    # For now, return all available orders from building types
+    all_orders = set()
+    for building_type in culture_data.get("building_types", {}).values():
+        if "orders" in building_type:
+            all_orders.update(building_type["orders"])
+
+    orders = list(all_orders) if all_orders else ["doric", "ionic", "corinthian"]
+    return [order for order in orders if order != exclude_order]
+
+
+def _suggest_alternative_material(current: str, culture: str, period: str) -> str | None:
+    """Suggest alternative material based on cultural preferences."""
+    if culture not in cultural_system.cultures:
+        return None
+
+    culture_data = cultural_system.cultures[culture]
+    material_alternatives = culture_data.get("prompt_hints", {}).get("material_alternatives", {})
+
+    if current in material_alternatives:
+        return material_alternatives[current]
+
+    return None
+
+
+def _get_cultural_scale_hint(btype: str, culture: str, period: str) -> str | None:
+    """Get culturally appropriate scale variation hints."""
+    if culture not in cultural_system.cultures:
+        return None
+
+    culture_data = cultural_system.cultures[culture]
+    scale_hints = culture_data.get("prompt_hints", {}).get("scale_hints", {})
+
+    if btype in scale_hints:
+        return scale_hints[btype]
+
+    return None
+
+
+def _get_grammar_types_for_culture(culture: str, period: str) -> set[str]:
+    """Get building types that have standard forms for the culture/period."""
+    if culture not in cultural_system.cultures:
+        return {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
+
+    culture_data = cultural_system.cultures[culture]
+    grammar_types = culture_data.get("prompt_hints", {}).get("grammar_types", [])
+    return set(grammar_types) if grammar_types else {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
+
+
+def _generate_functional_relationship_hint(btype: str, recent_builds: deque) -> str | None:
+    """Generate hints about functional relationships with recent buildings."""
+    if not recent_builds:
+        return None
+
+    # Check for complementary building types
+    recent_types = {b["btype"] for b in recent_builds}
+
+    complementary_pairs = {
+        "temple": ["basilica", "forum", "monument"],
+        "basilica": ["temple", "forum"],
+        "market": ["taberna", "warehouse"],
+        "thermae": ["basilica", "forum"],
+        "amphitheater": ["temple", "basilica"]
+    }
+
+    if btype in complementary_pairs:
+        needed_types = complementary_pairs[btype]
+        missing_types = [t for t in needed_types if t not in recent_types]
+        if missing_types:
+            return f"Consider adding {missing_types[0]} nearby for functional completeness"
+
+    return None
+
+
+def _prioritize_hints_by_culture(hints: list[str], culture: str, period: str) -> list[str]:
+    """Prioritize hints based on cultural relevance."""
+    # For now, just return hints in order - could be enhanced with cultural weights
+    return hints
 
 
 def _palette_suffix(district_palette: dict | None) -> str:
