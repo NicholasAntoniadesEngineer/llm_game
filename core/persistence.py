@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from orchestration.world_commit import apply_tile_placements
 from world.state import WorldState
 
 if TYPE_CHECKING:
@@ -84,11 +85,24 @@ def _chunk_filename(cx: int, cy: int) -> str:
     return f"chunk_{cx}_{cy}.json"
 
 
+def clamp_district_resume_indices_for_loaded_save(
+    district_index: int,
+    district_build_cursor: int,
+    districts_len: int,
+) -> tuple[int, int]:
+    """Clamp persisted district pointers to ``[0, districts_len]`` (inclusive upper bound for cursors)."""
+    if districts_len <= 0:
+        return 0, 0
+    di = max(0, min(int(district_index), districts_len))
+    dbc = max(0, min(int(district_build_cursor), districts_len))
+    return di, dbc
+
+
 def _ingest_tiles_json_into_world(world: WorldState, tiles_payload: Any, *, chunk_label: str) -> int:
     """Parse chunk JSON array and place tiles. Raises SaveIndexError on corrupt data."""
     if not isinstance(tiles_payload, list):
         raise SaveIndexError(f"Chunk {chunk_label} root must be a JSON array")
-    placed = 0
+    batch: list[tuple[int, int, dict]] = []
     for tile_data in tiles_payload:
         if not isinstance(tile_data, dict):
             raise SaveIndexError(f"Chunk {chunk_label} contains non-object tile entry")
@@ -97,9 +111,26 @@ def _ingest_tiles_json_into_world(world: WorldState, tiles_payload: Any, *, chun
             y = tile_data["y"]
         except KeyError as missing_key:
             raise SaveIndexError(f"Chunk {chunk_label} tile missing key: {missing_key}") from missing_key
-        world.place_tile(int(x), int(y), tile_data)
-        placed += 1
-    return placed
+        batch.append((int(x), int(y), dict(tile_data)))
+    if not batch:
+        return 0
+    batch_result = apply_tile_placements(
+        world,
+        batch,
+        system_configuration=world.system_configuration,
+    )
+    if batch_result.skipped_invalid_coordinates:
+        raise SaveIndexError(
+            f"Chunk {chunk_label} had {batch_result.skipped_invalid_coordinates} "
+            "tile entries with invalid coordinates after coercion"
+        )
+    if batch_result.place_tile_rejections_count:
+        raise SaveIndexError(
+            f"Chunk {chunk_label} rejected {batch_result.place_tile_rejections_count} "
+            "tile placements (e.g. coordinates outside bounds when "
+            "world_place_tile_reject_out_of_bounds=1)"
+        )
+    return len(batch_result.placed_tile_dicts)
 
 
 def _load_chunk_file_into_world(world: WorldState, chunk_path: Path) -> int:
@@ -340,6 +371,23 @@ def load_state(
 
     index = _load_index_dict(paths)
 
+    save_ver_raw = index.get("save_format_version", SAVE_FORMAT_VERSION)
+    try:
+        save_ver_disk = int(save_ver_raw)
+    except (TypeError, ValueError):
+        save_ver_disk = 1
+    if save_ver_disk != int(SAVE_FORMAT_VERSION):
+        if int(system_configuration.persistence_fail_on_save_format_version_mismatch_flag) == 1:
+            raise SaveIndexError(
+                f"save_format_version {save_ver_disk} does not match code {SAVE_FORMAT_VERSION} "
+                "(set persistence_fail_on_save_format_version_mismatch=0 to allow load with warning)"
+            )
+        logger.warning(
+            "save_format_version mismatch: index.json has %s, code expects %s — continuing load",
+            save_ver_disk,
+            SAVE_FORMAT_VERSION,
+        )
+
     idx_chunk = index.get("chunk_size")
     if isinstance(idx_chunk, int) and idx_chunk >= 1:
         world.chunk_size_tiles = idx_chunk
@@ -349,7 +397,7 @@ def load_state(
     world.current_year = int(index.get("current_year", 0))
 
     tile_count = 0
-    save_ver = index.get("save_format_version", 1)
+    save_ver = save_ver_disk
     manifest_raw = index.get("chunk_manifest")
 
     if save_ver >= 2 and isinstance(manifest_raw, list) and manifest_raw:
@@ -405,6 +453,26 @@ def load_state(
     districts = index.get("districts")
     if not isinstance(districts, list):
         districts = []
+    raw_district_index_before_clamp = district_index
+    raw_district_build_cursor_before_clamp = district_build_cursor
+    district_index, district_build_cursor = clamp_district_resume_indices_for_loaded_save(
+        district_index,
+        district_build_cursor,
+        len(districts),
+    )
+    if (
+        raw_district_index_before_clamp != district_index
+        or raw_district_build_cursor_before_clamp != district_build_cursor
+    ):
+        logger.warning(
+            "Clamped district resume indices from (district_index=%s, district_build_cursor=%s) "
+            "to (%s, %s) for districts_len=%s",
+            raw_district_index_before_clamp,
+            raw_district_build_cursor_before_clamp,
+            district_index,
+            district_build_cursor,
+            len(districts),
+        )
     gen_raw = index.get("generation", 0)
     generation = int(gen_raw) if isinstance(gen_raw, (int, float)) else 0
 

@@ -7,15 +7,15 @@ Provides compact context strings for injection into Urbanista prompts.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List
 
 from core.config import Config
 from core.errors import ConfigLoadError
 from orchestration.district_inference import infer_district_character_from_description
-from world.environment import TerrainAnalysis
+from world.environment import TerrainFieldEvaluator
 from world.roads import compute_elevation, smooth_elevation_max_gradient, water_features_channel_tiles
+from world.tile import Tile
 
 if TYPE_CHECKING:
     from world.state import WorldState
@@ -24,40 +24,174 @@ logger = logging.getLogger("eternal.blueprint")
 
 
 @dataclass
+class TerrainBlueprint:
+    """Topography, hydrology, and smoothed elevation authority."""
+
+    elevation_map: dict[tuple[int, int], float] = field(default_factory=dict)
+    hills: list[dict] = field(default_factory=list)
+    water: list[dict] = field(default_factory=list)
+    _water_adjacency_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
+    _water_channel_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
+
+    def elevation_at(self, x: int, y: int) -> float:
+        if (x, y) in self.elevation_map:
+            return float(self.elevation_map[(x, y)])
+        if not self.hills:
+            return 0.0
+        return float(compute_elevation(self.hills, x, y))
+
+    def reset_water_adjacency_cache(self) -> None:
+        self._water_adjacency_tile_cache = None
+        self._water_channel_tile_cache = None
+
+    def water_channel_tile_set(self, *, system_configuration: Config) -> set[tuple[int, int]]:
+        if self._water_channel_tile_cache is not None:
+            return self._water_channel_tile_cache
+        default_width = system_configuration.terrain.blueprint_water_channel_default_width_tiles
+        self._water_channel_tile_cache = water_features_channel_tiles(
+            self.water,
+            default_channel_width_tiles=default_width,
+        )
+        return self._water_channel_tile_cache
+
+    def _water_adjacency_tile_set(self) -> set[tuple[int, int]]:
+        if self._water_adjacency_tile_cache is not None:
+            return self._water_adjacency_tile_cache
+        water_proximity_radius_tiles = 2
+        adjacent: set[tuple[int, int]] = set()
+        for w in self.water:
+            pts = w.get("points", [])
+            for pt in pts:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    px, py = int(pt[0]), int(pt[1])
+                elif isinstance(pt, dict):
+                    px, py = int(pt.get("x", 0)), int(pt.get("y", 0))
+                else:
+                    continue
+                for dx in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
+                    for dy in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
+                        adjacent.add((px + dx, py + dy))
+        self._water_adjacency_tile_cache = adjacent
+        return adjacent
+
+    def is_water_region(self, x1: int, y1: int, x2: int, y2: int, threshold: float = 0.5) -> bool:
+        if not self.water:
+            return False
+        total_tiles = max(1, (x2 - x1 + 1) * (y2 - y1 + 1))
+        water_tiles = 0
+        adj = self._water_adjacency_tile_set()
+        for x in range(x1, x2 + 1):
+            for y in range(y1, y2 + 1):
+                if (x, y) in adj:
+                    water_tiles += 1
+        return (water_tiles / total_tiles) > threshold
+
+
+@dataclass
+class InfrastructureBlueprint:
+    """Road graph, gates, and cached procedural occupancy for transport."""
+
+    roads: list[dict] = field(default_factory=list)
+    gates: list[dict] = field(default_factory=list)
+    road_tiles: set[tuple[int, int]] = field(default_factory=set)
+    water_channel_tiles: set[tuple[int, int]] = field(default_factory=set)
+
+
+@dataclass
+class DistrictBlueprint:
+    """District character and candidate buildable cell masks."""
+
+    district_characters: dict[str, dict] = field(default_factory=dict)
+    valid_buildable_cells: dict[str, set[tuple[int, int]]] = field(default_factory=dict)
+
+
+@dataclass
 class CityBlueprint:
     """Persistent city-wide coherence data created during planning."""
 
-    # Topography
-    elevation_map: dict[tuple[int, int], float] = field(default_factory=dict)
-    hills: list[dict] = field(default_factory=list)   # {name, cx, cy, radius, peak}
-    water: list[dict] = field(default_factory=list)    # {name, type, points:[(x,y),...]}
+    terrain: TerrainBlueprint = field(default_factory=TerrainBlueprint)
+    infrastructure: InfrastructureBlueprint = field(default_factory=InfrastructureBlueprint)
+    districts: DistrictBlueprint = field(default_factory=DistrictBlueprint)
 
-    # Roads
-    roads: list[dict] = field(default_factory=list)    # {name, type:via|vicus|semita, points, width}
-    gates: list[dict] = field(default_factory=list)    # {name, x, y}
-
-    # Materials & style (filled by ``from_config`` / ``from_dict``; empty only before init)
     primary_stone: str = ""
     secondary_stone: str = ""
     brick_type: str = ""
     roof_material: str = ""
 
-    # Districts
-    district_characters: dict[str, dict] = field(default_factory=dict)
-    # e.g., {"Forum": {"wealth": 10, "height_range": [2,4], "style": "monumental"}}
-
-    # Sightlines
     vista_corridors: list[dict] = field(default_factory=list)
-    # {road_name, terminus_building, points}
-
-    # Procedural environment (elevation, roads, water masks) before structure placement
     environment_finalized: bool = False
-    road_tiles: set[tuple[int, int]] = field(default_factory=set)
-    water_channel_tiles: set[tuple[int, int]] = field(default_factory=set)
-    valid_buildable_cells: dict[str, set[tuple[int, int]]] = field(default_factory=dict)
 
-    _water_adjacency_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
-    _water_channel_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
+    @property
+    def elevation_map(self) -> dict[tuple[int, int], float]:
+        return self.terrain.elevation_map
+
+    @elevation_map.setter
+    def elevation_map(self, value: dict[tuple[int, int], float]) -> None:
+        self.terrain.elevation_map = value
+
+    @property
+    def hills(self) -> list[dict]:
+        return self.terrain.hills
+
+    @hills.setter
+    def hills(self, value: list[dict]) -> None:
+        self.terrain.hills = list(value)
+
+    @property
+    def water(self) -> list[dict]:
+        return self.terrain.water
+
+    @water.setter
+    def water(self, value: list[dict]) -> None:
+        self.terrain.water = list(value)
+
+    @property
+    def roads(self) -> list[dict]:
+        return self.infrastructure.roads
+
+    @roads.setter
+    def roads(self, value: list[dict]) -> None:
+        self.infrastructure.roads = list(value)
+
+    @property
+    def gates(self) -> list[dict]:
+        return self.infrastructure.gates
+
+    @gates.setter
+    def gates(self, value: list[dict]) -> None:
+        self.infrastructure.gates = list(value)
+
+    @property
+    def road_tiles(self) -> set[tuple[int, int]]:
+        return self.infrastructure.road_tiles
+
+    @road_tiles.setter
+    def road_tiles(self, value: set[tuple[int, int]]) -> None:
+        self.infrastructure.road_tiles = set(value)
+
+    @property
+    def water_channel_tiles(self) -> set[tuple[int, int]]:
+        return self.infrastructure.water_channel_tiles
+
+    @water_channel_tiles.setter
+    def water_channel_tiles(self, value: set[tuple[int, int]]) -> None:
+        self.infrastructure.water_channel_tiles = set(value)
+
+    @property
+    def district_characters(self) -> dict[str, dict]:
+        return self.districts.district_characters
+
+    @district_characters.setter
+    def district_characters(self, value: dict[str, dict]) -> None:
+        self.districts.district_characters = dict(value)
+
+    @property
+    def valid_buildable_cells(self) -> dict[str, set[tuple[int, int]]]:
+        return self.districts.valid_buildable_cells
+
+    @valid_buildable_cells.setter
+    def valid_buildable_cells(self, value: dict[str, set[tuple[int, int]]]) -> None:
+        self.districts.valid_buildable_cells = {k: set(v) for k, v in value.items()}
 
     @classmethod
     def from_config(cls, system_configuration: Config) -> CityBlueprint:
@@ -73,11 +207,7 @@ class CityBlueprint:
 
     def elevation_at(self, x: int, y: int) -> float:
         """Authoritative elevation at a tile; prefers smoothed ``elevation_map`` when present."""
-        if (x, y) in self.elevation_map:
-            return float(self.elevation_map[(x, y)])
-        if not self.hills:
-            return 0.0
-        return float(compute_elevation(self.hills, x, y))
+        return self.terrain.elevation_at(x, y)
 
     def _recompute_smoothed_elevation_for_world(
         self,
@@ -123,16 +253,133 @@ class CityBlueprint:
         for (x, y) in raw_coords:
             raw[(x, y)] = float(compute_elevation(self.hills, x, y))
 
+        terrain_cfg = system_configuration.terrain
+        epsilon = float(terrain_cfg.terrain_smoothing_convergence_epsilon_value)
+        convergence_kw = {"convergence_epsilon": epsilon} if epsilon > 0.0 else {"convergence_epsilon": None}
         smoothed = smooth_elevation_max_gradient(
             raw,
-            system_configuration.terrain.maximum_gradient_value,
-            system_configuration.terrain.gradient_iterations_count,
+            terrain_cfg.maximum_gradient_value,
+            terrain_cfg.gradient_iterations_count,
+            **convergence_kw,
         )
+        for _ in range(int(terrain_cfg.terrain_smoothing_secondary_passes_count)):
+            smoothed = smooth_elevation_max_gradient(
+                smoothed,
+                terrain_cfg.maximum_gradient_value,
+                terrain_cfg.gradient_iterations_count,
+                **convergence_kw,
+            )
         if use_full:
-            self.elevation_map.clear()
+            self.terrain.elevation_map.clear()
         for k, v in smoothed.items():
-            self.elevation_map[k] = v
+            self.terrain.elevation_map[k] = v
         return smoothed
+
+    def _build_tile_update_payloads_from_smoothed(
+        self,
+        world: WorldState,
+        smoothed: dict[tuple[int, int], float],
+        *,
+        system_configuration: Config,
+        update_full_terrain_analysis: bool,
+    ) -> dict[tuple[int, int], dict[str, Any]]:
+        """Pure tile field payloads for elevation (and optional full analysis) without mutating ``world``."""
+        updates: dict[tuple[int, int], dict[str, Any]] = {}
+        terrain_cfg = system_configuration.terrain
+        threshold_dict = terrain_cfg.terrain_classification_thresholds_dictionary
+        thresholds_for_analysis = {str(k): float(v) for k, v in threshold_dict.items()}
+        for (x, y), elev in smoothed.items():
+            tile = world.get_tile(x, y)
+            if not tile:
+                continue
+            payload: dict[str, Any] = {
+                "terrain": tile.terrain,
+                "elevation": round(float(elev), 3),
+            }
+            if not update_full_terrain_analysis:
+                updates[(x, y)] = payload
+                continue
+
+            neighbors = self._get_neighbor_elevations(x, y, world)
+            slope, aspect = TerrainFieldEvaluator.calculate_slope(float(elev), neighbors)
+            roughness = TerrainFieldEvaluator.calculate_roughness([float(elev)] + neighbors)
+
+            moisture_val = tile.moisture
+            if moisture_val is None:
+                moisture_val = 0.5
+            temperature_val = tile.temperature
+            if temperature_val is None:
+                temperature_val = 20.0
+
+            terrain_type = TerrainFieldEvaluator.classify_terrain(
+                float(elev),
+                slope,
+                neighbors,
+                classification_thresholds=thresholds_for_analysis,
+                moisture=moisture_val,
+                temperature=temperature_val,
+                roughness=roughness,
+            )
+
+            soil_type = tile.soil_type or "loam"
+            stability = TerrainFieldEvaluator.assess_stability(
+                terrain_type,
+                slope,
+                soil_type,
+                moisture_val,
+                classification_thresholds=thresholds_for_analysis,
+                terrain_type_modifiers=terrain_cfg.terrain_stability_terrain_type_modifiers_dictionary,
+                soil_type_modifiers=terrain_cfg.terrain_stability_soil_type_modifiers_dictionary,
+            )
+
+            payload["terrain_type"] = terrain_type.value
+            payload["slope"] = slope
+            payload["aspect"] = aspect
+            payload["roughness"] = roughness
+            payload["stability"] = stability
+            updates[(x, y)] = payload
+        return updates
+
+    def tile_payload_matches_current_tile(self, tile: Tile, payload: dict[str, Any]) -> bool:
+        """True when applying ``payload`` would leave numeric terrain fields unchanged."""
+        tolerance = 1e-4
+        if "elevation" in payload:
+            if abs(float(tile.elevation) - float(payload["elevation"])) > tolerance:
+                return False
+        for scalar_key in ("slope", "aspect", "roughness", "stability", "moisture", "temperature"):
+            if scalar_key not in payload:
+                continue
+            current = getattr(tile, scalar_key)
+            desired = payload[scalar_key]
+            if current is None and desired is None:
+                continue
+            if current is None or desired is None:
+                return False
+            if abs(float(current) - float(desired)) > tolerance:
+                return False
+        if "terrain_type" in payload:
+            if (tile.terrain_type or "") != str(payload["terrain_type"]):
+                return False
+        return True
+
+    def compute_elevation_tile_field_updates(
+        self,
+        world: WorldState,
+        *,
+        system_configuration: Config,
+    ) -> dict[tuple[int, int], dict[str, Any]]:
+        """Recompute smoothed elevations and return per-coordinate placement payloads (no world writes)."""
+        smoothed = self._recompute_smoothed_elevation_for_world(
+            world, system_configuration=system_configuration
+        )
+        if not smoothed:
+            return {}
+        return self._build_tile_update_payloads_from_smoothed(
+            world,
+            smoothed,
+            system_configuration=system_configuration,
+            update_full_terrain_analysis=True,
+        )
 
     def _apply_smoothed_elevation_to_world_tiles(
         self,
@@ -143,78 +390,39 @@ class CityBlueprint:
         update_full_terrain_analysis: bool,
     ) -> int:
         """Write smoothed elevations onto placed tiles; optionally recompute slope/type/stability."""
-        updated = 0
-        terrain_cfg = system_configuration.terrain
-        threshold_dict = terrain_cfg.terrain_classification_thresholds_dictionary
-        thresholds_for_analysis = {str(k): float(v) for k, v in threshold_dict.items()}
-        for (x, y), elev in smoothed.items():
+        payloads = self._build_tile_update_payloads_from_smoothed(
+            world,
+            smoothed,
+            system_configuration=system_configuration,
+            update_full_terrain_analysis=update_full_terrain_analysis,
+        )
+        batch: list[tuple[int, int, dict[str, Any]]] = []
+        for (x, y), payload in payloads.items():
             tile = world.get_tile(x, y)
             if not tile:
                 continue
-            tile.elevation = round(elev, 3)
-            if not update_full_terrain_analysis:
-                updated += 1
+            if self.tile_payload_matches_current_tile(tile, payload):
                 continue
+            batch.append((x, y, payload))
+        if not batch:
+            return 0
+        from orchestration.world_commit import apply_tile_placements
 
-            neighbors = self._get_neighbor_elevations(x, y, world)
-            slope, aspect = TerrainAnalysis.calculate_slope(elev, neighbors)
-            roughness = TerrainAnalysis.calculate_roughness([elev] + neighbors)
-
-            moisture_val = tile.moisture
-            if moisture_val is None:
-                moisture_val = 0.5
-            temperature_val = tile.temperature
-            if temperature_val is None:
-                temperature_val = 20.0
-
-            terrain_type = TerrainAnalysis.classify_terrain(
-                elev,
-                slope,
-                neighbors,
-                classification_thresholds=thresholds_for_analysis,
-                moisture=moisture_val,
-                temperature=temperature_val,
-                roughness=roughness,
-            )
-
-            soil_type = tile.soil_type or "loam"
-            stability = TerrainAnalysis.assess_stability(
-                terrain_type,
-                slope,
-                soil_type,
-                moisture_val,
-                classification_thresholds=thresholds_for_analysis,
-                terrain_type_modifiers=terrain_cfg.terrain_stability_terrain_type_modifiers_dictionary,
-                soil_type_modifiers=terrain_cfg.terrain_stability_soil_type_modifiers_dictionary,
-            )
-
-            tile.terrain_type = terrain_type.value
-            tile.slope = slope
-            tile.aspect = aspect
-            tile.roughness = roughness
-            tile.stability = stability
-
-            updated += 1
-        return updated
+        result = apply_tile_placements(
+            world,
+            batch,
+            system_configuration=system_configuration,
+        )
+        return len(result.placed_tile_dicts)
 
     def populate_elevation(self, world: WorldState, *, system_configuration: Config) -> int:
         """Set tile elevation from hills (Gaussian), then bound slope between neighbors.
 
         Returns number of tiles updated.
         """
-        smoothed = self._recompute_smoothed_elevation_for_world(
-            world, system_configuration=system_configuration
-        )
-        if not smoothed:
-            return 0
+        from world.environment import generate_terrain
 
-        updated = self._apply_smoothed_elevation_to_world_tiles(
-            world,
-            smoothed,
-            system_configuration=system_configuration,
-            update_full_terrain_analysis=True,
-        )
-
+        updated = generate_terrain(world, self, system_configuration=system_configuration)
         logger.info(
             "Elevation populated (max_gradient=%s, iterations=%s): %d tiles, %d hills",
             system_configuration.terrain.maximum_gradient_value,
@@ -227,7 +435,7 @@ class CityBlueprint:
     def _get_neighbor_elevations(self, x: int, y: int, world: WorldState) -> List[float]:
         """Eight neighbor elevations in fixed order: NW, N, NE, W, E, SW, S, SE.
 
-        Order must match ``TerrainAnalysis.calculate_slope`` (cardinals at indices 1,3,4,6).
+        Order must match ``TerrainFieldEvaluator.calculate_slope`` (cardinals at indices 1,3,4,6).
         """
         neighbor_delta_order = (
             (-1, -1),
@@ -305,6 +513,7 @@ class CityBlueprint:
         Safe to call again when ``environment_finalized`` is already true (refreshes caches only).
         Returns ``(road_tile_writes, elevation_tiles_updated)`` from the procedural passes.
         """
+        from core.run_log import log_event
         from world.environment import generate_terrain, resolve_road_water_conflicts
 
         if self.environment_finalized:
@@ -315,7 +524,21 @@ class CityBlueprint:
             )
             return (len(self.road_tiles), 0)
 
-        elev_count = generate_terrain(world, self, system_configuration=system_configuration)
+        def _elevation_chunk_progress(done_chunks: int, total_chunks: int, label: str) -> None:
+            log_event(
+                "environment",
+                "terrain_chunk",
+                done_chunks=done_chunks,
+                total_chunks=total_chunks,
+                label=label,
+            )
+
+        elev_count = generate_terrain(
+            world,
+            self,
+            system_configuration=system_configuration,
+            progress_callback=_elevation_chunk_progress,
+        )
         resolve_road_water_conflicts(world, self, system_configuration=system_configuration)
         road_count = self.rasterize_roads(world)
         self.environment_finalized = True
@@ -328,17 +551,58 @@ class CityBlueprint:
 
     # ── Roads ─────────────────────────────────────────────────────────
 
-    def rasterize_roads(self, world: WorldState) -> int:
-        """Place road tiles along road waypoints. Returns count of tiles placed."""
-        from world.roads import rasterize_road
+    def collect_road_raster_triples(self, world: WorldState) -> list[tuple[int, int, dict]]:
+        """Dry-run all roads: ``(x, y, payload)`` in blueprint order (no ``place_tile``)."""
+        from world.roads import collect_road_tile_placements
 
-        total = 0
+        triples: list[tuple[int, int, dict]] = []
         for road in self.roads:
-            count = rasterize_road(world, road, self)
-            total += count
-            logger.info("Road '%s' (%s): %d tiles", road.get("name", "?"), road.get("type", "?"), count)
-        logger.info("Total road tiles placed: %d from %d roads", total, len(self.roads))
-        return total
+            triples.extend(collect_road_tile_placements(world, road, self))
+        return triples
+
+    def rasterize_roads(self, world: WorldState, *, apply_placements: bool = True) -> int:
+        """Place road tiles along road waypoints (or count only when ``apply_placements`` is False).
+
+        Commits in one batch via ``apply_tile_placements`` so elevation clamping matches other writers.
+        """
+        from orchestration.world_commit import apply_tile_placements
+        from world.roads import collect_road_tile_placements
+
+        all_triples: list[tuple[int, int, dict]] = []
+        for road in self.roads:
+            part = collect_road_tile_placements(world, road, self)
+            logger.info(
+                "Road '%s' (%s): %d tiles",
+                road.get("name", "?"),
+                road.get("type", "?"),
+                len(part),
+            )
+            all_triples.extend(part)
+        if not apply_placements:
+            logger.info("Total road tiles (dry-run): %d from %d roads", len(all_triples), len(self.roads))
+            return len(all_triples)
+        if all_triples:
+            road_apply_result = apply_tile_placements(
+                world,
+                all_triples,
+                system_configuration=world.system_configuration,
+            )
+            if road_apply_result.place_tile_rejections_count:
+                logger.warning(
+                    "Road raster: place_tile rejected %s of %s tiles (coordinate guard)",
+                    road_apply_result.place_tile_rejections_count,
+                    len(all_triples),
+                )
+            placed_road_count = len(road_apply_result.placed_tile_dicts)
+            logger.info(
+                "Total road tiles placed: %d from %d roads (raster triples=%d)",
+                placed_road_count,
+                len(self.roads),
+                len(all_triples),
+            )
+            return placed_road_count
+        logger.info("Total road tiles placed: 0 from %d roads", len(self.roads))
+        return 0
 
     # ── Context Strings ───────────────────────────────────────────────
 
@@ -527,7 +791,7 @@ class CityBlueprint:
         return foundation
 
     def _calculate_local_slope(self, x: int, y: int) -> float:
-        """Gradient slope magnitude at (x,y) consistent with ``TerrainAnalysis.calculate_slope``."""
+        """Gradient slope magnitude at (x,y) consistent with ``TerrainFieldEvaluator.calculate_slope``."""
         neighbor_delta_order = (
             (-1, -1),
             (0, -1),
@@ -542,7 +806,7 @@ class CityBlueprint:
         ring: List[float] = []
         for delta_x, delta_y in neighbor_delta_order:
             ring.append(float(self.elevation_map.get((x + delta_x, y + delta_y), 0.0)))
-        slope_mag, _aspect = TerrainAnalysis.calculate_slope(center, ring)
+        slope_mag, _aspect = TerrainFieldEvaluator.calculate_slope(center, ring)
         return float(slope_mag)
 
     def _classify_terrain_at(self, x: int, y: int, world: WorldState) -> str:
@@ -695,60 +959,15 @@ class CityBlueprint:
 
     def reset_water_adjacency_cache(self) -> None:
         """Call when ``water`` waypoints change so ``is_water_region`` recomputes."""
-        self._water_adjacency_tile_cache = None
-        self._water_channel_tile_cache = None
+        self.terrain.reset_water_adjacency_cache()
 
     def water_channel_tile_set(self, *, system_configuration: Config) -> set[tuple[int, int]]:
         """Tiles occupied by rasterized water polylines (cached); used to keep roads out of rivers."""
-        if self._water_channel_tile_cache is not None:
-            return self._water_channel_tile_cache
-        default_width = system_configuration.terrain.blueprint_water_channel_default_width_tiles
-        self._water_channel_tile_cache = water_features_channel_tiles(
-            self.water,
-            default_channel_width_tiles=default_width,
-        )
-        return self._water_channel_tile_cache
-
-    def _water_adjacency_tile_set(self) -> set[tuple[int, int]]:
-        """Tiles within ``water_proximity_radius_tiles`` of any water polyline vertex (cached)."""
-        if self._water_adjacency_tile_cache is not None:
-            return self._water_adjacency_tile_cache
-        water_proximity_radius_tiles = 2
-        adjacent: set[tuple[int, int]] = set()
-        for w in self.water:
-            pts = w.get("points", [])
-            for pt in pts:
-                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                    px, py = int(pt[0]), int(pt[1])
-                elif isinstance(pt, dict):
-                    px, py = int(pt.get("x", 0)), int(pt.get("y", 0))
-                else:
-                    continue
-                for dx in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
-                    for dy in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
-                        adjacent.add((px + dx, py + dy))
-        self._water_adjacency_tile_cache = adjacent
-        return adjacent
+        return self.terrain.water_channel_tile_set(system_configuration=system_configuration)
 
     def is_water_region(self, x1: int, y1: int, x2: int, y2: int, threshold: float = 0.5) -> bool:
-        """Check if a region is mostly water based on water feature proximity.
-
-        Returns True if more than `threshold` fraction of tiles are near water.
-        Uses a simple distance check against water feature polylines.
-        """
-        if not self.water:
-            return False
-
-        total_tiles = max(1, (x2 - x1 + 1) * (y2 - y1 + 1))
-        water_tiles = 0
-        adj = self._water_adjacency_tile_set()
-
-        for x in range(x1, x2 + 1):
-            for y in range(y1, y2 + 1):
-                if (x, y) in adj:
-                    water_tiles += 1
-
-        return (water_tiles / total_tiles) > threshold
+        """Check if a region is mostly water based on water feature proximity."""
+        return self.terrain.is_water_region(x1, y1, x2, y2, threshold=threshold)
 
     def build_context_line(self, world: WorldState, x: int, y: int, district_name: str) -> str:
         """Build the full compact context line for an Urbanista prompt.

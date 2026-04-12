@@ -38,6 +38,9 @@ class BuildGenerationEnginePort(Protocol):
     _wave_one_building_types_set: frozenset
     tasks: Any
     _auto_retry_pending: bool
+    orchestration_state: Any
+    _build_loop_retry_count: int
+    _generation_auto_retry_requested: bool
 
     async def broadcast(self, message: dict) -> None: ...
     async def _chat(self, agent: str, level: str, text: str) -> None: ...

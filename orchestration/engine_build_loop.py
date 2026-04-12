@@ -16,6 +16,7 @@ from orchestration.build_wave_phase import (
     ensure_blueprint_environment_for_generation,
 )
 from orchestration.district_model import parse_district_dict
+from orchestration.engine_state_machine import EngineBuildPipelineState
 
 logger = logging.getLogger("eternal.engine")
 
@@ -35,11 +36,50 @@ def sort_wave_plan_open_terrain_first(master_plan: list, open_terrain_types: fro
     return procedural + rest
 
 
-async def _schedule_auto_retry_if_pending(engine: "BuildGenerationEnginePort", failure_label: str) -> None:
-    if getattr(engine, "_auto_retry_pending", False):
-        engine._auto_retry_pending = False
-        logger.info("Auto-retry: re-entering run() after %s", failure_label)
-        await engine.schedule_run()
+async def _schedule_generation_auto_retry_if_requested(
+    engine: "BuildGenerationEnginePort",
+    failure_label: str,
+    *,
+    district_index: int | None = None,
+) -> None:
+    """Exponential backoff then ``schedule_run`` when the build loop requested a retry."""
+    if not getattr(engine, "_generation_auto_retry_requested", False):
+        return
+    engine._generation_auto_retry_requested = False
+    max_retries = int(engine.system_configuration.performance.maximum_retries_count)
+    if district_index is not None:
+        attempt = engine.orchestration_state.bump_district_retry(int(district_index))
+    else:
+        attempt = getattr(engine, "_build_loop_retry_count", 0) + 1
+        engine._build_loop_retry_count = attempt
+    if attempt > max_retries:
+        logger.error(
+            "Build loop auto-retry exhausted (%d/%d) after %s — stopping rescheduling",
+            attempt,
+            max_retries,
+            failure_label,
+        )
+        return
+    base = float(engine.system_configuration.performance.retry_backoff_base_value)
+    delay_s = min(120.0, base * (2 ** min(attempt - 1, 10)))
+    logger.info(
+        "Build loop auto-retry attempt %d/%d after %s — sleeping %.2fs before schedule_run",
+        attempt,
+        max_retries,
+        failure_label,
+        delay_s,
+    )
+    trace_event(
+        "engine",
+        "generation_auto_retry",
+        attempt=attempt,
+        max_retries=max_retries,
+        delay_s=round(delay_s, 3),
+        label=failure_label,
+        district_index=district_index,
+    )
+    await asyncio.sleep(delay_s)
+    await engine.schedule_run()
 
 
 def _build_progress_snapshot(engine: "BuildGenerationEnginePort") -> int:
@@ -138,7 +178,10 @@ async def run_phase(
             )
             plan = await _get_plan(di)
             if plan is None:
-                await _schedule_auto_retry_if_pending(engine, "survey failure")
+                engine._generation_auto_retry_requested = True
+                await _schedule_generation_auto_retry_if_requested(
+                    engine, "survey failure", district_index=di
+                )
                 return False
             district_plans[di] = plan
 
@@ -169,6 +212,7 @@ async def run_phase(
             )
             engine.district_build_cursor = di + 1
             engine.build_wave_phase = wave_phase.value
+            engine.orchestration_state.record_district_wave_success(di, district_name)
             await engine._save_state_thread(flush_mode="incremental")
             continue
 
@@ -190,11 +234,15 @@ async def run_phase(
         )
         district_ok = await engine._build_district(district, wave_plan)
         if not district_ok:
-            await _schedule_auto_retry_if_pending(engine, "district build failure")
+            engine._generation_auto_retry_requested = True
+            await _schedule_generation_auto_retry_if_requested(
+                engine, "district build failure", district_index=di
+            )
             return False
 
         engine.district_build_cursor = di + 1
         engine.build_wave_phase = wave_phase.value
+        engine.orchestration_state.record_district_wave_success(di, district_name)
         await engine._save_state_thread(flush_mode="incremental")
 
     engine.district_build_cursor = engine.district_index
@@ -225,6 +273,7 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         build_progress_percent=_build_progress_snapshot(engine),
     )
     ensure_blueprint_environment_for_generation(engine)
+    engine.orchestration_state.transition(EngineBuildPipelineState.building_district_wave, from_states=None)
     engine.update_trace_snapshot(
         phase="_build_generation",
         step="start",
@@ -246,8 +295,25 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         engine.district_build_cursor = engine.district_index
 
     async def _get_plan(di: int) -> list | None:
+        timeout_s = float(engine.system_configuration.llm.agent_timeout_long_seconds)
         try:
-            return await engine.tasks.await_survey_for_district_index(di)
+            return await asyncio.wait_for(
+                engine.tasks.await_survey_for_district_index(di),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Survey await timed out after %ss for district_index=%s",
+                timeout_s,
+                di,
+            )
+            trace_event(
+                "engine",
+                "survey_await_timeout",
+                district_index=di,
+                timeout_s=timeout_s,
+            )
+            return None
         except asyncio.CancelledError:
             return None
         except AgentGenerationError as err:
@@ -284,6 +350,20 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         if not wave_ok:
             return False
 
+    engine.orchestration_state.reset_retry_counters()
+    engine._build_loop_retry_count = 0
+    if not engine.orchestration_state.transition(
+        EngineBuildPipelineState.wave_complete,
+        from_states=(
+            EngineBuildPipelineState.building_district_wave,
+            EngineBuildPipelineState.between_district_checkpoints,
+        ),
+    ):
+        logger.warning(
+            "orchestration wave_complete transition from unexpected state=%s — forcing wave_complete",
+            engine.orchestration_state.pipeline_state.value,
+        )
+        engine.orchestration_state.transition(EngineBuildPipelineState.wave_complete, from_states=None)
     engine.build_wave_phase = BuildWavePhase.landmark.value
     engine.district_build_cursor = engine.district_index
     engine.district_index = len(engine.districts)

@@ -38,6 +38,7 @@ from core.run_session import RunSession
 from orchestration.discovery_coordinator import DiscoveryCoordinator
 from orchestration.generators import Generators
 from orchestration.engine_build_loop import run_build_generation
+from orchestration.engine_state_machine import EngineStateMachine
 from orchestration.engine_urbanista import execute_batch_urbanista
 from orchestration.engine_district_build import run_district_build
 from orchestration.engine_run_phase import EngineRunPhase
@@ -125,6 +126,9 @@ class BuildEngine:
         self._source_policy = _source_policy
         self.generation = 0
         self._trace_snapshot: dict[str, Any] = {"phase": "init"}
+        self.orchestration_state = EngineStateMachine()
+        self._build_loop_retry_count = 0
+        self._generation_auto_retry_requested = False
         self.blueprint: CityBlueprint | None = None
         self._district_scenery_summaries: dict[str, str] = {}
         self._district_palettes: dict[str, dict] = {}  # {district_name: {primary, secondary, accent}}
@@ -204,6 +208,10 @@ class BuildEngine:
         self._trace_snapshot.update(kwargs)
         self._trace_snapshot["monotonic_s"] = time.monotonic()
         self._trace_snapshot["run_phase"] = self.tasks.run_phase.value
+        try:
+            self._trace_snapshot["orchestration_checkpoint"] = self.orchestration_state.to_checkpoint_dict()
+        except Exception:
+            self._trace_snapshot["orchestration_checkpoint"] = {}
 
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario."""
@@ -224,6 +232,9 @@ class BuildEngine:
         # Clear intelligence subsystems
         self.style_memory = StyleMemory()
         self._trace_snapshot = {"phase": "reset"}
+        self.orchestration_state = EngineStateMachine()
+        self._build_loop_retry_count = 0
+        self._generation_auto_retry_requested = False
 
     async def abort_pipeline_tasks(self):
         await self.tasks.abort_pipeline_tasks()
@@ -251,6 +262,9 @@ class BuildEngine:
             if not getattr(self, "_auto_retry_pending", False):
                 self._auto_retry_count = 0
             self._auto_retry_pending = False
+            self._generation_auto_retry_requested = False
+            self._build_loop_retry_count = 0
+            self.orchestration_state.reset_retry_counters()
             self.tasks.start_token_telemetry()
             logger.info("BuildEngine started — infinite generation mode")
             scen = self.scenario
@@ -284,7 +298,23 @@ class BuildEngine:
             if not self.districts:
                 self.update_trace_snapshot(phase="discover_districts", step="calling_generators")
                 trace_event("engine", "Phase 0 — no districts loaded; starting discover_districts()")
-                discovery_ok = await self.generators.discover_districts()
+                discovery_timeout_s = float(self.system_configuration.llm.agent_timeout_long_seconds)
+                try:
+                    discovery_ok = await asyncio.wait_for(
+                        self.generators.discover_districts(),
+                        timeout=discovery_timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "discover_districts timed out after agent_timeout_long_seconds=%s",
+                        int(discovery_timeout_s),
+                    )
+                    trace_event(
+                        "engine",
+                        "Phase 0 — discover_districts timed out",
+                        timeout_seconds=int(discovery_timeout_s),
+                    )
+                    discovery_ok = False
                 if not discovery_ok:
                     trace_event(
                         "engine",
@@ -418,7 +448,23 @@ class BuildEngine:
                 trace_event("engine", "Calling expand_city()", generation_before=self.generation)
                 self.update_trace_snapshot(phase="expand_city", generation=self.generation)
                 await self.broadcast({"type": "expanding", "generation": self.generation + 1})
-                expanded = await self.generators.expand_city()
+                expansion_timeout_s = float(self.system_configuration.llm.agent_timeout_long_seconds)
+                try:
+                    expanded = await asyncio.wait_for(
+                        self.generators.expand_city(),
+                        timeout=expansion_timeout_s,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "expand_city timed out after agent_timeout_long_seconds=%s",
+                        int(expansion_timeout_s),
+                    )
+                    trace_event(
+                        "engine",
+                        "expand_city timed out",
+                        timeout_seconds=int(expansion_timeout_s),
+                    )
+                    expanded = False
                 if not expanded:
                     trace_event("engine", "expand_city returned False — cooldown before retry", generation=self.generation)
                     self.update_trace_snapshot(phase="expansion_cooldown", generation=self.generation)

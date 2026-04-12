@@ -40,11 +40,18 @@ def bresenham_line(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
     return points
 
 
-def _widen_line(points: list[tuple[int, int]], width: int) -> list[tuple[int, int]]:
+def _widen_line(
+    points: list[tuple[int, int]],
+    width: int,
+    *,
+    forbidden_tile_xy_set: set[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
     """Expand a polyline to an integer tile corridor by offsetting perpendicular to each segment.
 
     width=1: centerline only. width>1: for each consecutive pair, step ``half=floor(width/2)``
     tiles along the unit perpendicular on both sides (cardinal-rounded offsets).
+    When ``forbidden_tile_xy_set`` is set, widened cells that fall in the set are omitted
+    (centerline cells are never removed by this filter).
     """
     if width <= 1:
         return points
@@ -72,7 +79,10 @@ def _widen_line(points: list[tuple[int, int]], width: int) -> list[tuple[int, in
         tdx, tdy = x1 - x0, y1 - y0
         for ox, oy in _offsets_for_tangent(tdx, tdy):
             for (sx, sy) in bresenham_line(x0, y0, x1, y1):
-                expanded.add((sx + ox, sy + oy))
+                cell = (sx + ox, sy + oy)
+                if forbidden_tile_xy_set is not None and cell in forbidden_tile_xy_set:
+                    continue
+                expanded.add(cell)
 
     return list(expanded)
 
@@ -147,21 +157,20 @@ def road_dict_allows_water_crossing(road_dict: dict) -> bool:
     return False
 
 
-def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint | None = None) -> int:
-    """Place road tiles along a road's waypoints using Bresenham line drawing.
-
-    road_dict: {name, type, points:[(x,y),...], width}
-    Returns number of tiles placed.
-    """
+def collect_road_tile_placements(
+    world: WorldState,
+    road_dict: dict,
+    blueprint: CityBlueprint | None = None,
+) -> list[tuple[int, int, dict]]:
+    """Return ``(x, y, tile_payload)`` triples a road raster would place (no ``place_tile`` calls)."""
     name = road_dict.get("name", "road")
     road_type = road_dict.get("type", "vicus")
     raw_points = road_dict.get("points", [])
     width = road_dict.get("width", 1)
 
     if not raw_points or len(raw_points) < 2:
-        return 0
+        return []
 
-    # Convert points to integer tuples
     waypoints: list[tuple[int, int]] = []
     for p in raw_points:
         if isinstance(p, (list, tuple)) and len(p) >= 2:
@@ -170,7 +179,7 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
             waypoints.append((int(p.get("x", 0)), int(p.get("y", 0))))
 
     if len(waypoints) < 2:
-        return 0
+        return []
 
     allows_water_crossing = road_dict_allows_water_crossing(road_dict)
     blueprint_water_channel_tiles: set[tuple[int, int]] = set()
@@ -178,25 +187,27 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
         blueprint_water_channel_tiles = blueprint.water_channel_tile_set(
             system_configuration=world.system_configuration
         )
+    forbidden_for_widen = blueprint_water_channel_tiles
 
-    # Draw lines between consecutive waypoints
     all_line_points: list[tuple[int, int]] = []
     for i in range(len(waypoints) - 1):
         segment = bresenham_line(waypoints[i][0], waypoints[i][1],
                                   waypoints[i + 1][0], waypoints[i + 1][1])
         all_line_points.extend(segment)
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique_points = []
+    seen: set[tuple[int, int]] = set()
+    unique_points: list[tuple[int, int]] = []
     for p in all_line_points:
         if p not in seen:
             seen.add(p)
             unique_points.append(p)
 
-    # Widen for via-class roads
     if width > 1:
-        road_tiles = _widen_line(unique_points, width)
+        road_tiles = _widen_line(
+            unique_points,
+            width,
+            forbidden_tile_xy_set=forbidden_for_widen if not allows_water_crossing else None,
+        )
     else:
         road_tiles = unique_points
 
@@ -204,7 +215,7 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
     road_type_key = str(road_type).strip().lower()
     color = road_colors.get(road_type_key) or road_colors.get("default", "#808080")
 
-    count = 0
+    out: list[tuple[int, int, dict]] = []
     for x, y in road_tiles:
         existing = world.get_tile(x, y)
         terrain_kind = getattr(existing, "terrain", "empty") if existing else "empty"
@@ -234,10 +245,36 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
             "color": color,
             "elevation": round(elev, 3),
         }
-        world.place_tile(x, y, tile_data)
-        count += 1
+        out.append((x, y, tile_data))
+    return out
 
-    return count
+
+def rasterize_road(
+    world: WorldState,
+    road_dict: dict,
+    blueprint: CityBlueprint | None = None,
+    *,
+    apply_placements: bool = True,
+) -> int:
+    """Place road tiles along a road's waypoints using Bresenham line drawing.
+
+    road_dict: {name, type, points:[(x,y),...], width}
+    When ``apply_placements`` is False, no ``WorldState.place_tile`` calls are made and the
+    return value is the count of tiles that *would* have been placed.
+    """
+    triples = collect_road_tile_placements(world, road_dict, blueprint)
+    if not apply_placements:
+        return len(triples)
+    if not triples:
+        return 0
+    from orchestration.world_commit import apply_tile_placements
+
+    apply_tile_placements(
+        world,
+        triples,
+        system_configuration=world.system_configuration,
+    )
+    return len(triples)
 
 
 def compute_elevation(hills: list[dict], x: int, y: int, terrain_features: dict | None = None) -> float:
@@ -283,6 +320,8 @@ def smooth_elevation_max_gradient(
     heights: dict[tuple[int, int], float],
     max_step: float,
     iterations: int,
+    *,
+    convergence_epsilon: float | None = None,
 ) -> dict[tuple[int, int], float]:
     """Reduce cliffs by bounding orthogonal slope: |h(x)-h(x')| ≤ max_step per edge.
 
@@ -294,6 +333,8 @@ def smooth_elevation_max_gradient(
         heights: tile coordinate → raw elevation (typically from ``compute_elevation``).
         max_step: maximum allowed absolute difference between 4-neighbors (world units).
         iterations: relaxation passes over all edges.
+        convergence_epsilon: when > 0, stop once a full pass moves no coordinate by more
+            than this amount (max-norm of per-coordinate deltas for that pass).
 
     Returns:
         New dict of smoothed elevations (does not mutate the input dict).
@@ -321,7 +362,11 @@ def smooth_elevation_max_gradient(
             seen.add(edge_key)
             edges.append(edge_key)
 
+    epsilon = float(convergence_epsilon) if convergence_epsilon is not None else 0.0
+    use_early_exit = epsilon > 0.0
+
     for _ in range(max(1, iterations)):
+        snapshot_before = {k: float(v) for k, v in height_by_coordinate.items()} if use_early_exit else None
         for ua, ub in edges:
             va = height_by_coordinate[ua]
             vb = height_by_coordinate[ub]
@@ -333,6 +378,12 @@ def smooth_elevation_max_gradient(
                 excess = (vb - va - max_step) / 2.0
                 height_by_coordinate[ua] = va + excess
                 height_by_coordinate[ub] = vb - excess
+        if use_early_exit and snapshot_before is not None:
+            max_delta = 0.0
+            for coord, prev_h in snapshot_before.items():
+                max_delta = max(max_delta, abs(height_by_coordinate[coord] - prev_h))
+            if max_delta <= epsilon:
+                break
 
     return height_by_coordinate
 

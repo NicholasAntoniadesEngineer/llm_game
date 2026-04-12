@@ -49,6 +49,34 @@ def _collect_tiles_by_building_type(master_plan: list) -> dict[str, set[tuple[in
     return by_bt
 
 
+def validate_footprint_commercial_road_adjacency(
+    world: WorldState,
+    anchor_world_x: int,
+    anchor_world_y: int,
+    footprint_relative_offsets: tuple[tuple[int, int], ...],
+    building_type_key: str,
+) -> None:
+    """Raise ``ValueError`` when a commercial type has no cardinal road touch while roads exist."""
+    bt_lower = str(building_type_key).strip().lower()
+    if bt_lower not in COMMERCIAL_TYPES:
+        return
+    road_xy: set[tuple[int, int]] = set()
+    for (tx, ty), tile in world.tiles.items():
+        if str(tile.terrain).strip().lower() == "road":
+            road_xy.add((int(tx), int(ty)))
+    if not road_xy:
+        return
+    fp_world = {
+        (anchor_world_x + int(dx), anchor_world_y + int(dy))
+        for dx, dy in footprint_relative_offsets
+    }
+    if not _cardinally_adjacent_to_set(fp_world, road_xy):
+        raise ValueError(
+            f"commercial building_type {building_type_key!r} requires cardinal adjacency "
+            "to a road tile when any road exists in the world"
+        )
+
+
 def _cardinally_adjacent_to_set(footprint: set[tuple[int, int]], target: set[tuple[int, int]]) -> bool:
     if not footprint or not target:
         return False

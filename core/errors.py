@@ -33,6 +33,16 @@ class BuildingSkippedError(EternalCitiesError):
         super().__init__(f"Skipped {building_name}: {reason}")
 
 
+class PlacementError(EternalCitiesError):
+    """Footprint could not be validated or repaired for the given anchor and world state."""
+
+    def __init__(self, message: str, *, building_name: str = "", anchor: tuple[int, int] | None = None):
+        self.placement_detail_message = message
+        self.building_name = building_name
+        self.anchor_xy = anchor
+        super().__init__(message)
+
+
 class ConfigLoadError(EternalCitiesError):
     """Configuration validation or loading failure. System must fail hard per rules. No continuation on catch."""
 

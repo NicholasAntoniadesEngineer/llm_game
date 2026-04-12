@@ -604,12 +604,16 @@ class TestPersistenceSaveLoad:
             world,
             chat,
             district_index=2,
-            districts=[{"name": "Forum"}],
+            districts=[
+                {"name": "Forum"},
+                {"name": "Subura"},
+                {"name": "Campus"},
+            ],
             generation=3,
             scenario=scenario,
             system_configuration=SYSTEM_CONFIGURATION,
             build_wave_phase="infill",
-            district_build_cursor=1,
+            district_build_cursor=2,
         )
 
         # Load into a fresh world
@@ -631,9 +635,9 @@ class TestPersistenceSaveLoad:
         assert loaded_idx == 2
         assert loaded_gen == 3
         assert loaded_wave == "infill"
-        assert loaded_cursor == 1
+        assert loaded_cursor == 2
         assert loaded_chat == chat
-        assert len(loaded_districts) == 1
+        assert len(loaded_districts) == 3
         assert world2.current_period == "Republican Rome"
         assert world2.current_year == -44
         assert world2.turn == 5

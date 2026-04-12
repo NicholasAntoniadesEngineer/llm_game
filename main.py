@@ -355,11 +355,25 @@ def _make_heartbeat_snapshot() -> dict[str, Any]:
     trace_snap = getattr(engine, "_trace_snapshot", None)
     if not isinstance(trace_snap, dict):
         trace_snap = {}
+    orch = getattr(engine, "orchestration_state", None)
+    orch_payload: dict[str, Any] = {}
+    try:
+        if orch is not None:
+            orch_payload = orch.to_checkpoint_dict()
+    except Exception:
+        orch_payload = {}
     return {
         "running": engine.running,
         "generation": engine.generation,
         "district_index": engine.district_index,
+        "district_build_cursor": getattr(engine, "district_build_cursor", 0),
+        "build_wave_phase": getattr(engine, "build_wave_phase", ""),
+        "world_place_tile_reject_oob": int(
+            system_configuration.world_place_tile_reject_out_of_bounds_flag
+        ),
+        "build_loop_retry_count": getattr(engine, "_build_loop_retry_count", 0),
         "districts_count": len(engine.districts),
+        "last_completed_district": orch_payload.get("last_successful_district_name", ""),
         "tiles_count": len(engine.world.tiles),
         "turn": engine.world.turn,
         "scenario_location": loc,
@@ -367,6 +381,7 @@ def _make_heartbeat_snapshot() -> dict[str, Any]:
         "ws_clients": len(state.ws_connections),
         "trace": dict(trace_snap),
         "agents": agents,
+        "orchestration_checkpoint": orch_payload,
     }
 
 
@@ -396,10 +411,17 @@ if saved:
     _bp_raw = load_blueprint(system_configuration=system_configuration)
     for msg in validate_blueprint_tile_invariants(state.world, _bp_raw):
         logging.warning("Blueprint invariant: %s", msg)
+    engine.orchestration_state.sync_from_engine(engine)
+    cursor_reconcile_notes = engine.orchestration_state.reconcile_loaded_cursors(
+        district_index=district_index,
+        district_build_cursor=loaded_district_build_cursor,
+        districts_len=len(districts),
+    )
     for note in quick_integrity_check(
         state.world,
         blueprint_dict=_bp_raw if isinstance(_bp_raw, dict) else None,
         restored_from_save=True,
+        cursor_reconcile_notes=cursor_reconcile_notes,
     ):
         logging.warning("Post-restore integrity: %s", note)
     logging.info(

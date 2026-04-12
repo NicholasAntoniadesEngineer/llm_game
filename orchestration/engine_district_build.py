@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from agents.base import BaseAgent
 from agents.golden_specs import get_fallback_spec_components_for_building_type
-from core.errors import AgentGenerationError, UrbanistaValidationError
+from core.errors import AgentGenerationError, PlacementError, UrbanistaValidationError
 from core.fingerprint import district_survey_key
 from core.run_log import trace_event
 from orchestration.build_pipeline import (
@@ -23,7 +23,9 @@ from orchestration.validation import (
     check_component_collisions,
     try_prune_colliding_decorative_components,
 )
+from orchestration.placement import generate_valid_candidates
 from orchestration.world_commit import apply_tile_placements
+from world.placement_validator import PlacementValidationContext
 
 if TYPE_CHECKING:
     from orchestration.engine_ports import DistrictBuildEnginePort
@@ -256,6 +258,12 @@ async def run_district_build(
                 terrain_tile_triples,
                 system_configuration=engine.system_configuration,
             )
+            if terrain_batch.place_tile_rejections_count:
+                logger.warning(
+                    "Procedural terrain batch dropped %s tiles for %r (place_tile rejected)",
+                    terrain_batch.place_tile_rejections_count,
+                    name,
+                )
             placed_terrain = terrain_batch.placed_tile_dicts
             if placed_terrain:
                 await engine.broadcast({
@@ -707,11 +715,63 @@ async def run_district_build(
                             "historical_note", hist_note
                         )
                         urban_tile_triples.append((x, y, td_commit))
-                urban_batch = apply_tile_placements(
-                    engine.world,
-                    urban_tile_triples,
-                    system_configuration=engine.system_configuration,
-                )
+                placement_ctx: PlacementValidationContext | None = None
+                fallback_cells: tuple[tuple[int, int], ...] = ()
+                max_candidate_tries = 0
+                if engine.blueprint is not None and job["btype"] not in engine._open_terrain_types_set:
+                    placement_ctx = PlacementValidationContext(
+                        anchor_x=int(anchor_x),
+                        anchor_y=int(anchor_y),
+                        building_name=name,
+                        building_type=job["btype"],
+                        district_key=district_key,
+                    )
+                    raw_candidates = generate_valid_candidates(
+                        engine.world,
+                        engine.blueprint,
+                        district_key,
+                        system_configuration=engine.system_configuration,
+                    )
+                    fallback_cells = tuple(raw_candidates)
+                    max_candidate_tries = min(32, max(1, len(fallback_cells) + 1))
+                try:
+                    urban_batch = apply_tile_placements(
+                        engine.world,
+                        urban_tile_triples,
+                        system_configuration=engine.system_configuration,
+                        blueprint=engine.blueprint if placement_ctx is not None else None,
+                        placement_context=placement_ctx,
+                        placement_fallback_candidates=fallback_cells if placement_ctx is not None else None,
+                        placement_max_candidate_tries=max_candidate_tries,
+                    )
+                except PlacementError as pe:
+                    skipped += 1
+                    logger.warning(
+                        "Placement rejected for %s (%s): %s",
+                        name,
+                        job["btype"],
+                        pe,
+                    )
+                    trace_event(
+                        "engine",
+                        "placement_exhausted",
+                        structure=name,
+                        district=district_key,
+                        detail=str(pe)[:400],
+                    )
+                    await engine._chat(
+                        "urbanista",
+                        "info",
+                        f"Skipped {name} — could not place on valid terrain ({pe}). Continuing.",
+                    )
+                    continue
+                if urban_batch.place_tile_rejections_count:
+                    logger.warning(
+                        "Urbanista batch dropped %s tiles for %r (%s) — partial commit",
+                        urban_batch.place_tile_rejections_count,
+                        name,
+                        job["btype"],
+                    )
                 placed = urban_batch.placed_tile_dicts
 
                 # Record design in style memory

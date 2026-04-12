@@ -27,7 +27,8 @@ SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
     "elevation_scale", "max_elevation", "max_building_height", "min_building_height",
     "terrain_max_gradient", "terrain_gradient_iterations",
     "max_buildings_per_district", "survey_buildings_per_chunk", "urbanista_max_concurrent",
-    "survey_max_concurrent", "save_state_every_n_structures", "chat_persist_debounce_s",
+    "survey_max_concurrent", "persistence_fail_on_save_format_version_mismatch",
+    "save_state_every_n_structures", "chat_persist_debounce_s",
     "heartbeat_interval_s", "llm_trace_heartbeat_interval_s", "expansion_cooldown", "chat_history_max_messages",
     "chat_replay_max_messages", "token_telemetry_interval_s", "timeline_window", "step_delay",
     "max_generations", "claude_cli_binary", "max_batch_size", "max_batch_tiles",
@@ -55,7 +56,8 @@ SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
     "skeleton_planner_debug_json_max_chars", "skeleton_planner_inter_retry_wait_seconds",
     "district_spacing_by_style", "road_bridge_default_elevation", "agent_failure_detail_max_chars",
     "material_roughness_low_default", "material_roughness_medium_default", "material_roughness_high_default",
-    "world_place_tile_min_elevation", "world_build_log_max_entries", "world_build_log_trim_keep_entries",
+    "world_place_tile_min_elevation", "world_place_tile_reject_out_of_bounds",
+    "world_build_log_max_entries", "world_build_log_trim_keep_entries",
     "terrain_type_display_colors", "terrain_display_icons", "building_type_display_icons",
     "api_pause_auto_retry_delay_seconds", "api_pause_retriable_reasons",
     "society_file_extension",
@@ -65,6 +67,11 @@ SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
     "openai_compatible_temperature",
     "skeleton_cli_kill_subprocess_on_timeout",
     "terrain_classification_thresholds",
+    "terrain_smoothing_convergence_epsilon",
+    "terrain_smoothing_secondary_passes",
+    "min_buildable_cell_stability",
+    "placement_max_abs_slope",
+    "placement_require_cardinal_road_adjacency",
     "terrain_stability_terrain_type_modifiers",
     "terrain_stability_soil_type_modifiers",
     "road_surface_colors_by_type",
@@ -133,6 +140,11 @@ class TerrainConfig:
     road_surface_colors_by_type_dictionary: Dict[str, str]
     blueprint_water_channel_default_width_tiles: int
     building_material_hex_colors_dictionary: Dict[str, str]
+    terrain_smoothing_convergence_epsilon_value: float
+    terrain_smoothing_secondary_passes_count: int
+    min_buildable_cell_stability_value: float
+    placement_max_abs_slope_value: float
+    placement_require_cardinal_road_adjacency_flag: int
 
 
 @dataclass(frozen=True)
@@ -245,6 +257,7 @@ class Config:
     agent_failure_detail_max_chars: int
     society_file_extension_suffix: str
     world_place_tile_min_elevation: float
+    world_place_tile_reject_out_of_bounds_flag: int
     world_build_log_max_entries: int
     world_build_log_trim_keep_entries: int
     terrain_type_display_colors_extra_dictionary: Dict[str, Any]
@@ -273,6 +286,7 @@ class Config:
     society_validation_strict_flag: int
     token_telemetry_broadcast_failure_raises_flag: int
     master_plan_duplicate_tile_policy_string: str
+    persistence_fail_on_save_format_version_mismatch_flag: int
 
     @classmethod
     def load_from_system_config(cls, csv_path_relative: str = "data/system_config.csv") -> "Config":
@@ -377,6 +391,18 @@ class Config:
             raise ConfigLoadError(
                 "master_plan_duplicate_tile_policy must be 'repair' or 'fail' (from system_config.csv)"
             )
+        persistence_fail_on_save_format_version_mismatch_flag = int(
+            params["persistence_fail_on_save_format_version_mismatch"]
+        )
+        if persistence_fail_on_save_format_version_mismatch_flag not in (0, 1):
+            raise ConfigLoadError(
+                "persistence_fail_on_save_format_version_mismatch must be 0 or 1 (from system_config.csv)"
+            )
+        world_place_tile_reject_out_of_bounds_flag = int(params["world_place_tile_reject_out_of_bounds"])
+        if world_place_tile_reject_out_of_bounds_flag not in (0, 1):
+            raise ConfigLoadError(
+                "world_place_tile_reject_out_of_bounds must be 0 or 1 (from system_config.csv)"
+            )
         for stone_key in (
             "blueprint_default_primary_stone",
             "blueprint_default_secondary_stone",
@@ -441,6 +467,21 @@ class Config:
             material_hex: Dict[str, str] = {
                 str(k).strip().lower(): str(v).strip() for k, v in material_colors_raw.items()
             }
+            terrain_smoothing_convergence_epsilon_value = float(params["terrain_smoothing_convergence_epsilon"])
+            if terrain_smoothing_convergence_epsilon_value < 0:
+                raise ConfigLoadError("terrain_smoothing_convergence_epsilon must be >= 0")
+            terrain_smoothing_secondary_passes_count = int(params["terrain_smoothing_secondary_passes"])
+            if terrain_smoothing_secondary_passes_count < 0 or terrain_smoothing_secondary_passes_count > 64:
+                raise ConfigLoadError("terrain_smoothing_secondary_passes must be between 0 and 64")
+            min_buildable_cell_stability_value = float(params["min_buildable_cell_stability"])
+            if not (0.0 <= min_buildable_cell_stability_value <= 1.0):
+                raise ConfigLoadError("min_buildable_cell_stability must be between 0 and 1")
+            placement_max_abs_slope_value = float(params["placement_max_abs_slope"])
+            if placement_max_abs_slope_value <= 0:
+                raise ConfigLoadError("placement_max_abs_slope must be > 0")
+            placement_require_cardinal_road_adjacency_flag = int(params["placement_require_cardinal_road_adjacency"])
+            if placement_require_cardinal_road_adjacency_flag not in (0, 1):
+                raise ConfigLoadError("placement_require_cardinal_road_adjacency must be 0 or 1")
             terrain_config_instance = TerrainConfig(
                 maximum_gradient_value=params["terrain_max_gradient"],
                 gradient_iterations_count=params["terrain_gradient_iterations"],
@@ -459,6 +500,11 @@ class Config:
                 road_surface_colors_by_type_dictionary=road_colors_normalized,
                 blueprint_water_channel_default_width_tiles=blueprint_water_channel_default_width_tiles,
                 building_material_hex_colors_dictionary=material_hex,
+                terrain_smoothing_convergence_epsilon_value=terrain_smoothing_convergence_epsilon_value,
+                terrain_smoothing_secondary_passes_count=terrain_smoothing_secondary_passes_count,
+                min_buildable_cell_stability_value=min_buildable_cell_stability_value,
+                placement_max_abs_slope_value=placement_max_abs_slope_value,
+                placement_require_cardinal_road_adjacency_flag=placement_require_cardinal_road_adjacency_flag,
             )
             performance_config_instance = PerformanceConfig(
                 urbanista_maximum_concurrent_calls=params["urbanista_max_concurrent"],
@@ -553,6 +599,7 @@ class Config:
                 agent_failure_detail_max_chars=params["agent_failure_detail_max_chars"],
                 society_file_extension_suffix=params["society_file_extension"],
                 world_place_tile_min_elevation=float(params["world_place_tile_min_elevation"]),
+                world_place_tile_reject_out_of_bounds_flag=world_place_tile_reject_out_of_bounds_flag,
                 world_build_log_max_entries=int(params["world_build_log_max_entries"]),
                 world_build_log_trim_keep_entries=int(params["world_build_log_trim_keep_entries"]),
                 terrain_type_display_colors_extra_dictionary=params["terrain_type_display_colors"],
@@ -599,6 +646,7 @@ class Config:
                 society_validation_strict_flag=society_validation_strict_flag,
                 token_telemetry_broadcast_failure_raises_flag=token_telemetry_broadcast_failure_raises_flag,
                 master_plan_duplicate_tile_policy_string=master_plan_duplicate_tile_policy_string,
+                persistence_fail_on_save_format_version_mismatch_flag=persistence_fail_on_save_format_version_mismatch_flag,
             )
             _config_logger.info(
                 "config_loaded_successfully source=system_config.csv params_count=%s",

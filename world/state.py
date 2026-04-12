@@ -114,7 +114,20 @@ class WorldState:
         return 1
 
     def place_tile(self, x: int, y: int, data: dict) -> bool:
-        """Place or update a tile. World expands to fit — never rejects."""
+        """Place or update a tile. World expands to fit — never rejects.
+
+        For multi-tile or restored-disk batches, prefer ``orchestration.world_commit.apply_tile_placements``
+        so payloads are normalized once before commit.
+
+        When ``world_place_tile_reject_out_of_bounds_flag`` is 1 on ``system_configuration``,
+        returns ``False`` without mutating if ``(x, y)`` lies outside configured coordinate limits.
+        """
+        if int(self.system_configuration.world_place_tile_reject_out_of_bounds_flag) == 1:
+            lo = int(self.system_configuration.minimum_coordinate_value)
+            hi = int(self.system_configuration.maximum_coordinate_value)
+            ix, iy = int(x), int(y)
+            if ix < lo or ix > hi or iy < lo or iy > hi:
+                return False
         data = normalize_tile_dict_for_world(
             data,
             system_configuration=self.system_configuration,
@@ -221,3 +234,26 @@ class WorldState:
             for tile in self.tiles.values()
             if tile.turn >= since_turn and tile.terrain != "empty"
         ]
+
+    def validate_integrity(self) -> list[str]:
+        """Return human-readable issues (empty if none). Does not mutate state."""
+        notes: list[str] = []
+        max_c = int(self.system_configuration.maximum_coordinate_value)
+        min_c = int(self.system_configuration.minimum_coordinate_value)
+        for (tx, ty), tile in self.tiles.items():
+            if tx != tile.x or ty != tile.y:
+                notes.append(f"tile key {(tx, ty)} mismatches tile.x/y {(tile.x, tile.y)}")
+            if tx > max_c or tx < min_c or ty > max_c or ty < min_c:
+                notes.append(f"tile {(tx, ty)} outside configured coordinate bounds")
+            if tile.terrain not in ("empty",) and not str(tile.terrain).strip():
+                notes.append(f"tile {(tx, ty)} has blank terrain string")
+        if self._dirty_chunks and not self.tiles:
+            notes.append("dirty chunk set non-empty but tiles map is empty")
+        for chunk_key, coord_set in self._tiles_by_chunk.items():
+            for tx, ty in coord_set:
+                stored = self.tiles.get((tx, ty))
+                if stored is None:
+                    notes.append(f"chunk index {chunk_key} references missing tile {(tx, ty)}")
+                elif stored.terrain == "empty":
+                    notes.append(f"chunk index {chunk_key} lists empty terrain at {(tx, ty)}")
+        return notes

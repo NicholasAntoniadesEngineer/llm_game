@@ -12,6 +12,11 @@ max_building_height                             ,25.0                           
 min_building_height                             ,2.0                                                                         ,float  ,Minimum building height in meters                                                 ,1.0     ,10.0      ,                                  
 terrain_max_gradient                            ,0.42                                                                        ,float  ,Maximum terrain gradient between adjacent tiles                                   ,0.05    ,3.0       ,                                  
 terrain_gradient_iterations                     ,48                                                                          ,int    ,Iterations for relaxing terrain gradients                                         ,8       ,256       ,                                  
+terrain_smoothing_convergence_epsilon             ,0.0005                                                                      ,float  ,Max per-iteration max-delta below which gradient smoothing early-exits (0=never) ,0.0     ,0.1       ,                                  
+terrain_smoothing_secondary_passes               ,0                                                                           ,int    ,Extra full max-gradient passes after the first (0=single pass only)               ,0       ,8         ,                                  
+min_buildable_cell_stability                     ,0.2                                                                         ,float  ,Tiles below this assessed stability excluded from valid_buildable_cells           ,0.0     ,1.0       ,                                  
+placement_max_abs_slope                          ,0.95                                                                        ,float  ,Building.validate_placement fails if any footprint tile slope exceeds this        ,0.05    ,5.0       ,                                  
+placement_require_cardinal_road_adjacency        ,0                                                                           ,int    ,1=Building.validate_placement requires a cardinal neighbor road at anchor          ,0       ,1         ,                                  
 
 # --- District & survey throughput ---          ,,,,,,
 max_buildings_per_district                      ,8                                                                           ,int    ,Max buildings per district in skeleton planning                                   ,3       ,20        ,                                  
@@ -20,6 +25,7 @@ urbanista_max_concurrent                        ,5                              
 survey_max_concurrent                           ,3                                                                           ,int    ,Max concurrent surveyor LLM calls                                                 ,1       ,10        ,                                  
 
 # --- Persistence pacing & UI chat ---          ,,,,,,
+persistence_fail_on_save_format_version_mismatch ,0                                                                          ,int    ,1=load_state raises SaveIndexError when save_format_version differs from code      ,0       ,1         ,                                  
 save_state_every_n_structures                   ,1                                                                           ,int    ,Save after this many structures (1 for robustness)                                ,1       ,10        ,                                  
 chat_persist_debounce_s                         ,2.0                                                                         ,float  ,Debounce interval for chat persistence in seconds                                 ,0.5     ,30.0      ,                                  
 heartbeat_interval_s                            ,15.0                                                                        ,float  ,Heartbeat monitoring interval in seconds                                          ,1.0     ,60.0      ,                                  
@@ -129,6 +135,7 @@ material_roughness_high_default                 ,0.9                            
 
 # --- World tile placement & build log ---      ,,,,,,
 world_place_tile_min_elevation                  ,-5.0                                                                        ,float  ,Minimum elevation clamp when placing or updating tiles                            ,-50.0   ,0.0       ,                                  
+world_place_tile_reject_out_of_bounds           ,0                                                                           ,int    ,1=place_tile returns False when x/y outside min/max_coordinate_value (sparse off) ,0       ,1         ,                                                                    
 world_build_log_max_entries                     ,5000                                                                        ,int    ,WorldState build_log length before trimming                                       ,1000    ,50000     ,                                  
 world_build_log_trim_keep_entries               ,2500                                                                        ,int    ,Entries retained after build_log trim                                             ,500     ,25000     ,                                  
 

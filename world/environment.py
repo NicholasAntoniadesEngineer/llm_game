@@ -7,9 +7,14 @@ policy defaults for terrain rules.
 
 from __future__ import annotations
 
+import logging
 import math
+from collections import defaultdict
+from collections.abc import Callable
 from typing import TYPE_CHECKING, List, Tuple
 
+from orchestration.world_commit import apply_tile_placements
+from world.roads import bresenham_line, road_dict_allows_water_crossing
 from world.tile import TerrainType
 
 if TYPE_CHECKING:
@@ -17,9 +22,11 @@ if TYPE_CHECKING:
     from world.blueprint import CityBlueprint
     from world.state import WorldState
 
+logger = logging.getLogger("eternal.environment")
 
-class TerrainAnalysis:
-    """Terrain classification and slope analysis (thresholds supplied by caller)."""
+
+class TerrainFieldEvaluator:
+    """Pure terrain classification and slope math (thresholds supplied by caller)."""
 
     @staticmethod
     def classify_terrain(
@@ -136,14 +143,72 @@ class TerrainAnalysis:
         return max(0.0, min(1.0, base_stability))
 
 
-def generate_terrain(
-    world: WorldState,
-    blueprint: CityBlueprint,
-    *,
-    system_configuration: Config,
-) -> int:
-    """Run smoothed elevation and full per-tile ``terrain_analysis`` on placed tiles."""
-    return blueprint.populate_elevation(world, system_configuration=system_configuration)
+def _ordered_centerline_cells_for_road_dict(road_dict: dict) -> list[tuple[int, int]]:
+    """All grid cells along a road polyline in traversal order (dedupe consecutive)."""
+    raw_points = road_dict.get("points", [])
+    waypoints: list[tuple[int, int]] = []
+    for point in raw_points:
+        if isinstance(point, (list, tuple)) and len(point) >= 2:
+            waypoints.append((int(point[0]), int(point[1])))
+        elif isinstance(point, dict):
+            waypoints.append((int(point.get("x", 0)), int(point.get("y", 0))))
+    if len(waypoints) < 2:
+        return []
+    ordered_cells: list[tuple[int, int]] = []
+    for segment_index in range(len(waypoints) - 1):
+        x0, y0 = waypoints[segment_index]
+        x1, y1 = waypoints[segment_index + 1]
+        for cell in bresenham_line(x0, y0, x1, y1):
+            if not ordered_cells or ordered_cells[-1] != cell:
+                ordered_cells.append(cell)
+    return ordered_cells
+
+
+def _split_road_dict_at_water_channel(
+    road_dict: dict,
+    water_channel_tile_xy_set: set[tuple[int, int]],
+) -> list[dict]:
+    """Deterministically split a polyline road into dry segments plus explicit water crossings."""
+    if road_dict_allows_water_crossing(road_dict):
+        return [road_dict]
+    centerline = _ordered_centerline_cells_for_road_dict(road_dict)
+    if len(centerline) < 2:
+        return [road_dict]
+
+    runs: list[tuple[bool, list[tuple[int, int]]]] = []
+    run_cells: list[tuple[int, int]] = []
+    run_is_water = centerline[0] in water_channel_tile_xy_set
+    for cell in centerline:
+        in_water = cell in water_channel_tile_xy_set
+        if in_water != run_is_water and run_cells:
+            runs.append((run_is_water, list(run_cells)))
+            run_cells = [cell]
+            run_is_water = in_water
+        else:
+            run_cells.append(cell)
+    if run_cells:
+        runs.append((run_is_water, list(run_cells)))
+
+    base_name = str(road_dict.get("name", "road"))
+    road_type = road_dict.get("type", "vicus")
+    width = road_dict.get("width", 1)
+    split_roads: list[dict] = []
+    for run_index, (is_water_run, cells) in enumerate(runs):
+        if len(cells) < 2:
+            continue
+        point_list = [[int(cx), int(cy)] for cx, cy in cells]
+        sub_name = base_name if len(runs) == 1 else f"{base_name}__seg{run_index + 1}"
+        sub: dict = {
+            "name": sub_name,
+            "type": road_type,
+            "points": point_list,
+            "width": width,
+        }
+        if is_water_run:
+            sub["crosses_water"] = True
+        split_roads.append(sub)
+
+    return split_roads if split_roads else [road_dict]
 
 
 def resolve_road_water_conflicts(
@@ -151,13 +216,93 @@ def resolve_road_water_conflicts(
     blueprint: CityBlueprint,
     *,
     system_configuration: Config,
-) -> None:
-    """Reserved hook for procedural bridge insertion across water channels.
+) -> int:
+    """Split non-bridge roads that cross rasterized water channels into bridge + dry segments.
 
-    Road rasterization already consults ``water_channel_tile_set`` to avoid
-    painting roads into channels; additional graph-level repairs belong here.
+    Mutates only ``blueprint.roads`` ordering and segmentation; ``world`` is unused but kept
+    for API symmetry with other environment passes.
     """
-    _ = world, blueprint, system_configuration
+    _ = world
+    water_channel_tile_xy_set = blueprint.water_channel_tile_set(system_configuration=system_configuration)
+    if not water_channel_tile_xy_set:
+        return 0
+    original_roads = list(blueprint.roads)
+    rebuilt: list[dict] = []
+    split_count = 0
+    for road in original_roads:
+        split_list = _split_road_dict_at_water_channel(road, water_channel_tile_xy_set)
+        if len(split_list) > 1:
+            split_count += len(split_list) - 1
+        rebuilt.extend(split_list)
+    if rebuilt != original_roads:
+        blueprint.roads = rebuilt
+        blueprint.reset_water_adjacency_cache()
+        logger.info(
+            "resolve_road_water_conflicts: rewrote %d blueprint roads into %d segments (extra=%d)",
+            len(original_roads),
+            len(rebuilt),
+            split_count,
+        )
+    return split_count
+
+
+def generate_terrain(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    *,
+    system_configuration: Config,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> int:
+    """Run smoothed elevation and full per-tile analysis; idempotent, chunk-batched apply.
+
+    Recomputes the authoritative elevation payload, skips writes where tiles already match,
+    and invokes ``progress_callback(done_chunks, total_chunks, label)`` after each chunk.
+    """
+    tile_updates = blueprint.compute_elevation_tile_field_updates(
+        world, system_configuration=system_configuration
+    )
+    if not tile_updates:
+        return 0
+
+    chunk_size = world.chunk_size_tiles
+    updates_by_chunk: dict[tuple[int, int], dict[tuple[int, int], dict]] = defaultdict(dict)
+    for (tx, ty), payload in tile_updates.items():
+        updates_by_chunk[(tx // chunk_size, ty // chunk_size)][(tx, ty)] = payload
+
+    ordered_chunk_keys = sorted(updates_by_chunk.keys())
+    total_chunks = len(ordered_chunk_keys)
+    updated_tiles = 0
+    for done_index, ck in enumerate(ordered_chunk_keys, start=1):
+        chunk_batch: list[tuple[int, int, dict]] = []
+        for (tx, ty) in sorted(updates_by_chunk[ck].keys()):
+            payload = updates_by_chunk[ck][(tx, ty)]
+            tile = world.get_tile(tx, ty)
+            if not tile:
+                continue
+            if blueprint.tile_payload_matches_current_tile(tile, payload):
+                continue
+            chunk_batch.append((tx, ty, payload))
+        if chunk_batch:
+            batch_result = apply_tile_placements(
+                world,
+                chunk_batch,
+                system_configuration=system_configuration,
+            )
+            if batch_result.place_tile_rejections_count:
+                logger.warning(
+                    "generate_terrain chunk %s: place_tile rejected %s updates (coordinate guard)",
+                    ck,
+                    batch_result.place_tile_rejections_count,
+                )
+            updated_tiles += len(batch_result.placed_tile_dicts)
+        if progress_callback is not None:
+            progress_callback(done_index, total_chunks, f"elevation_chunk_{ck[0]}_{ck[1]}")
+    logger.info(
+        "generate_terrain: chunks=%d tile_writes=%d (idempotent compare)",
+        total_chunks,
+        updated_tiles,
+    )
+    return updated_tiles
 
 
 def compute_valid_buildable_cells(
@@ -167,10 +312,11 @@ def compute_valid_buildable_cells(
     *,
     system_configuration: Config,
 ) -> dict[str, set[tuple[int, int]]]:
-    """Per-district cells inside each region rect that are not water channels or roads."""
+    """Per-district cells inside each region rect that are not water channels, roads, or unstable."""
     out: dict[str, set[tuple[int, int]]] = {}
     if not districts:
         return out
+    min_stability_required = float(system_configuration.terrain.min_buildable_cell_stability_value)
     water_ch = blueprint.water_channel_tile_set(system_configuration=system_configuration)
     road_xy: set[tuple[int, int]] = {
         (tx, ty)
@@ -196,6 +342,11 @@ def compute_valid_buildable_cells(
             for gy in range(lo_y, hi_y + 1):
                 if (gx, gy) in water_ch or (gx, gy) in road_xy:
                     continue
+                probe_tile = world.get_tile(gx, gy)
+                if probe_tile is not None:
+                    stability_value = probe_tile.stability
+                    if stability_value is not None and float(stability_value) < min_stability_required:
+                        continue
                 cells.add((gx, gy))
         out[name] = cells
     return out

@@ -1472,6 +1472,7 @@ def test_apply_tile_placements_places_and_skips_bad_coords():
     )
     assert batch.attempted_coordinate_pairs == 3
     assert batch.skipped_invalid_coordinates == 2
+    assert batch.place_tile_rejections_count == 0
     assert len(batch.placed_tile_dicts) == 1
     assert (1, 2) in world.tiles
 
