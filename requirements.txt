@@ -1,3 +1,6 @@
+# Python: use 3.11 or 3.12 for this lockfile (wheels for pydantic-core). 3.14 often fails to build.
+#   python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/python main.py
+
 # Core web framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0

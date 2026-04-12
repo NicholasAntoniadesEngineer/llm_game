@@ -112,20 +112,22 @@ let lastManualCameraMs = 0;
 
 /** Header strip: local clock + seconds since last WebSocket message + pong snapshot. */
 let _lastServerMessageAt = Date.now();
-/** Ignores keepalive pong so long LLM waits still show growing "since event" seconds. */
+/** Ignores keepalive pong (and a few telemetry types) so a quiet socket shows growing "since event" seconds. */
 let _lastNonPingMessageAt = Date.now();
 let _lastServerMessageType = "";
 let _lastPongEngineRunning = null;
 let _lastPongScenario = null;
+/** One-line build context from server (WebSocket ``build_status``). */
+let _buildActivitySummaryLine = "";
+/** Plain-language "what is it doing" from server ``activity_line`` (replaces generic "build running"). */
+let _headerEngineDoingLine = "";
 
-/** Message types that should not drive "since event" or "last:" (telemetry / keepalive / partial UI). */
+/** Message types that should not drive "since event" or "last:" (keepalive / streaming partials / token spam). */
 const _HEADER_NOISE_TYPES = new Set([
     "pong",
     "token_usage",
     "typing",
     "agent_activity",
-    "agent_status",
-    "chat",
 ]);
 
 /** District tracking for minimap overlays and 3D labels. */
@@ -446,6 +448,36 @@ function applyEngineSnapshotFromServer(msg) {
     if (sa !== null) _lastPongScenario = sa;
 }
 
+function formatBuildActivitySummary(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    const parts = [];
+    const mode = msg.session_mode != null ? String(msg.session_mode).trim() : "";
+    if (mode === "idle") {
+        const h = msg.hint != null ? String(msg.hint).trim() : "";
+        if (h) parts.push(h.slice(0, 100));
+    }
+    const act = msg.agent_activity != null ? String(msg.agent_activity).trim() : "";
+    if (act) parts.push(act.slice(0, 90));
+    const age = Number(msg.phase_age_s);
+    if (Number.isFinite(age) && age >= 20) {
+        parts.push(`trace ${age}s`);
+    }
+    if (msg.phase) parts.push(String(msg.phase));
+    if (msg.run_phase) parts.push(String(msg.run_phase));
+    if (msg.wave) parts.push(String(msg.wave).slice(0, 28));
+    if (msg.district) parts.push(String(msg.district));
+    const g = msg.generation;
+    if (Number.isFinite(Number(g))) parts.push(`gen ${g}`);
+    const cur = Number(msg.district_build_cursor);
+    const tot = Number(msg.districts_total);
+    if (Number.isFinite(cur) && Number.isFinite(tot) && tot > 0) {
+        parts.push(`dist ${Math.min(tot, cur + 1)}/${tot}`);
+    }
+    const wv = msg.build_wave_phase;
+    if (wv && String(wv).trim()) parts.push(String(wv));
+    return parts.join(" · ").slice(0, 200);
+}
+
 function recordServerActivity(msg) {
     _lastServerMessageAt = Date.now();
     const t = msg && msg.type;
@@ -473,19 +505,32 @@ function updateHeaderLiveStatus() {
     const idleEventSec = Math.max(0, Math.floor((Date.now() - _lastNonPingMessageAt) / 1000));
     const idleLinkSec = Math.max(0, Math.floor((Date.now() - _lastServerMessageAt) / 1000));
     let engineStr = "build ?";
-    if (_lastPongEngineRunning === true) engineStr = "build running";
-    else if (_lastPongEngineRunning === false) engineStr = "build idle";
+    if (_lastPongEngineRunning === true) {
+        const doing = (_headerEngineDoingLine || "").trim();
+        if (doing) {
+            engineStr = `run: ${doing.slice(0, 88)}`;
+        } else {
+            engineStr = "build running (no detail yet)";
+        }
+    } else if (_lastPongEngineRunning === false) engineStr = "build idle";
     let scenStr = "";
     if (_lastPongScenario === true) scenStr = " · scenario";
     else if (_lastPongScenario === false) scenStr = " · no scenario";
     const typeShort = (_lastServerMessageType || "—").slice(0, 28);
-    const line = `${wsState} · ${idleEventSec}s since event · ${engineStr}${scenStr} · last: ${typeShort}`;
+    let line = `${wsState} · ${idleEventSec}s since event · ${engineStr}${scenStr} · last: ${typeShort}`;
+    if (wsState === "WS OK" && idleEventSec >= 45 && idleLinkSec <= 35) {
+        line += " · pings live";
+    }
+    if (_buildActivitySummaryLine) {
+        line += ` · ${_buildActivitySummaryLine}`;
+    }
     statusEl.textContent = line;
     let titleExtra = `link ${idleLinkSec}s (incl. ping)`;
     if (_lastPongEngineRunning === null && wsState === "WS OK") {
         titleExtra += " · tap Wake if build ? stays";
     }
-    statusEl.title = `${line} · ${titleExtra}`;
+    const titleDoing = (_headerEngineDoingLine || _buildActivitySummaryLine || "").trim();
+    statusEl.title = titleDoing ? `${line} · ${titleExtra} · ${titleDoing}` : `${line} · ${titleExtra}`;
 }
 
 function startHeaderClockAndStatus() {
@@ -527,6 +572,8 @@ function handleMessage(msg) {
             if (typeof msg.height === "number" && msg.height > 0) worldGridHeight = msg.height;
             if (typeof msg.min_x === "number") worldMinX = msg.min_x;
             if (typeof msg.min_y === "number") worldMinY = msg.min_y;
+            _buildActivitySummaryLine = "";
+            _headerEngineDoingLine = "";
             // Don't clear chat — dedup in appendChat() handles replay duplicates.
             // Chat is only cleared on explicit reset (see "reset" send path).
             renderer.init(msg);
@@ -572,6 +619,12 @@ function handleMessage(msg) {
             }
             break;
 
+        case "build_status":
+            _headerEngineDoingLine = typeof msg.activity_line === "string" ? msg.activity_line.trim() : "";
+            _buildActivitySummaryLine = formatBuildActivitySummary(msg);
+            updateHeaderLiveStatus();
+            break;
+
         case "tile_update":
             if (!Array.isArray(msg.tiles)) break;
             dismissAutoRetryOverlay();
@@ -590,20 +643,26 @@ function handleMessage(msg) {
             if (msg.tiles && msg.tiles.length > 0 && renderer.flyTo) {
                 if (Date.now() - lastManualCameraMs > 8000) {
                     const t = msg.tiles[0];
-                    renderer.flyTo((t.x + 0.5) * TILE_SIZE, (t.y + 0.5) * TILE_SIZE);
+                    const tileU = typeof renderer.getTileWorldUnits === "function"
+                        ? renderer.getTileWorldUnits()
+                        : 14;
+                    renderer.flyTo((t.x + 0.5) * tileU, (t.y + 0.5) * tileU);
                 }
             }
             hideLoading();
             updatePauseButton(false);
             break;
 
-        case "build_progress":
-            if (!msg.done || !msg.total) break;
-            updateBuildProgress(msg);
-            _currentBuildingDone = msg.done;
-            _currentBuildingTotal = msg.total;
+        case "build_progress": {
+            const doneN = Number(msg.done);
+            const totalN = Number(msg.total);
+            if (!Number.isFinite(doneN) || !Number.isFinite(totalN) || totalN < 1) break;
+            updateBuildProgress({ ...msg, done: doneN, total: totalN });
+            _currentBuildingDone = doneN;
+            _currentBuildingTotal = totalN;
             updateDistrictProgress();
             break;
+        }
 
         case "chat":
             appendChat(msg);
@@ -788,7 +847,8 @@ function updateBuildProgress(msg) {
 
     const done = msg.done;
     const total = msg.total;
-    const name = msg.structure || "structure";
+    const rawName = msg.structure != null ? String(msg.structure).trim() : "";
+    const name = rawName || (done === 0 ? "starting…" : "structure");
     const btype = msg.building_type || "";
     const typeEmoji = {
         temple: "\u26ea", basilica: "\ud83c\udfdb\ufe0f", insula: "\ud83c\udfe0", domus: "\ud83c\udfe1",

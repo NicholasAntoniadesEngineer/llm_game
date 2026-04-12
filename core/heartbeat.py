@@ -15,11 +15,12 @@ class HeartbeatThread(threading.Thread):
         super().__init__(daemon=True, name="EternalHeartbeat")
         self._interval_s = max(1.0, float(interval_s))
         self._snapshot_fn = snapshot_fn
-        self._stop = threading.Event()
+        # Do not use ``_stop``: ``threading.Thread`` reserves that name for join/shutdown internals.
+        self._shutdown_requested_event = threading.Event()
 
     def run(self) -> None:
         logger.info("Heartbeat thread started interval_s=%s", self._interval_s)
-        while not self._stop.wait(self._interval_s):
+        while not self._shutdown_requested_event.wait(self._interval_s):
             try:
                 snap = self._snapshot_fn()
                 from core.run_log import log_event
@@ -32,7 +33,7 @@ class HeartbeatThread(threading.Thread):
         logger.info("Heartbeat thread stopped")
 
     def stop(self) -> None:
-        self._stop.set()
+        self._shutdown_requested_event.set()
 
 
 def start_heartbeat(snapshot_fn: Callable[[], dict[str, Any]], interval_s: float) -> HeartbeatThread:

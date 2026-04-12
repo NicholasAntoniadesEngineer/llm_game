@@ -367,6 +367,12 @@ class BuildEngine:
                                 "type": "tile_update", "tiles": road_tiles,
                                 "turn": self.world.turn,
                             })
+                    # Persist full blueprint after roads/elevation mutate in-memory (first-run had saved too early).
+                    await asyncio.to_thread(
+                        save_blueprint,
+                        self.blueprint.to_dict(),
+                        system_configuration=self.system_configuration,
+                    )
 
             await self._save_state_thread(flush_mode="full")
             trace_event("engine", "Entering infinite generation loop", generation=self.generation, district_index=self.district_index)
@@ -436,6 +442,36 @@ class BuildEngine:
             await self.tasks.stop_token_telemetry()
             await self.broadcast_all_agents_idle()
             raise
+
+        except Exception as run_fatal_error:
+            logger.exception("BuildEngine.run() terminated with an unexpected error")
+            self.running = False
+            self.tasks.run_phase = EngineRunPhase.idle
+            try:
+                await self.tasks.stop_token_telemetry()
+            except Exception:
+                logger.exception("stop_token_telemetry after run() crash")
+            try:
+                await self.broadcast_all_agents_idle()
+            except Exception:
+                logger.exception("broadcast_all_agents_idle after run() crash")
+            try:
+                await self._chat(
+                    "cartographus",
+                    "error",
+                    f"Build engine stopped — {type(run_fatal_error).__name__}: {run_fatal_error}",
+                )
+            except Exception:
+                logger.exception("Could not broadcast chat after run() crash")
+            try:
+                await self.broadcast({
+                    "type": "paused",
+                    "reason": "engine_crash",
+                    "summary": f"Build stopped: {type(run_fatal_error).__name__}: {run_fatal_error}",
+                    "suggest_auto_resume": False,
+                })
+            except Exception:
+                logger.exception("Could not broadcast paused after run() crash")
 
     async def _build_generation(self) -> bool:
         """Build all unbuilt districts in two waves. Returns False if cancelled."""

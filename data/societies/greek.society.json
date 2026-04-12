@@ -14,6 +14,12 @@
       "roof_style": "tiled",
       "foundation": "stylobate",
       "materials": ["marble", "poros"]
+    },
+    "agora": {
+      "orders": ["doric", "ionic"],
+      "roof_style": "open_plaza",
+      "foundation": "packed_earth_paving",
+      "materials": ["limestone", "marble", "packed_earth"]
     }
   },
   "proportions": {

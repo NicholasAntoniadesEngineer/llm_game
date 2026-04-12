@@ -77,6 +77,76 @@ def _widen_line(points: list[tuple[int, int]], width: int) -> list[tuple[int, in
     return list(expanded)
 
 
+def water_features_channel_tiles(
+    water_features: list[dict],
+    *,
+    default_channel_width_tiles: int,
+) -> set[tuple[int, int]]:
+    """Rasterize blueprint water polylines to tile occupancy (centerline plus corridor width).
+
+    Used so ordinary roads do not overwrite the river/lake channel. Per-feature keys
+    ``channel_width_tiles`` or ``width`` override the default width when present and valid.
+    """
+    if default_channel_width_tiles < 1:
+        raise ValueError("default_channel_width_tiles must be >= 1")
+    occupied_channel_tiles: set[tuple[int, int]] = set()
+    for water_body in water_features or []:
+        raw_points = water_body.get("points", [])
+        waypoints: list[tuple[int, int]] = []
+        for point in raw_points:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                waypoints.append((int(point[0]), int(point[1])))
+            elif isinstance(point, dict):
+                waypoints.append((int(point.get("x", 0)), int(point.get("y", 0))))
+        if len(waypoints) < 2:
+            continue
+        raw_width = water_body.get("channel_width_tiles", water_body.get("width"))
+        if raw_width is None:
+            channel_width_tiles = default_channel_width_tiles
+        else:
+            try:
+                channel_width_tiles = int(raw_width)
+            except (TypeError, ValueError):
+                channel_width_tiles = default_channel_width_tiles
+        channel_width_tiles = max(1, channel_width_tiles)
+        segment_centerline_points: list[tuple[int, int]] = []
+        for segment_index in range(len(waypoints) - 1):
+            segment_centerline_points.extend(
+                bresenham_line(
+                    waypoints[segment_index][0],
+                    waypoints[segment_index][1],
+                    waypoints[segment_index + 1][0],
+                    waypoints[segment_index + 1][1],
+                )
+            )
+        dedupe_seen: set[tuple[int, int]] = set()
+        unique_centerline: list[tuple[int, int]] = []
+        for cell in segment_centerline_points:
+            if cell not in dedupe_seen:
+                dedupe_seen.add(cell)
+                unique_centerline.append(cell)
+        if channel_width_tiles > 1:
+            corridor_cells = _widen_line(unique_centerline, channel_width_tiles)
+        else:
+            corridor_cells = unique_centerline
+        occupied_channel_tiles.update(corridor_cells)
+    return occupied_channel_tiles
+
+
+def road_dict_allows_water_crossing(road_dict: dict) -> bool:
+    """True when the road is treated as a bridge or deliberate water crossing (may occupy water tiles)."""
+    if road_dict.get("crosses_water") is True or road_dict.get("allow_water_crossing") is True:
+        return True
+    road_type_key = str(road_dict.get("type", "")).strip().lower()
+    if road_type_key in {"ponte", "bridge", "aqueduct", "causeway", "ford"}:
+        return True
+    name_lower = str(road_dict.get("name", "")).lower()
+    for crossing_marker in ("bridge", "ponte", "causeway", "ford"):
+        if crossing_marker in name_lower:
+            return True
+    return False
+
+
 def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint | None = None) -> int:
     """Place road tiles along a road's waypoints using Bresenham line drawing.
 
@@ -101,6 +171,13 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
 
     if len(waypoints) < 2:
         return 0
+
+    allows_water_crossing = road_dict_allows_water_crossing(road_dict)
+    blueprint_water_channel_tiles: set[tuple[int, int]] = set()
+    if blueprint is not None and not allows_water_crossing:
+        blueprint_water_channel_tiles = blueprint.water_channel_tile_set(
+            system_configuration=world.system_configuration
+        )
 
     # Draw lines between consecutive waypoints
     all_line_points: list[tuple[int, int]] = []
@@ -129,10 +206,19 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
 
     count = 0
     for x, y in road_tiles:
-        # Don't overwrite existing non-empty, non-road tiles
         existing = world.get_tile(x, y)
-        if existing and existing.terrain not in ("empty", "road"):
-            continue
+        terrain_kind = getattr(existing, "terrain", "empty") if existing else "empty"
+
+        if not allows_water_crossing:
+            if (x, y) in blueprint_water_channel_tiles:
+                continue
+            if terrain_kind in ("water", "marsh", "swamp"):
+                continue
+            if existing and terrain_kind not in ("empty", "road"):
+                continue
+        else:
+            if existing and terrain_kind not in ("empty", "road", "water", "marsh", "swamp"):
+                continue
 
         elev = 0.0
         if blueprint and blueprint.elevation_map:

@@ -1,7 +1,8 @@
 // Roma Aeterna — Component-based procedural 3D renderer
 // Buildings assembled from stacked architectural components (podium, colonnade, pediment, etc.)
 
-const TILE_SIZE = 14; // world units per tile — controls overall scale of everything
+/** Fallback if ``world_state.world_scale_meters_per_tile`` is missing (older clients/saves). */
+const DEFAULT_TILE_WORLD_UNITS = 14;
 
 /** Terrain types the renderer paints without spec.components (must match _buildTerrain branches). */
 const TERRAIN_WITH_PROCEDURAL_MESH = new Set(["road", "forum", "garden", "water", "grass"]);
@@ -11,7 +12,7 @@ const PHASE4_MAX_DECOR_MESHES = 96;
 const PHASE4_STEP_DEPTH = 0.045;
 const PHASE4_STEP_HEIGHT = 0.018;
 const PHASE4_STEP_COUNT = 3;
-/** Extra world half-height margin for frustum culling when Phase 4 adds façade extrusions (tile units × TILE_SIZE). */
+/** Extra world half-height margin for frustum culling when Phase 4 adds façade extrusions (tile units × tile world units). */
 const PHASE4_CULL_HEIGHT_EXTRA = 0.12;
 
 /** Enhanced surface generation constants */
@@ -304,6 +305,8 @@ class WorldRenderer {
 
     constructor(container) {
         this.container = container;
+        /** World XZ (and vertical scale) units per grid tile — synced from server ``world_scale_meters_per_tile``. */
+        this._tileWorldUnits = DEFAULT_TILE_WORLD_UNITS;
         this.grid = null;
         this.width = 0;
         this.height = 0;
@@ -579,7 +582,7 @@ class WorldRenderer {
         if (this._failed) return;
         if (this.width == null || this.height == null) return;
         this._flyTarget = null;
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         let minH = 0;
         let maxH = 0;
         if (this._cornerHeights && this._cornerHeights.length) {
@@ -625,6 +628,11 @@ class WorldRenderer {
         this._flyTarget = { x: worldX, z: worldZ };
         this._flyStart = Date.now();
         this._flyFrom = { x: this.cameraTarget.x, z: this.cameraTarget.z };
+    }
+
+    /** World units per grid tile (matches server ``world_scale_meters_per_tile`` when present). */
+    getTileWorldUnits() {
+        return this._tileWorldUnits > 0 ? this._tileWorldUnits : DEFAULT_TILE_WORLD_UNITS;
     }
 
     _updateCamera() {
@@ -998,7 +1006,10 @@ class WorldRenderer {
     /** Set up Three.js Sky shader with PMREM environment map. */
     _setupDynamicSky(renderer) {
         const sky = new THREE.Sky();
-        sky.scale.setScalar(10000);
+        // Must stay larger than the farthest camera excursion; otherwise the camera sits
+        // outside the sky box and the cube edges read as a vertical stack of “blocks”.
+        // Match three.js examples (~450k) and follow the camera each frame in _animate().
+        sky.scale.setScalar(450000);
         this.scene.add(sky);
         this._sky = sky;
 
@@ -1065,7 +1076,8 @@ class WorldRenderer {
             if (this._pmremRenderTarget) {
                 this._pmremRenderTarget.dispose();
             }
-            const rt = this._pmremGenerator.fromScene(this.scene, 0, 0.1, 10000);
+            const pmremFar = Math.max(500000, (this.camera && this.camera.far) ? this.camera.far * 2 : 500000);
+            const rt = this._pmremGenerator.fromScene(this.scene, 0, 0.1, pmremFar);
             this.scene.environment = rt.texture;
             this._pmremRenderTarget = rt;
             this._sky.visible = skyVisible;
@@ -1563,7 +1575,7 @@ class WorldRenderer {
      * Returns { ok: true, placeholder: true } so the caller knows a placeholder was placed.
      */
     _placePlaceholderBox(tile, key, tileW, tileD, centerX, centerZ, oldGroup, errorMsg) {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         const elevation = this._surfaceYAtWorldXZ(centerX, centerZ);
 
         // Clean up old group if present
@@ -1680,7 +1692,7 @@ class WorldRenderer {
     }
 
     _rebuildTerrainMesh() {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         const H = this._cornerHeights;
         if (!H || !H.length) return;
 
@@ -1737,7 +1749,7 @@ class WorldRenderer {
 
     /** World XZ of tile center (handles multi-tile anchor footprints). */
     _tileWorldCenterXZ(tile) {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         let cx = (tile.x + 0.5) * S;
         let cz = (tile.y + 0.5) * S;
         const spec = tile && tile.spec;
@@ -1775,7 +1787,7 @@ class WorldRenderer {
         else if (terrain === "forum") maxTilt = 0.28;
         else if (terrain === "garden" || terrain === "grass") maxTilt = 0.34;
         else if (terrain === "water") maxTilt = 0.22;
-        const e = 0.26 * TILE_SIZE;
+        const e = 0.26 * this._tileWorldUnits;
         const h = (x, z) => this._surfaceYAtWorldXZ(x, z);
         const dhdx = (h(cx + e, cz) - h(cx - e, cz)) / (2 * e);
         const dhdz = (h(cx, cz + e) - h(cx, cz - e)) / (2 * e);
@@ -1799,7 +1811,7 @@ class WorldRenderer {
     /** Keep the lake/sea plane slightly below the lowest terrain vertex. */
     _syncWaterPlaneToTerrain() {
         if (!this._cornerHeights || !this._cornerHeights.length) return;
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         let minH = Infinity;
         for (const row of this._cornerHeights) {
             for (const v of row) {
@@ -1972,7 +1984,7 @@ class WorldRenderer {
      * Bilinear surface Y (world units) matching the terrain mesh at (x,z).
      */
     _surfaceYAtWorldXZ(x, z) {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         const gw = this.width;
         const gh = this.height;
         const H = this._cornerHeights;
@@ -2136,7 +2148,13 @@ class WorldRenderer {
                 }
             }
         }
-        const S = TILE_SIZE;
+        const scaleFromServer = Number(worldState.world_scale_meters_per_tile);
+        if (Number.isFinite(scaleFromServer) && scaleFromServer >= 0.5 && scaleFromServer <= 200) {
+            this._tileWorldUnits = scaleFromServer;
+        } else {
+            this._tileWorldUnits = DEFAULT_TILE_WORLD_UNITS;
+        }
+        const S = this._tileWorldUnits;
         this._cornerHeights = this._computeCornerHeightGrid();
 
         let minH = 0;
@@ -2390,7 +2408,7 @@ class WorldRenderer {
 
         // Position above building — estimate building top from group bounding box
         const bbox = new THREE.Box3().setFromObject(group);
-        const topY = (bbox.max.y - group.position.y) / TILE_SIZE; // local tile units
+        const topY = (bbox.max.y - group.position.y) / this._tileWorldUnits; // local tile units
         pts.position.y = topY + 0.05;
 
         group.add(pts);
@@ -2433,7 +2451,7 @@ class WorldRenderer {
 
         // Position at building top
         const bbox = new THREE.Box3().setFromObject(group);
-        const topY = (bbox.max.y - group.position.y) / TILE_SIZE;
+        const topY = (bbox.max.y - group.position.y) / this._tileWorldUnits;
         // Offset slightly so it doesn't clip into roof
         flag.position.set(0, topY + flagH / 2 + 0.02, 0);
 
@@ -2454,10 +2472,10 @@ class WorldRenderer {
         // Limit to 8 total torch lights (forward renderer constraint)
         if (this._torchLights.length >= 8) return;
 
-        const light = new THREE.PointLight(0xff9944, 0, 8 * TILE_SIZE);
+        const light = new THREE.PointLight(0xff9944, 0, 8 * this._tileWorldUnits);
         light.castShadow = false;
         // Position at building entrance (slightly above ground, in front)
-        light.position.set(0, 0.15 * TILE_SIZE, 0.5 * TILE_SIZE);
+        light.position.set(0, 0.15 * this._tileWorldUnits, 0.5 * this._tileWorldUnits);
         light.visible = false; // Controlled by setTimeOfDay
 
         group.add(light);
@@ -2511,7 +2529,7 @@ class WorldRenderer {
             if (this._terrainMesh) {
                 this.scene.remove(this._terrainMesh);
                 this._terrainMesh.geometry.dispose();
-                const S = TILE_SIZE;
+                const S = this._tileWorldUnits;
                 const earth = 0x9a7b52;
                 let minH = 0, maxH = 0;
                 for (const row of this._cornerHeights) {
@@ -2573,7 +2591,7 @@ class WorldRenderer {
         if (this._terrainMesh) {
             this.scene.remove(this._terrainMesh);
             this._terrainMesh.geometry.dispose();
-            const S = TILE_SIZE;
+            const S = this._tileWorldUnits;
             let minH = 0, maxH = 0;
             for (const row of this._cornerHeights) {
                 for (const v of row) {
@@ -2986,7 +3004,7 @@ class WorldRenderer {
         const terrain = tile.terrain;
         const isTerrainMesh = TERRAIN_WITH_PROCEDURAL_MESH.has(terrain);
 
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         let tileW = 0.9, tileD = 0.9;
         let centerX = (tile.x + 0.5) * S, centerZ = (tile.y + 0.5) * S;
         if (spec && spec.anchor && this.grid) {
@@ -6543,7 +6561,7 @@ class WorldRenderer {
 
     /** Smoothly zoom the camera close to a specific tile/building. */
     _zoomToTile(tile) {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         // Find the building group for multi-tile buildings
         const anchor = tile.spec && tile.spec.anchor;
         const ax = anchor ? anchor.x : tile.x;
@@ -6588,7 +6606,7 @@ class WorldRenderer {
         // Avoid duplicates
         if (this._districtRegions.find(d => d.name === name)) return;
 
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         const cx = ((region.x1 + region.x2) / 2 + 0.5) * S;
         const cz = ((region.y1 + region.y2) / 2 + 0.5) * S;
         const groundY = this._surfaceYAtWorldXZ ? this._surfaceYAtWorldXZ(cx, cz) : 0;
@@ -6634,7 +6652,7 @@ class WorldRenderer {
 
     /** Show district label when mouse is over its region. Called from _updateHover. */
     _updateDistrictHover(worldX, worldZ) {
-        const S = TILE_SIZE;
+        const S = this._tileWorldUnits;
         const tileX = worldX / S - 0.5;
         const tileZ = worldZ / S - 0.5;
         for (const d of this._districtRegions) {
@@ -6885,6 +6903,11 @@ class WorldRenderer {
             if (!torch || !torch.light || !torch.light.visible) continue;
             // Random flicker: +-15% intensity variation
             torch.light.intensity = torch.baseIntensity * (0.85 + Math.random() * 0.3);
+        }
+
+        // Keep analytic sky centered on the camera so we never render from outside the sky box.
+        if (this._sky) {
+            this._sky.position.copy(this.camera.position);
         }
 
         this._projScreenMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);

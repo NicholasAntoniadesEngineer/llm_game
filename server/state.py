@@ -44,3 +44,6 @@ class AppState:
         self.reset_timeline_callback = None  # async () -> dict — new run clock only
         # Callable returning whether BuildEngine.run() is active — used to avoid replaying stale "paused" on refresh.
         self.engine_is_running = None
+        # Optional replay helpers (set from main.py): WebSocket connect sends terrain + build context after refresh.
+        self.terrain_data_for_replay = None
+        self.build_status_for_replay = None

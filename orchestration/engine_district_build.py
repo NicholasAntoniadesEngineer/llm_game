@@ -100,6 +100,10 @@ async def run_district_build(
     structure_contexts: list[dict] = []
     buildable = []
     for struct_idx, structure in enumerate(master_plan):
+        if struct_idx > 0 and struct_idx % 24 == 0:
+            await asyncio.sleep(0)
+            if not engine.running:
+                return False
         name = structure.get("name", "Structure")
         btype = structure.get("building_type", "building")
         tiles = structure.get("tiles", [])
@@ -118,6 +122,10 @@ async def run_district_build(
             my_center = (0.0, 0.0)
         neighbors = []
         for other_idx, other in enumerate(master_plan):
+            if other_idx > 0 and other_idx % 48 == 0:
+                await asyncio.sleep(0)
+                if not engine.running:
+                    return False
             if other_idx == struct_idx:
                 continue
             oc = centers_list[other_idx]
@@ -141,6 +149,7 @@ async def run_district_build(
 
     # ─── Bounded-parallel Urbanista, then ordered placement ───
     urban_jobs: list[dict] = []
+    buildable_total = len(buildable)
     for idx, structure in enumerate(buildable):
         if not engine.running:
             return False
@@ -153,6 +162,24 @@ async def run_district_build(
         ctx = structure_contexts[idx]
         neighbor_desc = ctx["neighbor_desc"]
         nearest = ctx["nearest"]
+
+        engine.update_trace_snapshot(
+            phase="district_prep_prompts",
+            district=district_key,
+            prep_index=idx,
+            prep_total=buildable_total,
+            prep_structure=name,
+            prep_building_type=btype,
+        )
+        logger.info(
+            "District %s: preparing Urbanista prompt %d/%d — %s (%s)",
+            district_key,
+            idx + 1,
+            buildable_total,
+            name,
+            btype,
+        )
+        await asyncio.sleep(0)
 
         if btype not in engine._open_terrain_types_set:
             await engine._chat(
@@ -364,6 +391,14 @@ async def run_district_build(
             + (f" — {batched_buildings} batched into {batch_count} calls" if batch_count else "")
             + " — placing as each completes...",
         )
+        await engine.broadcast({
+            "type": "build_progress",
+            "structure": "",
+            "building_type": "",
+            "done": 0,
+            "total": len(urban_jobs),
+            "district": district_key,
+        })
 
         # Wrap each work unit to carry its index
         async def _design_work_unit(wu_idx: int, work_unit: dict) -> tuple[int, list[tuple[int, dict | BaseException]]]:

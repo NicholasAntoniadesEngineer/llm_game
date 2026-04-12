@@ -5,6 +5,7 @@ import pytest
 from world.tiles import Tile
 from world.state import WorldState
 from world.blueprint import CityBlueprint
+from world.roads import rasterize_road, road_dict_allows_water_crossing, water_features_channel_tiles
 
 from tests.conftest import SYSTEM_CONFIGURATION
 
@@ -272,6 +273,9 @@ class TestWorldStateToDict:
         assert isinstance(d["tiles"], list)
         assert d["min_x"] == 5
         assert d["min_y"] == 10
+        assert d["world_scale_meters_per_tile"] == float(
+            SYSTEM_CONFIGURATION.grid.world_scale_meters_per_tile
+        )
 
     def test_to_dict_empty_world(self):
         w = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
@@ -361,3 +365,56 @@ class TestCityBlueprintElevationParity:
 
         for coord in ((0, 0), (2, 1)):
             assert w1.get_tile(*coord).elevation == w2.get_tile(*coord).elevation
+
+
+class TestRoadRasterizationRespectsWater:
+    def test_water_features_channel_tiles_includes_polyline(self):
+        water = [{"name": "r", "type": "river", "points": [[0, 0], [3, 0]], "width": 1}]
+        ch = water_features_channel_tiles(
+            water,
+            default_channel_width_tiles=SYSTEM_CONFIGURATION.terrain.blueprint_water_channel_default_width_tiles,
+        )
+        assert (0, 0) in ch and (3, 0) in ch
+
+    def test_road_skips_blueprint_water_channel(self):
+        w = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        bp = CityBlueprint.from_config(SYSTEM_CONFIGURATION)
+        bp.water = [{"name": "Tiber", "type": "river", "points": [[5, 0], [5, 8]]}]
+        bp.reset_water_adjacency_cache()
+        road = {"name": "Decumanus", "type": "vicus", "points": [[0, 4], [10, 4]], "width": 1}
+        placed = rasterize_road(w, road, bp)
+        assert placed > 0
+        crossing = w.get_tile(5, 4)
+        assert crossing is None or crossing.terrain != "road"
+
+    def test_named_bridge_may_cross_water_channel(self):
+        w = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        bp = CityBlueprint.from_config(SYSTEM_CONFIGURATION)
+        bp.water = [{"name": "Tiber", "type": "river", "points": [[5, 0], [5, 8]]}]
+        bp.reset_water_adjacency_cache()
+        road = {"name": "Stone Bridge deck", "type": "vicus", "points": [[0, 4], [10, 4]], "width": 1}
+        placed = rasterize_road(w, road, bp)
+        assert placed > 0
+        assert w.get_tile(5, 4) is not None
+        assert w.get_tile(5, 4).terrain == "road"
+
+    def test_vicus_skips_existing_water_terrain_without_blueprint(self):
+        w = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        w.place_tile(3, 3, {"terrain": "water"})
+        road = {"name": "Coast road", "type": "vicus", "points": [[0, 3], [6, 3]], "width": 1}
+        rasterize_road(w, road, None)
+        assert w.get_tile(3, 3).terrain == "water"
+
+    def test_road_dict_allows_water_crossing_heuristic(self):
+        assert road_dict_allows_water_crossing({"name": "Fabricius Bridge", "type": "vicus"}) is True
+        assert road_dict_allows_water_crossing({"name": "Alley", "type": "bridge"}) is True
+        assert road_dict_allows_water_crossing({"name": "Alley", "type": "vicus"}) is False

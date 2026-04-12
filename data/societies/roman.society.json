@@ -26,6 +26,42 @@
       "roof_style": "domed",
       "foundation": "subterranean",
       "materials": ["marble", "concrete", "mosaic"]
+    },
+    "insula": {
+      "orders": ["tuscan"],
+      "roof_style": "flat_terrace",
+      "foundation": "concrete_slab",
+      "materials": ["brick", "concrete", "stucco"]
+    },
+    "domus": {
+      "orders": ["tuscan"],
+      "roof_style": "tiled_atrium",
+      "foundation": "opus_reticulatum",
+      "materials": ["stucco", "marble", "mosaic"]
+    },
+    "aqueduct": {
+      "orders": ["doric"],
+      "roof_style": "open_arcade",
+      "foundation": "ashlar_piers",
+      "materials": ["travertine", "concrete", "brick"]
+    },
+    "circus": {
+      "orders": ["doric"],
+      "roof_style": "open_arena",
+      "foundation": "terraced",
+      "materials": ["concrete", "marble", "brick"]
+    },
+    "forum": {
+      "orders": ["corinthian", "ionic"],
+      "roof_style": "colonnaded_open",
+      "foundation": "paved_plaza",
+      "materials": ["marble", "travertine", "brick"]
+    },
+    "amphitheater": {
+      "orders": ["doric", "ionic"],
+      "roof_style": "vaulted_passages",
+      "foundation": "elliptical_cavea",
+      "materials": ["travertine", "concrete", "marble"]
     }
   },
   "proportions": {

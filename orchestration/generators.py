@@ -11,6 +11,7 @@ from core.fingerprint import district_survey_key, ensure_district_ids
 from core.persistence import (
     load_districts_cache,
     load_surveys_cache,
+    save_blueprint,
     save_districts_cache,
     save_state,
     save_surveys_cache,
@@ -501,6 +502,11 @@ class Generators:
                 "max_gradient": self._host.system_configuration.terrain.maximum_gradient_value,
                 "gradient_iterations": self._host.system_configuration.terrain.gradient_iterations_count,
             })
+            await asyncio.to_thread(
+                save_blueprint,
+                bp.to_dict(),
+                system_configuration=self._host.system_configuration,
+            )
 
         return True
 

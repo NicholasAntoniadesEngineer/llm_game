@@ -15,7 +15,7 @@ from core.config import Config
 from core.errors import ConfigLoadError
 from core.terrain_analysis import TerrainAnalysis
 from orchestration.district_inference import infer_district_character_from_description
-from world.roads import compute_elevation, smooth_elevation_max_gradient
+from world.roads import compute_elevation, smooth_elevation_max_gradient, water_features_channel_tiles
 
 if TYPE_CHECKING:
     from world.state import WorldState
@@ -51,6 +51,7 @@ class CityBlueprint:
     # {road_name, terminus_building, points}
 
     _water_adjacency_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
+    _water_channel_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_config(cls, system_configuration: Config) -> CityBlueprint:
@@ -631,6 +632,18 @@ class CityBlueprint:
     def reset_water_adjacency_cache(self) -> None:
         """Call when ``water`` waypoints change so ``is_water_region`` recomputes."""
         self._water_adjacency_tile_cache = None
+        self._water_channel_tile_cache = None
+
+    def water_channel_tile_set(self, *, system_configuration: Config) -> set[tuple[int, int]]:
+        """Tiles occupied by rasterized water polylines (cached); used to keep roads out of rivers."""
+        if self._water_channel_tile_cache is not None:
+            return self._water_channel_tile_cache
+        default_width = system_configuration.terrain.blueprint_water_channel_default_width_tiles
+        self._water_channel_tile_cache = water_features_channel_tiles(
+            self.water,
+            default_channel_width_tiles=default_width,
+        )
+        return self._water_channel_tile_cache
 
     def _water_adjacency_tile_set(self) -> set[tuple[int, int]]:
         """Tiles within ``water_proximity_radius_tiles`` of any water polyline vertex (cached)."""

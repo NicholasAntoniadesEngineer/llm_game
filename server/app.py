@@ -205,8 +205,24 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
                     "year": _sc.get("focus_year"),
                     "description": _sc.get("description", ""),
                     "started_at_s": _sc.get("started_at_s"),
+                    "climate": _sc.get("climate"),
                 }
                 await websocket.send_json(attach_engine_ui_to_message(state, _scenario_payload))
+            try:
+                _terrain_fn = getattr(state, "terrain_data_for_replay", None)
+                if callable(_terrain_fn):
+                    _terrain_msg = _terrain_fn()
+                    if isinstance(_terrain_msg, dict) and _terrain_msg.get("type") == "terrain_data":
+                        logger.info(f"[ws#{conn_id}] send terrain_data replay (hills/water/roads for 3D)")
+                        await websocket.send_json(attach_engine_ui_to_message(state, _terrain_msg))
+                _status_fn = getattr(state, "build_status_for_replay", None)
+                if callable(_status_fn):
+                    _bs_msg = _status_fn()
+                    if isinstance(_bs_msg, dict) and _bs_msg.get("type") == "build_status":
+                        logger.info(f"[ws#{conn_id}] send build_status replay")
+                        await websocket.send_json(attach_engine_ui_to_message(state, _bs_msg))
+            except Exception:
+                logger.exception(f"[ws#{conn_id}] terrain_data / build_status replay failed")
             # Do not replay old "paused" messages: they re-open the error overlay on every refresh
             # even when the build has moved on. If the engine is actually stopped on pause, we send
             # the latest paused payload once below.

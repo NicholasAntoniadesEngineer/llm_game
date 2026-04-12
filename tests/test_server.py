@@ -36,6 +36,8 @@ class TestAppState:
         assert state.resume_callback is None
         assert state.pause_callback is None
         assert state.engine_is_running is None
+        assert state.terrain_data_for_replay is None
+        assert state.build_status_for_replay is None
 
     def test_asset_version_is_timestamp(self):
         state = AppState(

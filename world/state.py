@@ -209,6 +209,9 @@ class WorldState:
             "year": self.current_year,
             "tiles": tiles,
             "chunk_size": self.chunk_size_tiles,
+            "world_scale_meters_per_tile": float(
+                self.system_configuration.grid.world_scale_meters_per_tile
+            ),
         }
 
     def tiles_since(self, since_turn: int) -> list[dict]:

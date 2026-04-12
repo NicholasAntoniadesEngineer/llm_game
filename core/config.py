@@ -68,6 +68,7 @@ SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
     "terrain_stability_terrain_type_modifiers",
     "terrain_stability_soil_type_modifiers",
     "road_surface_colors_by_type",
+    "blueprint_water_channel_default_width_tiles",
     "blueprint_climate_determination_dictionary",
     "known_cartography_map_dictionary",
     "building_material_hex_colors_dictionary",
@@ -130,6 +131,7 @@ class TerrainConfig:
     terrain_stability_terrain_type_modifiers_dictionary: Dict[str, float]
     terrain_stability_soil_type_modifiers_dictionary: Dict[str, float]
     road_surface_colors_by_type_dictionary: Dict[str, str]
+    blueprint_water_channel_default_width_tiles: int
     building_material_hex_colors_dictionary: Dict[str, str]
 
 
@@ -416,6 +418,11 @@ class Config:
             road_colors_normalized: Dict[str, str] = {
                 str(k).strip().lower(): str(v).strip() for k, v in road_colors_raw.items()
             }
+            blueprint_water_channel_default_width_tiles = int(params["blueprint_water_channel_default_width_tiles"])
+            if blueprint_water_channel_default_width_tiles < 1 or blueprint_water_channel_default_width_tiles > 32:
+                raise ConfigLoadError(
+                    "blueprint_water_channel_default_width_tiles must be between 1 and 32 (from system_config.csv)"
+                )
             terrain_mods = params["terrain_stability_terrain_type_modifiers"]
             soil_mods = params["terrain_stability_soil_type_modifiers"]
             if not isinstance(terrain_mods, dict) or not terrain_mods:
@@ -450,6 +457,7 @@ class Config:
                 terrain_stability_terrain_type_modifiers_dictionary=terrain_mods_f,
                 terrain_stability_soil_type_modifiers_dictionary=soil_mods_f,
                 road_surface_colors_by_type_dictionary=road_colors_normalized,
+                blueprint_water_channel_default_width_tiles=blueprint_water_channel_default_width_tiles,
                 building_material_hex_colors_dictionary=material_hex,
             )
             performance_config_instance = PerformanceConfig(
