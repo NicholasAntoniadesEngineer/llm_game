@@ -1,1 +1,1 @@
-# Tests for Roma Aeterna orchestration
+"""Test package — enables ``from tests.conftest import …`` in test modules."""

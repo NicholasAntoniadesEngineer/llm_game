@@ -4,9 +4,12 @@ Provides pre-designed building templates with complex architectural features,
 procedural generation rules, and cultural/historical accuracy.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
 import random
 import math
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 
 class AdvancedBuildingTemplates:
@@ -15,7 +18,7 @@ class AdvancedBuildingTemplates:
     Enhanced with parametric customization, cultural adaptation, and procedural generation.
     """
 
-    def __init__(self):
+    def __init__(self, *, system_configuration: "Config"):
         self.templates = {
             "roman_villa": self._roman_villa_template(),
             "medieval_castle": self._medieval_castle_template(),
@@ -27,10 +30,12 @@ class AdvancedBuildingTemplates:
             "victorian_mansion": self._victorian_mansion_template(),
         }
 
-        # Cultural adaptation rules - loaded from society JSON files
-        from orchestration.cultural_adaptation import cultural_system
+        from orchestration.cultural_adaptation import cultural_adaptation_system_for
+
         self.cultural_adaptations = {}
-        for culture_name, culture_data in cultural_system.cultures.items():
+        for culture_name, culture_data in cultural_adaptation_system_for(
+            system_configuration
+        ).cultures.items():
             self.cultural_adaptations[culture_name] = culture_data.get("template_adaptations", {})
 
         # Parametric modifiers for customization
@@ -548,7 +553,13 @@ class AdvancedBuildingTemplates:
 
 
 # Procedural generation helpers
-def generate_procedural_building(base_template: str, complexity: str = "medium", **variations) -> Dict[str, Any]:
+def generate_procedural_building(
+    base_template: str,
+    complexity: str = "medium",
+    *,
+    system_configuration: "Config",
+    **variations,
+) -> Dict[str, Any]:
     """Generate a procedural building based on a template with variations.
 
     Args:
@@ -559,7 +570,7 @@ def generate_procedural_building(base_template: str, complexity: str = "medium",
     Returns:
         Complete building specification
     """
-    templates = AdvancedBuildingTemplates()
+    templates = AdvancedBuildingTemplates(system_configuration=system_configuration)
     building = templates.get_template(base_template, **variations)
 
     # Apply complexity-based modifications
@@ -627,6 +638,3 @@ def _add_architectural_variations(building: Dict[str, Any]) -> None:
             "parts": variation_parts
         })
 
-
-# Template registry for easy access
-TEMPLATE_REGISTRY = AdvancedBuildingTemplates()

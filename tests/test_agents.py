@@ -10,7 +10,9 @@ import pytest
 # ---------------------------------------------------------------------------
 
 from agents import llm_routing as llm_agents
-from core import config
+from agents.ui_notifier import NoOpUiNotifier
+
+from tests.conftest import SYSTEM_CONFIGURATION
 
 
 class TestLlmRouting:
@@ -50,7 +52,8 @@ class TestLlmRouting:
         })
         llm_agents.set_runtime_overrides(None)
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
-        assert spec["model"] == config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]["model"]
+        expected = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA]["model"]
+        assert spec["model"] == expected
 
     def test_runtime_overrides_ignores_unknown_keys(self):
         llm_agents.set_runtime_overrides({
@@ -78,7 +81,10 @@ class TestLlmRouting:
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
         assert spec["model"] == "opus"
         assert spec["openai_base_url"] == "http://localhost:1234"
-        assert spec["provider"] == config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]["provider"]
+        expected_provider = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA][
+            "provider"
+        ]
+        assert spec["provider"] == expected_provider
 
     def test_blank_openai_api_key_not_applied(self):
         llm_agents.set_runtime_overrides({
@@ -104,9 +110,10 @@ class TestLlmRouting:
             assert key in llm_agents.AGENT_LLM_LABELS
 
     def test_xai_model_suggestions_in_config(self):
-        assert isinstance(config.XAI_MODEL_SUGGESTIONS, tuple)
-        assert len(config.XAI_MODEL_SUGGESTIONS) > 0
-        assert all(isinstance(x, str) and x.strip() for x in config.XAI_MODEL_SUGGESTIONS)
+        suggestions = SYSTEM_CONFIGURATION.load_llm_defaults()["xai"]["model_suggestions"]
+        assert isinstance(suggestions, list)
+        assert len(suggestions) > 0
+        assert all(isinstance(x, str) and x.strip() for x in suggestions)
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +127,11 @@ from agents.providers.openai_compatible import OpenAICompatibleProvider
 
 class TestProviderFactory:
     def test_build_claude_cli(self):
-        p = build_provider_from_spec({"provider": "claude_cli", "model": "haiku"})
+        p = build_provider_from_spec({"provider": "claude_cli", "model": "haiku"}, SYSTEM_CONFIGURATION)
         assert isinstance(p, ClaudeCliProvider)
 
     def test_build_claude_alias(self):
-        p = build_provider_from_spec({"provider": "claude", "model": "haiku"})
+        p = build_provider_from_spec({"provider": "claude", "model": "haiku"}, SYSTEM_CONFIGURATION)
         assert isinstance(p, ClaudeCliProvider)
 
     def test_build_openai_compatible(self):
@@ -133,41 +140,47 @@ class TestProviderFactory:
             "model": "gpt-4",
             "openai_base_url": "http://localhost:1234/v1",
             "openai_api_key": "test-key",
-        })
+        }, SYSTEM_CONFIGURATION)
         assert isinstance(p, OpenAICompatibleProvider)
 
     def test_build_openai_alias(self):
-        p = build_provider_from_spec({"provider": "openai", "model": "gpt-4"})
+        p = build_provider_from_spec({"provider": "openai", "model": "gpt-4"}, SYSTEM_CONFIGURATION)
         assert isinstance(p, OpenAICompatibleProvider)
 
     def test_build_chatgpt_alias(self):
-        p = build_provider_from_spec({"provider": "chatgpt", "model": "gpt-4"})
+        p = build_provider_from_spec({"provider": "chatgpt", "model": "gpt-4"}, SYSTEM_CONFIGURATION)
         assert isinstance(p, OpenAICompatibleProvider)
 
     def test_unknown_provider_raises(self):
         with pytest.raises(ValueError, match="Unknown provider"):
-            build_provider_from_spec({"provider": "deepseek_custom", "model": "v3"})
+            build_provider_from_spec({"provider": "deepseek_custom", "model": "v3"}, SYSTEM_CONFIGURATION)
 
     def test_default_provider_is_xai(self):
-        p = build_provider_from_spec({"model": "grok-4.20-reasoning"})
+        p = build_provider_from_spec({"model": "grok-4.20-reasoning"}, SYSTEM_CONFIGURATION)
         assert isinstance(p, OpenAICompatibleProvider)
 
     def test_blank_claude_binary_defaults(self):
-        p = build_provider_from_spec({"provider": "claude_cli", "model": "h", "claude_binary": "  "})
+        p = build_provider_from_spec({"provider": "claude_cli", "model": "h", "claude_binary": "  "}, SYSTEM_CONFIGURATION)
         assert isinstance(p, ClaudeCliProvider)
 
     def test_custom_claude_binary(self):
-        p = build_provider_from_spec({"provider": "claude_cli", "model": "h", "claude_binary": "/usr/bin/my-claude"})
+        p = build_provider_from_spec({"provider": "claude_cli", "model": "h", "claude_binary": "/usr/bin/my-claude"}, SYSTEM_CONFIGURATION)
         assert p.binary == "/usr/bin/my-claude"
 
     def test_blank_openai_base_url_passes_none(self):
-        p = build_provider_from_spec({"provider": "openai_compatible", "model": "m", "openai_base_url": "  "})
+        p = build_provider_from_spec({"provider": "openai_compatible", "model": "m", "openai_base_url": "  "}, SYSTEM_CONFIGURATION)
         assert isinstance(p, OpenAICompatibleProvider)
 
     def test_protocol_compliance(self):
         """Verify providers satisfy the LlmProvider protocol."""
-        assert isinstance(ClaudeCliProvider(), LlmProvider)
-        assert isinstance(OpenAICompatibleProvider(), LlmProvider)
+        assert isinstance(
+            ClaudeCliProvider(binary="claude", system_configuration=SYSTEM_CONFIGURATION),
+            LlmProvider,
+        )
+        assert isinstance(
+            OpenAICompatibleProvider(system_configuration=SYSTEM_CONFIGURATION),
+            LlmProvider,
+        )
 
     @pytest.mark.asyncio
     async def test_xai_multi_agent_model_rejected_before_http(self):
@@ -178,6 +191,7 @@ class TestProviderFactory:
             base_url="https://api.x.ai/v1",
             api_key="test-key",
             default_model=None,
+            system_configuration=SYSTEM_CONFIGURATION,
         )
         with pytest.raises(AgentGenerationError, match="multi-agent"):
             await p.complete(
@@ -250,6 +264,8 @@ class TestBaseAgentParseJson:
             display_name="Test Agent",
             system_prompt="You are a test agent.",
             llm_agent_key=llm_agents.KEY_URBANISTA,
+            system_configuration=SYSTEM_CONFIGURATION,
+            ui_notifier=NoOpUiNotifier(),
         )
         return agent
 
@@ -388,50 +404,54 @@ class TestGoldenSpecs:
 
 
 # ---------------------------------------------------------------------------
-# ClaudeCliProvider._parse_cli_json_payload (static method)
+# ClaudeCliProvider._parse_cli_json_payload
 # ---------------------------------------------------------------------------
 
 
 class TestClaudeCliParsePayload:
-    def test_normal_result(self):
+    @pytest.fixture
+    def cli(self):
+        return ClaudeCliProvider(binary="claude", system_configuration=SYSTEM_CONFIGURATION)
+
+    def test_normal_result(self, cli):
         payload = json.dumps({
             "result": '{"tiles": []}',
             "usage": {"input_tokens": 100, "output_tokens": 50},
         })
-        text, usage = ClaudeCliProvider._parse_cli_json_payload(payload)
+        text, usage = cli._parse_cli_json_payload(payload)
         assert text == '{"tiles": []}'
         assert usage is not None
         assert usage["input_tokens"] == 100
 
-    def test_error_result_raises(self):
+    def test_error_result_raises(self, cli):
         payload = json.dumps({
             "is_error": True,
             "subtype": "something",
             "result": "",
         })
         with pytest.raises(RuntimeError):
-            ClaudeCliProvider._parse_cli_json_payload(payload)
+            cli._parse_cli_json_payload(payload)
 
-    def test_max_turns_with_result_succeeds(self):
+    def test_max_turns_with_result_succeeds(self, cli):
         payload = json.dumps({
             "is_error": True,
             "subtype": "error_max_turns",
             "result": '{"tiles": []}',
         })
-        text, usage = ClaudeCliProvider._parse_cli_json_payload(payload)
+        text, usage = cli._parse_cli_json_payload(payload)
         assert text == '{"tiles": []}'
 
-    def test_connection_refused_raises_agent_error(self):
+    def test_connection_refused_raises_agent_error(self, cli):
         payload = json.dumps({
             "is_error": True,
             "subtype": "connection_error",
             "result": "ConnectionRefused: unable to connect to API",
         })
         with pytest.raises(AgentGenerationError) as exc_info:
-            ClaudeCliProvider._parse_cli_json_payload(payload)
+            cli._parse_cli_json_payload(payload)
         assert exc_info.value.pause_reason == "network"
 
-    def test_non_dict_returns_raw(self):
-        text, usage = ClaudeCliProvider._parse_cli_json_payload('"just a string"')
+    def test_non_dict_returns_raw(self, cli):
+        text, usage = cli._parse_cli_json_payload('"just a string"')
         assert text == '"just a string"'
         assert usage is None

@@ -6,9 +6,12 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 import pytest
+
+from tests.conftest import SYSTEM_CONFIGURATION
 
 
 # ---------------------------------------------------------------------------
@@ -50,93 +53,100 @@ class TestErrorHierarchy:
 
 
 class TestClassifyAgentFailure:
+    @staticmethod
+    def _classify(stderr_text: str, exc: Optional[BaseException]) -> tuple[str, str]:
+        return classify_agent_failure(
+            stderr_text,
+            exc,
+            agent_failure_detail_max_chars=SYSTEM_CONFIGURATION.agent_failure_detail_max_chars,
+        )
+
     def test_file_not_found(self):
-        reason, detail = classify_agent_failure("", FileNotFoundError("claude"))
+        reason, detail = self._classify("", FileNotFoundError("claude"))
         assert reason == "cli_missing"
 
     def test_timeout_error(self):
-        reason, _ = classify_agent_failure("", TimeoutError("timed out"))
+        reason, _ = self._classify("", TimeoutError("timed out"))
         assert reason == "network"
 
     def test_connection_refused(self):
-        reason, _ = classify_agent_failure("", ConnectionRefusedError())
+        reason, _ = self._classify("", ConnectionRefusedError())
         assert reason == "network"
 
     def test_broken_pipe(self):
-        reason, _ = classify_agent_failure("", BrokenPipeError())
+        reason, _ = self._classify("", BrokenPipeError())
         assert reason == "network"
 
     def test_connection_reset(self):
-        reason, _ = classify_agent_failure("", ConnectionResetError())
+        reason, _ = self._classify("", ConnectionResetError())
         assert reason == "network"
 
     def test_rate_limit_429(self):
-        reason, _ = classify_agent_failure("HTTP 429 Too Many Requests", None)
+        reason, _ = self._classify("HTTP 429 Too Many Requests", None)
         assert reason == "rate_limit"
 
     def test_rate_limit_text(self):
-        reason, _ = classify_agent_failure("rate limit exceeded", None)
+        reason, _ = self._classify("rate limit exceeded", None)
         assert reason == "rate_limit"
 
     def test_503_service_unavailable(self):
-        reason, _ = classify_agent_failure("503 Service Unavailable", None)
+        reason, _ = self._classify("503 Service Unavailable", None)
         assert reason == "api_error"
 
     def test_502_bad_gateway(self):
-        reason, _ = classify_agent_failure("502 Bad Gateway", None)
+        reason, _ = self._classify("502 Bad Gateway", None)
         assert reason == "api_error"
 
     def test_504_gateway_timeout(self):
-        reason, _ = classify_agent_failure("504 Gateway Timeout", None)
+        reason, _ = self._classify("504 Gateway Timeout", None)
         assert reason == "api_error"
 
     def test_overloaded(self):
-        reason, _ = classify_agent_failure("server overloaded, try later", None)
+        reason, _ = self._classify("server overloaded, try later", None)
         assert reason == "api_error"
 
     def test_authentication_401(self):
-        reason, _ = classify_agent_failure("401 Unauthorized", None)
+        reason, _ = self._classify("401 Unauthorized", None)
         assert reason == "api_error"
 
     def test_api_key_error(self):
-        reason, _ = classify_agent_failure("invalid api key", None)
+        reason, _ = self._classify("invalid api key", None)
         assert reason == "api_error"
 
     def test_dns_failure(self):
-        reason, _ = classify_agent_failure("getaddrinfo failed", None)
+        reason, _ = self._classify("getaddrinfo failed", None)
         assert reason == "network"
 
     def test_connection_refused_text(self):
-        reason, _ = classify_agent_failure("connection refused", None)
+        reason, _ = self._classify("connection refused", None)
         assert reason == "network"
 
     def test_econnreset(self):
-        reason, _ = classify_agent_failure("ECONNRESET", None)
+        reason, _ = self._classify("ECONNRESET", None)
         assert reason == "network"
 
     def test_empty_stderr_no_exc(self):
-        reason, _ = classify_agent_failure("", None)
+        reason, _ = self._classify("", None)
         assert reason == "api_error"
 
     def test_unknown_stderr(self):
-        reason, detail = classify_agent_failure("something weird happened", None)
+        reason, detail = self._classify("something weird happened", None)
         assert reason == "unknown"
         assert "something weird happened" in detail
 
     def test_detail_truncated_at_400(self):
         long_msg = "x" * 600
-        _, detail = classify_agent_failure(long_msg, None)
-        assert len(detail) <= 400
+        _, detail = self._classify(long_msg, None)
+        assert len(detail) <= SYSTEM_CONFIGURATION.agent_failure_detail_max_chars
 
     def test_oserror_network_errno(self):
         exc = OSError(60, "Operation timed out")
-        reason, _ = classify_agent_failure("", exc)
+        reason, _ = self._classify("", exc)
         assert reason == "network"
 
     def test_oserror_non_network_errno(self):
         exc = OSError(2, "No such file")
-        # OSError with errno 2 is a FileNotFoundError subclass, classified as cli_missing
-        reason, _ = classify_agent_failure("", exc)
+        reason, _ = self._classify("", exc)
         assert reason == "cli_missing"
 
 
@@ -144,65 +154,65 @@ class TestClassifyAgentFailure:
 # core.config
 # ---------------------------------------------------------------------------
 
-from core import config
-
-
 class TestConfig:
     def test_grid_defaults_positive(self):
-        assert config.GRID_WIDTH > 0
-        assert config.GRID_HEIGHT > 0
+        cfg = SYSTEM_CONFIGURATION
+        assert cfg.grid.world_grid_width > 0
+        assert cfg.grid.world_grid_height > 0
 
     def test_max_districts_positive(self):
-        assert config.MAX_DISTRICTS > 0
+        assert SYSTEM_CONFIGURATION.grid.maximum_districts_count > 0
 
     def test_step_delay_non_negative(self):
-        assert config.STEP_DELAY >= 0
+        assert SYSTEM_CONFIGURATION.timing.step_delay_seconds >= 0
 
     def test_chunk_size_positive(self):
-        assert config.CHUNK_SIZE > 0
+        assert SYSTEM_CONFIGURATION.grid.chunk_size_tiles > 0
 
     def test_agents_dict_has_expected_keys(self):
-        assert "cartographus" in config.AGENTS
-        assert "urbanista" in config.AGENTS
-        for key, agent in config.AGENTS.items():
+        agents = SYSTEM_CONFIGURATION.ui.ui_agents_dictionary
+        assert "cartographus" in agents
+        assert "urbanista" in agents
+        for key, agent in agents.items():
             assert "name" in agent
             assert "purpose" in agent
             assert "color" in agent
 
     def test_cities_loaded(self):
-        assert isinstance(config.CITIES, list)
-        assert len(config.CITIES) > 0
-        for city in config.CITIES:
+        cities = SYSTEM_CONFIGURATION.get_cities_list()
+        assert isinstance(cities, list)
+        assert len(cities) > 0
+        for city in cities:
             assert "name" in city
             assert "year_min" in city
             assert "year_max" in city
 
     def test_format_year_bc(self):
-        assert config.format_year(-44) == "44 BC"
+        assert SYSTEM_CONFIGURATION.format_year_display(-44) == "44 BC"
 
     def test_format_year_ad(self):
-        assert config.format_year(100) == "100"
+        assert SYSTEM_CONFIGURATION.format_year_display(100) == "100"
 
     def test_format_year_zero(self):
         # Year 0 is technically AD
-        assert config.format_year(0) == "0"
+        assert SYSTEM_CONFIGURATION.format_year_display(0) == "0"
 
     def test_get_city_found(self):
-        city = config.get_city("Rome")
+        city = SYSTEM_CONFIGURATION.get_city_record_by_name("Rome")
         assert city is not None
         assert city["name"] == "Rome"
 
     def test_get_city_case_insensitive(self):
-        city = config.get_city("rome")
+        city = SYSTEM_CONFIGURATION.get_city_record_by_name("rome")
         assert city is not None
         assert city["name"] == "Rome"
 
     def test_get_city_not_found(self):
-        city = config.get_city("Atlantis")
+        city = SYSTEM_CONFIGURATION.get_city_record_by_name("Atlantis")
         assert city is None
 
     def test_create_scenario(self):
-        scenario = config.create_scenario("Rome", -44)
+        scenario = SYSTEM_CONFIGURATION.create_scenario("Rome", -44)
         assert scenario["location"] == "Rome"
         assert scenario["focus_year"] == -44
         assert "period" in scenario
@@ -212,24 +222,25 @@ class TestConfig:
         assert "started_at_s" in scenario
 
     def test_create_scenario_clamps_year(self):
-        city = config.get_city("Rome")
+        city = SYSTEM_CONFIGURATION.get_city_record_by_name("Rome")
+        assert city is not None
         # Year way below minimum
-        scenario = config.create_scenario("Rome", -10000)
+        scenario = SYSTEM_CONFIGURATION.create_scenario("Rome", -10000)
         assert scenario["focus_year"] == city["year_min"]
 
     def test_create_scenario_clamps_year_high(self):
-        city = config.get_city("Rome")
-        scenario = config.create_scenario("Rome", 99999)
+        city = SYSTEM_CONFIGURATION.get_city_record_by_name("Rome")
+        assert city is not None
+        scenario = SYSTEM_CONFIGURATION.create_scenario("Rome", 99999)
         assert scenario["focus_year"] == city["year_max"]
 
     def test_create_scenario_unknown_city_defaults_to_first(self):
-        scenario = config.create_scenario("Atlantis", 100)
-        assert scenario["location"] == config.CITIES[0]["name"]
+        scenario = SYSTEM_CONFIGURATION.create_scenario("Atlantis", 100)
+        cities = SYSTEM_CONFIGURATION.get_cities_list()
+        assert scenario["location"] == cities[0]["name"]
 
-    def test_env_var_override_grid_width(self):
-        # Verify the pattern works (grid width is read from env at import time,
-        # so we can at least test that the current value is an int)
-        assert isinstance(config.GRID_WIDTH, int)
+    def test_world_grid_width_is_int(self):
+        assert isinstance(SYSTEM_CONFIGURATION.grid.world_grid_width, int)
 
 
 # ---------------------------------------------------------------------------
@@ -442,21 +453,29 @@ from core import run_log
 class TestRunLog:
     def setup_method(self):
         """Reset run log state before each test."""
-        run_log._LOG_BUFFER.clear()
         run_log._handler = None
         run_log._RUN_START = None
+        run_log._LOG_BUFFER = None
+        cfg = SYSTEM_CONFIGURATION
+        run_log.init_run_log(
+            run_log_buffer_max_lines=cfg.run_log_buffer_max_lines,
+            log_level_string=cfg.ui.log_level_string,
+        )
 
     def test_init_run_log(self):
-        run_log.init_run_log()
         assert run_log._handler is not None
         assert run_log._RUN_START is not None
         # Buffer should have the header
+        assert run_log._LOG_BUFFER is not None
         assert len(run_log._LOG_BUFFER) > 0
 
     def test_init_run_log_idempotent(self):
-        run_log.init_run_log()
         handler1 = run_log._handler
-        run_log.init_run_log()
+        cfg = SYSTEM_CONFIGURATION
+        run_log.init_run_log(
+            run_log_buffer_max_lines=cfg.run_log_buffer_max_lines,
+            log_level_string=cfg.ui.log_level_string,
+        )
         assert run_log._handler is handler1  # Should not create a second handler
 
     def test_log_event(self):
@@ -483,9 +502,9 @@ class TestRunLog:
         assert "cleared" in run_log._LOG_BUFFER[0].lower()
 
     def test_max_log_lines(self):
-        assert run_log.MAX_LOG_LINES == 10_000
-        # Verify the deque maxlen
-        assert run_log._LOG_BUFFER.maxlen == run_log.MAX_LOG_LINES
+        cfg = SYSTEM_CONFIGURATION
+        assert run_log._LOG_BUFFER is not None
+        assert run_log._LOG_BUFFER.maxlen == cfg.run_log_buffer_max_lines
 
 
 # ---------------------------------------------------------------------------
@@ -496,23 +515,25 @@ from core import persistence
 from core.fingerprint import compute_run_fingerprint
 from world.state import WorldState
 
+from tests.conftest import SYSTEM_CONFIGURATION
+
 
 class TestPersistenceChunkKey:
     def test_chunk_key_origin(self):
-        assert persistence._chunk_key(0, 0, config.CHUNK_SIZE) == (0, 0)
+        assert persistence._chunk_key(0, 0, SYSTEM_CONFIGURATION.grid.chunk_size_tiles) == (0, 0)
 
     def test_chunk_key_within_chunk(self):
-        cs = config.CHUNK_SIZE
+        cs = SYSTEM_CONFIGURATION.grid.chunk_size_tiles
         assert persistence._chunk_key(cs - 1, cs - 1, cs) == (0, 0)
 
     def test_chunk_key_next_chunk(self):
-        cs = config.CHUNK_SIZE
+        cs = SYSTEM_CONFIGURATION.grid.chunk_size_tiles
         assert persistence._chunk_key(cs, 0, cs) == (1, 0)
         assert persistence._chunk_key(0, cs, cs) == (0, 1)
 
     def test_chunk_key_negative(self):
         # Python integer division with negatives
-        assert persistence._chunk_key(-1, -1, config.CHUNK_SIZE) == (-1, -1)
+        assert persistence._chunk_key(-1, -1, SYSTEM_CONFIGURATION.grid.chunk_size_tiles) == (-1, -1)
 
 
 class TestPersistenceChunkFilename:
@@ -544,7 +565,10 @@ class TestPersistenceSaveLoad:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_save_and_load_round_trip(self):
-        world = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
+        world = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
         world.current_period = "Republican Rome"
         world.current_year = -44
         world.turn = 5
@@ -569,11 +593,15 @@ class TestPersistenceSaveLoad:
             districts=[{"name": "Forum"}],
             generation=3,
             scenario=scenario,
+            system_configuration=SYSTEM_CONFIGURATION,
         )
 
         # Load into a fresh world
-        world2 = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
-        result = persistence.load_state(world2)
+        world2 = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        result = persistence.load_state(world2, system_configuration=SYSTEM_CONFIGURATION)
         assert result is not None
         loaded_chat, loaded_idx, loaded_districts, loaded_gen, _loaded_scen = result
         assert loaded_idx == 2
@@ -589,8 +617,11 @@ class TestPersistenceSaveLoad:
         assert t.terrain == "building"
 
     def test_load_state_no_index_returns_none(self):
-        world = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
-        result = persistence.load_state(world)
+        world = WorldState(
+            chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        result = persistence.load_state(world, system_configuration=SYSTEM_CONFIGURATION)
         assert result is None
 
     def test_clear_saves(self):
@@ -606,7 +637,7 @@ class TestPersistenceSaveLoad:
     def test_districts_cache_round_trip(self):
         districts = [{"name": "Forum", "region": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}}]
         scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
-        fp = compute_run_fingerprint(scen, config.CHUNK_SIZE, config.GRID_WIDTH, config.GRID_HEIGHT)
+        fp = compute_run_fingerprint(scen, SYSTEM_CONFIGURATION.grid.chunk_size_tiles, SYSTEM_CONFIGURATION.grid.world_grid_width, SYSTEM_CONFIGURATION.grid.world_grid_height)
         persistence.save_districts_cache(districts, "A description", run_fingerprint=fp)
         result = persistence.load_districts_cache(expected_run_fingerprint=fp)
         assert result is not None
@@ -629,7 +660,7 @@ class TestPersistenceSaveLoad:
     def test_surveys_cache_round_trip(self):
         surveys = {"Forum": [{"name": "Temple", "tiles": [{"x": 0, "y": 0}]}]}
         scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
-        fp = compute_run_fingerprint(scen, config.CHUNK_SIZE, config.GRID_WIDTH, config.GRID_HEIGHT)
+        fp = compute_run_fingerprint(scen, SYSTEM_CONFIGURATION.grid.chunk_size_tiles, SYSTEM_CONFIGURATION.grid.world_grid_width, SYSTEM_CONFIGURATION.grid.world_grid_height)
         persistence.save_surveys_cache(surveys, run_fingerprint=fp)
         result = persistence.load_surveys_cache(expected_run_fingerprint=fp)
         assert "Forum" in result

@@ -1,20 +1,29 @@
 """AppState — all shared mutable state for the server."""
 
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 from world.state import WorldState
 from orchestration.bus import MessageBus
 from core.run_session import RunSession
-from core.config import CHUNK_SIZE
 
 # Module-level bound broadcast function — set by main.py after AppState + functools.partial are wired.
 # Used by agents/base.py (late import) to push token_usage without needing the AppState instance.
+# (To be refactored to avoid global per rules in later todo.)
 broadcast_fn = None
 
 
 class AppState:
-    def __init__(self):
-        self.world = WorldState(chunk_size_tiles=CHUNK_SIZE)
+    def __init__(self, system_configuration: "Config"):
+        """Accepts the injected Config instance. No globals. Descriptive param name."""
+        self.system_configuration = system_configuration
+        self.world = WorldState(
+            chunk_size_tiles=system_configuration.grid.chunk_size_tiles,
+            system_configuration=system_configuration,
+        )
         self.run_session = RunSession()
         self.bus = MessageBus()
         self.ws_connections: list = []

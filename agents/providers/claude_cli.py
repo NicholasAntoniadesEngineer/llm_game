@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import os
+from typing import TYPE_CHECKING
 
-from core import config
+if TYPE_CHECKING:
+    from core.config import Config
 
 logger = logging.getLogger("eternal.agents.provider")
 
@@ -15,8 +17,9 @@ logger = logging.getLogger("eternal.agents.provider")
 class ClaudeCliProvider:
     """Subprocess: claude --print --system-prompt ... (Anthropic Claude Code CLI)."""
 
-    def __init__(self, binary: str | None = None):
-        self.binary = binary or getattr(config, "CLAUDE_CLI_BINARY", None) or "claude"
+    def __init__(self, *, binary: str | None, system_configuration: "Config"):
+        self._system_configuration = system_configuration
+        self.binary = binary or system_configuration.llm.claude_cli_binary_name
         self.last_usage: dict | None = None
 
     def _get_cli_flags(self) -> list[str]:
@@ -60,8 +63,7 @@ class ClaudeCliProvider:
 
         return flags
 
-    @staticmethod
-    def _parse_cli_json_payload(stdout_text: str) -> tuple[str, dict | None]:
+    def _parse_cli_json_payload(self, stdout_text: str) -> tuple[str, dict | None]:
         """
         Claude Code `--output-format json` returns a JSON object with:
         - result: text (often contains fenced JSON)
@@ -79,19 +81,22 @@ class ClaudeCliProvider:
             # Fast-fail on connection errors -- don't make the caller wait for slow classification
             if "connectionrefused" in result_lower or "unable to connect" in result_lower:
                 from core.errors import AgentGenerationError
+
+                preview_n = self._system_configuration.llm.claude_cli_connection_error_preview_chars
                 raise AgentGenerationError(
                     "network",
-                    f"Claude CLI cannot reach the API: {result_text[:200]}. "
+                    f"Claude CLI cannot reach the API: {result_text[:preview_n]}. "
                     "Check internet connection, `claude login` status, and API quota.",
                 )
 
             # error_max_turns: the model hit the turn cap but often still produced
             # valid text in `result`. Use it if non-empty instead of raising.
             if subtype == "error_max_turns" and result_text:
+                preview_n = self._system_configuration.llm.claude_cli_result_preview_char_limit
                 logger.warning(
                     "Claude CLI: error_max_turns but result is non-empty (%d chars) -- using it. Preview: %s",
                     len(result_text),
-                    result_text[:300],
+                    result_text[:preview_n],
                 )
                 return result_text, usage
             logger.error(
@@ -142,12 +147,16 @@ class ClaudeCliProvider:
             "[%s] Claude CLI pid=%s | flags=%s | model=%s | waiting for response...",
             role, proc.pid, " ".join(cli_flags), model,
         )
-        # Per-process timeout -- scales with prompt size. Large buildings (192 tiles)
-        # generate 12K+ char prompts and can take 10-15 min on Sonnet.
-        # Base: 10 min for haiku, 12 min for sonnet/opus. +1 min per 5K chars of input.
-        _base_timeout = 600 if "haiku" in str(model).lower() else 720
+        llm_cfg = self._system_configuration.llm
+        _base_timeout = (
+            llm_cfg.claude_cli_base_timeout_haiku_seconds
+            if "haiku" in str(model).lower()
+            else llm_cfg.claude_cli_base_timeout_other_seconds
+        )
         _input_chars = len(system_prompt) + len(user_text)
-        _cli_timeout_s = _base_timeout + max(0, (_input_chars - 10000)) // 5000 * 60
+        _over = max(0, _input_chars - llm_cfg.claude_cli_scaled_input_chars_threshold)
+        _blocks = _over // llm_cfg.claude_cli_scaled_chars_per_extra_minute_block
+        _cli_timeout_s = _base_timeout + _blocks * llm_cfg.claude_cli_scaled_extra_seconds_per_block
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=user_text.encode()),
@@ -227,7 +236,11 @@ class ClaudeCliProvider:
         if proc.returncode != 0:
             from core.errors import AgentGenerationError, classify_agent_failure
 
-            pause_reason, pause_detail = classify_agent_failure(stderr_text, None)
+            pause_reason, pause_detail = classify_agent_failure(
+                stderr_text,
+                None,
+                agent_failure_detail_max_chars=self._system_configuration.agent_failure_detail_max_chars,
+            )
             detail = pause_detail
             if out_text:
                 # Often the CLI writes the actual error message to stdout in JSON mode.

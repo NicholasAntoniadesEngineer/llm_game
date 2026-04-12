@@ -3,8 +3,6 @@
 import json
 import logging
 
-from core.config import CHAT_HISTORY_MAX_MESSAGES
-
 if __name__ != "__main__":
     from server.state import AppState
 
@@ -18,6 +16,10 @@ def _engine_ui_fields(state: "AppState") -> dict:
         try:
             engine_running = bool(state.engine_is_running())
         except Exception:
+            logger.warning(
+                "engine_is_running callback failed; treating engine as not running",
+                exc_info=True,
+            )
             engine_running = False
     return {
         "engine_running": engine_running,
@@ -70,8 +72,9 @@ async def broadcast(state: "AppState", message: dict):
         "paused",
     ):
         state.chat_history.append(message)
-        if len(state.chat_history) > CHAT_HISTORY_MAX_MESSAGES:
-            del state.chat_history[: len(state.chat_history) - CHAT_HISTORY_MAX_MESSAGES]
+        max_chat_history = state.system_configuration.chat_history_max_messages
+        if len(state.chat_history) > max_chat_history:
+            del state.chat_history[: len(state.chat_history) - max_chat_history]
         schedule_fn = getattr(state, "schedule_debounced_persist_after_chat", None)
         if callable(schedule_fn):
             schedule_fn()

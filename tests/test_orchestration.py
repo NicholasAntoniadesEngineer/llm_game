@@ -11,7 +11,8 @@ from agents import llm_routing as llm_agents
 from agents.providers import build_provider_from_spec
 from agents.providers.claude_cli import ClaudeCliProvider
 from agents.providers.openai_compatible import OpenAICompatibleProvider
-from core import config
+
+from tests.conftest import SYSTEM_CONFIGURATION
 from orchestration import reference_db
 from orchestration.placement import (
     check_functional_placement,
@@ -39,6 +40,11 @@ from orchestration.schema import (
     _HEX_COLOR,
 )
 from orchestration.spatial import enforce_spacing, occupancy_summary_for_survey
+from orchestration.world_commit import (
+    apply_tile_placements,
+    normalize_tile_dict_for_world,
+)
+from world.state import WorldState
 
 
 class ReferenceDbTests(unittest.TestCase):
@@ -238,11 +244,11 @@ class LlmAgentsConfigTests(unittest.TestCase):
             self.assertIn("model", spec)
 
     def test_default_specs_match_llm_defaults_file(self):
-        base = config.LLM_AGENT_DEFAULTS[llm_agents.KEY_URBANISTA]
+        base = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA]
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
         self.assertEqual(spec.get("provider"), base["provider"])
         self.assertEqual(spec.get("model"), base["model"])
-        p = build_provider_from_spec(spec)
+        p = build_provider_from_spec(spec, SYSTEM_CONFIGURATION)
         if base["provider"] in ("xai", "grok"):
             self.assertIsInstance(p, OpenAICompatibleProvider)
         else:
@@ -302,11 +308,11 @@ class TestSchemaConstants:
 
 class TestEnforceSpacing:
     def test_empty_plan(self):
-        assert enforce_spacing([]) == []
+        assert enforce_spacing([], system_configuration=SYSTEM_CONFIGURATION) == []
 
     def test_single_building_unchanged(self):
         mp = [{"name": "A", "tiles": [{"x": 5, "y": 5}]}]
-        result = enforce_spacing(mp)
+        result = enforce_spacing(mp, system_configuration=SYSTEM_CONFIGURATION)
         assert result[0]["tiles"][0]["x"] == 5
 
     def test_non_overlapping_buildings_unchanged(self):
@@ -314,7 +320,7 @@ class TestEnforceSpacing:
             {"name": "A", "tiles": [{"x": 0, "y": 0}]},
             {"name": "B", "tiles": [{"x": 10, "y": 10}]},
         ]
-        result = enforce_spacing(mp)
+        result = enforce_spacing(mp, system_configuration=SYSTEM_CONFIGURATION)
         assert result[1]["tiles"][0]["x"] == 10
 
     def test_overlapping_buildings_shifted(self):
@@ -322,7 +328,7 @@ class TestEnforceSpacing:
             {"name": "A", "tiles": [{"x": 5, "y": 5}]},
             {"name": "B", "tiles": [{"x": 5, "y": 5}]},  # exact overlap
         ]
-        result = enforce_spacing(mp)
+        result = enforce_spacing(mp, system_configuration=SYSTEM_CONFIGURATION)
         # B should have been shifted somewhere
         bx = result[1]["tiles"][0]["x"]
         by = result[1]["tiles"][0]["y"]
@@ -334,7 +340,7 @@ class TestEnforceSpacing:
             {"name": "A", "tiles": [{"x": 5, "y": 5}]},
             {"name": "B", "tiles": [{"x": 6, "y": 5}]},  # within gap
         ]
-        result = enforce_spacing(mp, min_gap=1)
+        result = enforce_spacing(mp, min_gap=1, system_configuration=SYSTEM_CONFIGURATION)
         bx = result[1]["tiles"][0]["x"]
         by = result[1]["tiles"][0]["y"]
         # B should have been moved
@@ -345,7 +351,7 @@ class TestEnforceSpacing:
             {"name": "A", "tiles": [{"x": 5, "y": 5}]},
             {"name": "B", "tiles": [{"bad": "data"}]},
         ]
-        result = enforce_spacing(mp)
+        result = enforce_spacing(mp, system_configuration=SYSTEM_CONFIGURATION)
         assert len(result) == 2
 
 
@@ -1204,46 +1210,53 @@ class TestRenderingPipelineEndToEnd:
 # Urban planning intelligence — road connectivity, spacing, prompt hints
 # ---------------------------------------------------------------------------
 
-from orchestration.spatial import get_district_spacing, _DISTRICT_SPACING
+from types import SimpleNamespace
+
+from orchestration.spatial import get_district_spacing
 from orchestration.prompt_builder import _detect_road_facing, _height_gradient_hint
 from orchestration.generators import Generators
+
+def _generators_for_road_connectivity_tests() -> Generators:
+    return Generators(SimpleNamespace(system_configuration=SYSTEM_CONFIGURATION))
 
 
 class TestDistrictSpacing:
     def test_monumental_gets_wide_spacing(self):
-        assert get_district_spacing("monumental") == 2
+        assert get_district_spacing("monumental", system_configuration=SYSTEM_CONFIGURATION) == 2
 
     def test_commercial_gets_zero_spacing(self):
-        assert get_district_spacing("commercial") == 0
+        assert get_district_spacing("commercial", system_configuration=SYSTEM_CONFIGURATION) == 0
 
     def test_residential_gets_default(self):
-        assert get_district_spacing("residential") == 1
+        assert get_district_spacing("residential", system_configuration=SYSTEM_CONFIGURATION) == 1
 
     def test_garden_gets_wide_spacing(self):
-        assert get_district_spacing("garden") == 2
+        assert get_district_spacing("garden", system_configuration=SYSTEM_CONFIGURATION) == 2
 
     def test_none_returns_default(self):
-        assert get_district_spacing(None) == 1
+        assert get_district_spacing(None, system_configuration=SYSTEM_CONFIGURATION) == 1
 
     def test_unknown_style_returns_default(self):
-        assert get_district_spacing("alien") == 1
+        assert get_district_spacing("alien", system_configuration=SYSTEM_CONFIGURATION) == 1
 
     def test_case_insensitive(self):
-        assert get_district_spacing("COMMERCIAL") == 0
-        assert get_district_spacing("Monumental") == 2
+        assert get_district_spacing("COMMERCIAL", system_configuration=SYSTEM_CONFIGURATION) == 0
+        assert get_district_spacing("Monumental", system_configuration=SYSTEM_CONFIGURATION) == 2
 
 
 class TestRoadConnectivity:
     def test_no_roads_returns_unchanged(self):
         mp = [{"name": "A", "building_type": "temple", "tiles": [{"x": 5, "y": 5}]}]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         assert len(result) == 1  # unchanged
 
     def test_single_road_tile_returns_unchanged(self):
         mp = [{"name": "R1", "building_type": "road", "tiles": [{"x": 5, "y": 5}]}]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         # May add boundary road but original structure unchanged
         assert result[0]["name"] == "R1"
 
@@ -1253,7 +1266,8 @@ class TestRoadConnectivity:
              "tiles": [{"x": 5, "y": 5}, {"x": 6, "y": 5}, {"x": 7, "y": 5}]},
         ]
         region = {"x1": 5, "y1": 5, "x2": 7, "y2": 5}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         # Roads are already connected and on boundary — no changes
         assert result[0]["name"] == "R1"
 
@@ -1266,7 +1280,8 @@ class TestRoadConnectivity:
              "tiles": [{"x": 5, "y": 5}]},
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         # Should have added a connecting road structure
         road_names = [s["name"] for s in result if s["building_type"] == "road"]
         assert len(road_names) >= 3  # R1, R2, Connecting road (and maybe boundary)
@@ -1282,7 +1297,8 @@ class TestRoadConnectivity:
              "tiles": [{"x": 5, "y": 5}]},
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         # Bridge tiles should NOT include (2, 5) where temple is
         for s in result:
             if s["name"] == "Connecting road":
@@ -1296,7 +1312,8 @@ class TestRoadConnectivity:
              "tiles": [{"x": 5, "y": 5}, {"x": 6, "y": 5}]},
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
-        result = Generators._ensure_road_connectivity(mp, region)
+        gen = _generators_for_road_connectivity_tests()
+        result = gen._ensure_road_connectivity(mp, region)
         # Should have added a "District edge road" structure
         names = [s["name"] for s in result]
         assert "District edge road" in names
@@ -1375,6 +1392,37 @@ class TestRoadFacing:
         tiles = [{"x": 5, "y": 5}]
         result = _detect_road_facing(tiles, MockWorld())
         assert result == ""
+
+
+def test_normalize_tile_dict_clamps_elevation():
+    raw = {"terrain": "road", "elevation": 1.0e6}
+    out = normalize_tile_dict_for_world(raw, system_configuration=SYSTEM_CONFIGURATION)
+    assert out["elevation"] == SYSTEM_CONFIGURATION.grid.maximum_elevation_value
+    low = normalize_tile_dict_for_world(
+        {"terrain": "water", "elevation": -1.0e6},
+        system_configuration=SYSTEM_CONFIGURATION,
+    )
+    assert low["elevation"] == SYSTEM_CONFIGURATION.world_place_tile_min_elevation
+
+
+def test_apply_tile_placements_places_and_skips_bad_coords():
+    world = WorldState(
+        chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles,
+        system_configuration=SYSTEM_CONFIGURATION,
+    )
+    batch = apply_tile_placements(
+        world,
+        [
+            (1, 2, {"terrain": "road", "elevation": 5.0}),
+            (None, 2, {"terrain": "road"}),
+            ("nope", 0, {"terrain": "road"}),
+        ],
+        system_configuration=SYSTEM_CONFIGURATION,
+    )
+    assert batch.attempted_coordinate_pairs == 3
+    assert batch.skipped_invalid_coordinates == 2
+    assert len(batch.placed_tile_dicts) == 1
+    assert (1, 2) in world.tiles
 
 
 if __name__ == "__main__":

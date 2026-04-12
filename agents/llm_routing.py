@@ -19,14 +19,14 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from core.config import (
-    KEY_CARTOGRAPHUS_REFINE,
-    KEY_CARTOGRAPHUS_SKELETON,
-    KEY_CARTOGRAPHUS_SURVEY,
-    KEY_URBANISTA,
-    LLM_AGENT_DEFAULTS as AGENT_LLM,
-    LLM_AGENT_LABELS as AGENT_LLM_LABELS,
-)
+# Keys and defaults now from injected Config (updated in eliminate-globals todo). Local for compatibility during transition.
+KEY_CARTOGRAPHUS_SKELETON = "cartographus_skeleton"
+KEY_CARTOGRAPHUS_REFINE = "cartographus_refine"
+KEY_CARTOGRAPHUS_SURVEY = "cartographus_survey"
+KEY_URBANISTA = "urbanista"
+# AGENT_LLM and LABELS will be populated from config.load_llm_defaults() in updated callers.
+AGENT_LLM = {}
+AGENT_LLM_LABELS = {}
 
 
 class AgentLlmSpec(TypedDict, total=False):

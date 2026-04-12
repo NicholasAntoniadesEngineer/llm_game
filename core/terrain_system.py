@@ -10,16 +10,6 @@ from typing import Dict, Any, List, Tuple, Optional, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .constants import (
-    MAX_ELEVATION,
-    MATERIAL_ROUGHNESS_LOW,
-    MATERIAL_ROUGHNESS_MEDIUM,
-    MATERIAL_ROUGHNESS_HIGH,
-    WARM_MATERIALS,
-    COOL_MATERIALS,
-)
-
-
 class TerrainType(Enum):
     """Comprehensive terrain classification system."""
     FLAT = "flat"
@@ -429,13 +419,20 @@ class EnvironmentStylingSystem:
             }
         }
 
-    def adapt_material_for_environment(self, base_material: str, climate: ClimateType,
-                                     terrain: TerrainCell, age: str = "weathered") -> Dict[str, Any]:
+    def adapt_material_for_environment(
+        self,
+        base_material: str,
+        climate: ClimateType,
+        terrain: TerrainCell,
+        age: str = "weathered",
+        *,
+        material_roughness_medium_default: float,
+    ) -> Dict[str, Any]:
         """Adapt material properties for environmental conditions."""
 
         material_props = {
             "name": base_material,
-            "roughness": MATERIAL_ROUGHNESS_MEDIUM,
+            "roughness": material_roughness_medium_default,
             "metalness": 0.0,
             "color": self._get_base_color(base_material),
             "environmental_effects": []

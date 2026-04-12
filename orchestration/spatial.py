@@ -1,23 +1,15 @@
 """Spatial layout utilities -- spacing enforcement, neighbor context, occupancy summaries."""
 
 import logging
+from typing import TYPE_CHECKING
 
-from core.config import GRID_WIDTH, GRID_HEIGHT
+if TYPE_CHECKING:
+    from core.config import Config
 
 logger = logging.getLogger("eternal.spatial")
 
-# District style -> spacing multiplier.
-# Wealthy/garden districts get more space; dense commercial districts pack tighter.
-_DISTRICT_SPACING: dict[str, int] = {
-    "monumental": 2,   # temples, forums: generous gardens/courtyards
-    "garden": 2,        # parks, villas: wide spacing
-    "residential": 1,   # standard separation
-    "military": 1,      # barracks: functional spacing
-    "commercial": 0,    # markets, shops: shared walls allowed
-}
 
-
-def get_district_spacing(district_style: str | None = None) -> int:
+def get_district_spacing(district_style: str | None, *, system_configuration: "Config") -> int:
     """Return the min_gap for a given district style.
 
     Args:
@@ -28,10 +20,19 @@ def get_district_spacing(district_style: str | None = None) -> int:
     """
     if not district_style:
         return 1
-    return _DISTRICT_SPACING.get(district_style.lower(), 1)
+    spacing_map = system_configuration.district_spacing_by_style_dictionary
+    return int(spacing_map.get(district_style.lower(), 1))
 
 
-def enforce_spacing(master_plan: list, min_gap: int = 1) -> list:
+def enforce_spacing(
+    master_plan: list,
+    min_gap: int = 1,
+    *,
+    system_configuration: "Config",
+    world_grid_width_tiles: int | None = None,
+    world_grid_height_tiles: int | None = None,
+    spatial_optimal_shift_step_tiles: int | None = None,
+) -> list:
     """Shift buildings that touch or overlap to create gaps between them.
 
     Enhanced with intelligent placement that considers building relationships,
@@ -39,6 +40,13 @@ def enforce_spacing(master_plan: list, min_gap: int = 1) -> list:
     """
     if not master_plan:
         return master_plan
+
+    if world_grid_width_tiles is None:
+        world_grid_width_tiles = system_configuration.grid.world_grid_width
+    if world_grid_height_tiles is None:
+        world_grid_height_tiles = system_configuration.grid.world_grid_height
+    if spatial_optimal_shift_step_tiles is None:
+        spatial_optimal_shift_step_tiles = system_configuration.spatial_optimal_shift_step_tiles
 
     # Collect all occupied tiles per building (as sets for fast lookup)
     bldg_tiles = []
@@ -97,7 +105,15 @@ def enforce_spacing(master_plan: list, min_gap: int = 1) -> list:
 
         # Find optimal shift direction considering multiple factors
         tiles = master_plan[i].get("tiles", [])
-        best_shift = _find_optimal_shift(tiles, occupied, relationship_zones, bldg_metadata[i])
+        best_shift = _find_optimal_shift(
+            tiles,
+            occupied,
+            relationship_zones,
+            bldg_metadata[i],
+            world_grid_width_tiles=world_grid_width_tiles,
+            world_grid_height_tiles=world_grid_height_tiles,
+            spatial_optimal_shift_step_tiles=spatial_optimal_shift_step_tiles,
+        )
 
         if best_shift:
             sx, sy = best_shift
@@ -184,9 +200,18 @@ def _enforce_functional_relationships(struct: dict, zones: dict, all_tiles: list
             logger.warning(f"{struct.get('name')} ({btype}): isolated from civic center")
 
 
-def _find_optimal_shift(tiles: list, occupied: set, zones: dict, meta: dict) -> tuple[int, int] | None:
+def _find_optimal_shift(
+    tiles: list,
+    occupied: set,
+    zones: dict,
+    meta: dict,
+    *,
+    world_grid_width_tiles: int,
+    world_grid_height_tiles: int,
+    spatial_optimal_shift_step_tiles: int,
+) -> tuple[int, int] | None:
     """Find the best shift direction considering multiple factors."""
-    step = 2  # Base step size
+    step = spatial_optimal_shift_step_tiles
     candidates = [
         (step, 0), (0, step), (step, step),
         (-step, 0), (0, -step), (-step, step), (step, -step), (-step, -step),
@@ -205,7 +230,7 @@ def _find_optimal_shift(tiles: list, occupied: set, zones: dict, meta: dict) -> 
                 nx, ny = int(t["x"]) + sx, int(t["y"]) + sy
             except (KeyError, TypeError, ValueError):
                 continue
-            if not (0 <= nx < GRID_WIDTH and 0 <= ny < GRID_HEIGHT):
+            if not (0 <= nx < world_grid_width_tiles and 0 <= ny < world_grid_height_tiles):
                 in_bounds = False
                 break
             shifted.add((nx, ny))

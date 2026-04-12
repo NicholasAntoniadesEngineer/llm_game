@@ -18,84 +18,7 @@ from orchestration.task_manager import TaskManager
 from core.run_log import log_event, trace_event
 from core.errors import AgentGenerationError
 from agents.base import BaseAgent
-
-# Master-plan building_types that are rendered as procedural terrain (no Urbanista components).
-OPEN_TERRAIN_TYPES = frozenset({"road", "forum", "garden", "water", "grass"})
-
-# Small/simple building types eligible for batching (2-3 per Urbanista call).
-# These have simpler geometry and shorter outputs, making batching safe.
-BATCHABLE_TYPES = frozenset({"taberna", "warehouse", "insula", "domus", "market"})
-
-# Max buildings per batch. Keep small to avoid overly complex responses.
-MAX_BATCH_SIZE = 3
-
-# Max total tiles across a batch — larger buildings should not be batched.
-MAX_BATCH_TILES = 12
-
-
-# ── Default terrain colors/scenery by type (used when skipping Urbanista for terrain) ──
-_TERRAIN_DEFAULTS = {
-    "road": {"color": "#8B8680", "scenery": {"pavement_detail": 0.6}},
-    "forum": {"color": "#C8B89A", "scenery": {"pavement_detail": 0.8, "vegetation_density": 0.1}},
-    "garden": {"color": "#4A7C3F", "scenery": {"vegetation_density": 0.7}},
-    "water": {"color": "#2E5A88", "scenery": {"water_murk": 0.3}},
-    "grass": {"color": "#6B8E4E", "scenery": {"vegetation_density": 0.5}},
-}
-
-
-def _generate_terrain_procedurally(
-    name: str,
-    btype: str,
-    tiles: list,
-    avg_elevation: float,
-    district_palette: dict | None,
-    physical_desc: str,
-) -> dict:
-    """Generate terrain tiles without an LLM call.
-
-    Road, forum, garden, water, grass tiles use simple color + scenery spec.
-    This saves one Urbanista system prompt per terrain structure.
-    """
-    defaults = _TERRAIN_DEFAULTS.get(btype, {"color": "#808080", "scenery": {}})
-    color = defaults["color"]
-
-    # Use district palette if available (primary for roads/forums, accent for gardens)
-    if district_palette and isinstance(district_palette, dict):
-        if btype in ("road", "forum") and district_palette.get("primary"):
-            color = district_palette["primary"]
-        elif btype in ("garden", "grass") and district_palette.get("accent"):
-            # Blend toward green for vegetation
-            pass  # Keep default green
-
-    result_tiles = []
-    for t in tiles:
-        td = {
-            "x": t["x"],
-            "y": t["y"],
-            "terrain": btype,
-            "building_name": name,
-            "building_type": btype,
-            "description": physical_desc[:200] if physical_desc else f"{name} ({btype})",
-            "elevation": t.get("elevation", avg_elevation),
-            "color": color,
-            "spec": {
-                "color": color,
-                "scenery": dict(defaults.get("scenery", {})),
-            },
-        }
-        result_tiles.append(td)
-
-    return {"tiles": result_tiles, "commentary": f"Procedural terrain: {name}"}
-
-# Wave 1 (landmarks) — built first across all districts for a quick city skeleton.
-# Wave 2 (infill) — fills density after the skeleton is complete.
-WAVE1_TYPES = frozenset({
-    "temple", "basilica", "gate", "wall", "monument", "amphitheater",
-    "thermae", "circus", "bridge", "aqueduct",
-    # Open terrain is always wave 1 (roads, plazas, water — defines the street grid)
-    "road", "forum", "garden", "water", "grass",
-})
-# Everything else (insula, domus, market, taberna, warehouse) is wave 2.
+from agents.ui_notifier import AsyncBroadcastNotifier
 from agents.llm_routing import (
     KEY_CARTOGRAPHUS_REFINE,
     KEY_CARTOGRAPHUS_SKELETON,
@@ -103,30 +26,20 @@ from agents.llm_routing import (
     KEY_URBANISTA,
 )
 from prompts import load_prompt, format_building_types, format_material_palette
-from core import config as config_module
-from core.config import (
-    GRID_WIDTH,
-    GRID_HEIGHT,
-    URBANISTA_MAX_CONCURRENT,
-    MAX_GENERATIONS,
-    EXPANSION_COOLDOWN,
-    TERRAIN_GRADIENT_ITERATIONS,
-    TERRAIN_MAX_GRADIENT,
-)
-from orchestration.validation import (
-    validate_master_plan,
-    validate_urbanista_tiles,
-    validate_urbanista_arch_result,
-    sanitize_urbanista_output,
-    check_component_collisions,
-)
-from core.errors import UrbanistaValidationError
-from orchestration.placement import check_functional_placement, log_functional_placement_warnings
-from orchestration.prompt_builder import build_terrain_prompt, build_building_prompt
-from core.fingerprint import compute_run_fingerprint, district_survey_key, ensure_district_ids
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.config import Config
+
+from orchestration.validation import validate_master_plan
+from core.fingerprint import compute_run_fingerprint, ensure_district_ids
 from core.persistence import save_state, load_districts_cache, save_blueprint, load_blueprint
 from core.run_session import RunSession
 from orchestration.generators import Generators
+from orchestration.engine_build_loop import run_build_generation
+from orchestration.engine_urbanista import execute_batch_urbanista
+from orchestration.engine_district_build import run_district_build
+from orchestration.engine_run_phase import EngineRunPhase
 
 logger = logging.getLogger("eternal.engine")
 
@@ -137,44 +50,72 @@ class BuildEngine:
 
     def __init__(
         self,
-        world: WorldState,
-        bus: MessageBus,
+        world: "WorldState",
+        bus: "MessageBus",
         broadcast_fn,
         chat_history_ref: list,
         *,
-        run_session: RunSession,
+        run_session: "RunSession",
+        system_configuration: "Config",
     ):
-        if run_session is None:
-            raise TypeError("BuildEngine requires run_session")
+        """Updated to accept injected system_configuration. Removes globals from core.config. Uses descriptive parameter name. Later todos will replace globals uses with config values and refactor to thinner coordinator."""
+        self.system_configuration = system_configuration
+        self._open_terrain_types_set = frozenset(system_configuration.terrain.open_terrain_types_set)
+        self._batchable_types_set = frozenset(system_configuration.terrain.batchable_types_set)
+        self._wave_one_building_types_set = frozenset(system_configuration.terrain.wave_one_building_types_set)
         self.world = world
         self.bus = bus
         self.broadcast = broadcast_fn
+        self._ui_notifier = AsyncBroadcastNotifier(broadcast_fn)
         self.chat_history = chat_history_ref
-        self._run_session = run_session
+        self.run_session = run_session
         self.district_index = 0
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
         # Phase-1 skeleton planner starts builds early; phase-2 refine adds map prose in background.
         _source_policy = load_prompt("source_policy")
+        grid_width_value = self.system_configuration.grid.world_grid_width
+        grid_height_value = self.system_configuration.grid.world_grid_height
+        meters_per_tile = self.system_configuration.grid.world_scale_meters_per_tile
         self.planner_skeleton = BaseAgent(
             "cartographus",
             "Cartographus",
-            load_prompt("cartographus_plan_skeleton", GRID_WIDTH=GRID_WIDTH, GRID_HEIGHT=GRID_HEIGHT, GRID_WIDTH_M=GRID_WIDTH*10, GRID_HEIGHT_M=GRID_HEIGHT*10, SOURCE_POLICY=_source_policy),
+            load_prompt(
+                "cartographus_plan_skeleton",
+                GRID_WIDTH=grid_width_value,
+                GRID_HEIGHT=grid_height_value,
+                GRID_WIDTH_M=int(grid_width_value * meters_per_tile),
+                GRID_HEIGHT_M=int(grid_height_value * meters_per_tile),
+                SOURCE_POLICY=_source_policy,
+            ),
             llm_agent_key=KEY_CARTOGRAPHUS_SKELETON,
+            system_configuration=self.system_configuration,
+            ui_notifier=self._ui_notifier,
         )
         self.planner_refine = BaseAgent(
             "cartographus",
             "Cartographus",
             load_prompt("cartographus_plan_refine", SOURCE_POLICY=_source_policy),
             llm_agent_key=KEY_CARTOGRAPHUS_REFINE,
+            system_configuration=self.system_configuration,
+            ui_notifier=self._ui_notifier,
         )
         self.surveyor = BaseAgent(
             "cartographus",
             "Cartographus",
             load_prompt("cartographus_survey", SOURCE_POLICY=_source_policy, BUILDING_TYPES=format_building_types()),
             llm_agent_key=KEY_CARTOGRAPHUS_SURVEY,
+            system_configuration=self.system_configuration,
+            ui_notifier=self._ui_notifier,
         )
-        self.urbanista = BaseAgent("urbanista", "Urbanista", load_prompt("urbanista", BUILDING_TYPES=format_building_types(), KEY_COLORS=format_material_palette()), llm_agent_key=KEY_URBANISTA)
+        self.urbanista = BaseAgent(
+            "urbanista",
+            "Urbanista",
+            load_prompt("urbanista", BUILDING_TYPES=format_building_types(), KEY_COLORS=format_material_palette()),
+            llm_agent_key=KEY_URBANISTA,
+            system_configuration=self.system_configuration,
+            ui_notifier=self._ui_notifier,
+        )
         self._source_policy = _source_policy
         self.generation = 0
         self._trace_snapshot: dict[str, Any] = {"phase": "init"}
@@ -203,6 +144,7 @@ class BuildEngine:
             district_index_fn=lambda: self.district_index,
             generation_fn=lambda: self.generation,
             scenario_fn=lambda: self.scenario,
+            system_configuration=self.system_configuration,
         )
 
         # Generators — extracted discovery/survey/expansion methods.
@@ -210,15 +152,15 @@ class BuildEngine:
 
     @property
     def scenario(self) -> dict[str, Any] | None:
-        return self._run_session.scenario
+        return self.run_session.scenario
 
     @property
     def run_fingerprint(self) -> str:
         return compute_run_fingerprint(
             self.scenario if isinstance(self.scenario, dict) else None,
             self.world.chunk_size_tiles,
-            GRID_WIDTH,
-            GRID_HEIGHT,
+            self.system_configuration.grid.world_grid_width,
+            self.system_configuration.grid.world_grid_height,
         )
 
     async def _save_state_thread(self, flush_mode: str = "incremental") -> None:
@@ -234,6 +176,7 @@ class BuildEngine:
             self.districts,
             self.generation,
             scenario=scen,
+            system_configuration=self.system_configuration,
             flush_mode=flush_mode,
         )
 
@@ -252,6 +195,7 @@ class BuildEngine:
         """Merge keys for the heartbeat thread (no asyncio; safe from any thread context that holds the GIL briefly)."""
         self._trace_snapshot.update(kwargs)
         self._trace_snapshot["monotonic_s"] = time.monotonic()
+        self._trace_snapshot["run_phase"] = self.tasks.run_phase.value
 
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario."""
@@ -293,6 +237,7 @@ class BuildEngine:
         """Infinite generation loop: discover → build → expand → repeat."""
         try:
             self.running = True
+            self.tasks.run_phase = EngineRunPhase.discovering
             # Reset auto-retry state on fresh run (manual resume clears it)
             if not getattr(self, "_auto_retry_pending", False):
                 self._auto_retry_count = 0
@@ -303,13 +248,17 @@ class BuildEngine:
             if not isinstance(scen, dict):
                 logger.error("BuildEngine.run() requires RunSession.scenario dict — stopping")
                 self.running = False
+                self.tasks.run_phase = EngineRunPhase.idle
                 return
             log_event(
                 "engine",
                 "Build started",
                 scenario=str(scen.get("location", "?") if isinstance(scen, dict) else "none"),
                 period=str(scen.get("period", "?") if isinstance(scen, dict) else "none"),
-                grid=f"{GRID_WIDTH}x{GRID_HEIGHT}",
+                grid=(
+                    f"{self.system_configuration.grid.world_grid_width}x"
+                    f"{self.system_configuration.grid.world_grid_height}"
+                ),
             )
             trace_event(
                 "engine",
@@ -339,6 +288,7 @@ class BuildEngine:
                         await self.schedule_run()
                         return
                     self.running = False
+                    self.tasks.run_phase = EngineRunPhase.idle
                     return
                 trace_event("engine", "Phase 0 — discover_districts finished", ok=True, districts=len(self.districts))
                 self.update_trace_snapshot(phase="post_discovery", districts=len(self.districts))
@@ -377,7 +327,9 @@ class BuildEngine:
                     # Pre-rasterize roads as immutable infrastructure
                     road_count = self.blueprint.rasterize_roads(self.world)
                     # Apply elevation from hills data
-                    elev_count = self.blueprint.populate_elevation(self.world)
+                    elev_count = self.blueprint.populate_elevation(
+                        self.world, system_configuration=self.system_configuration
+                    )
                     if road_count or elev_count:
                         logger.info("Blueprint applied: %d road tiles, %d elevation tiles", road_count, elev_count)
                         # Broadcast terrain data (hills/water) for 3D terrain mesh
@@ -386,8 +338,8 @@ class BuildEngine:
                             "hills": self.blueprint.hills,
                             "water": self.blueprint.water,
                             "roads": self.blueprint.roads,
-                            "max_gradient": TERRAIN_MAX_GRADIENT,
-                            "gradient_iterations": TERRAIN_GRADIENT_ITERATIONS,
+                            "max_gradient": self.system_configuration.terrain.maximum_gradient_value,
+                            "gradient_iterations": self.system_configuration.terrain.gradient_iterations_count,
                         })
                         # Broadcast the road tiles so clients see them immediately
                         road_tiles = [t.to_dict() for t in self.world.tiles.values()
@@ -404,6 +356,7 @@ class BuildEngine:
 
             # ─── INFINITE GENERATION LOOP ───
             while self.running:
+                self.tasks.run_phase = EngineRunPhase.building
                 self.update_trace_snapshot(phase="generation_loop", generation=self.generation, district_index=self.district_index)
                 trace_event(
                     "engine",
@@ -428,11 +381,13 @@ class BuildEngine:
                 self.update_trace_snapshot(phase="post_build_generation", generation=self.generation)
 
                 # Check generation cap
-                if MAX_GENERATIONS > 0 and self.generation >= MAX_GENERATIONS:
-                    logger.info(f"Reached MAX_GENERATIONS={MAX_GENERATIONS}, stopping")
+                max_gen_cap = self.system_configuration.grid.maximum_generations_cap
+                if max_gen_cap > 0 and self.generation >= max_gen_cap:
+                    logger.info("Reached maximum_generations_cap=%s, stopping", max_gen_cap)
                     break
 
                 # ─── EXPANSION: discover new edge districts ───
+                self.tasks.run_phase = EngineRunPhase.discovering
                 trace_event("engine", "Calling expand_city()", generation_before=self.generation)
                 self.update_trace_snapshot(phase="expand_city", generation=self.generation)
                 await self.broadcast({"type": "expanding", "generation": self.generation + 1})
@@ -442,7 +397,7 @@ class BuildEngine:
                     self.update_trace_snapshot(phase="expansion_cooldown", generation=self.generation)
                     await self._chat("cartographus", "info",
                                      "City fully built for this era. Waiting before next expansion attempt...")
-                    await asyncio.sleep(EXPANSION_COOLDOWN)
+                    await asyncio.sleep(self.system_configuration.timing.expansion_cooldown_seconds)
                     continue
 
                 trace_event("engine", "expand_city returned True — incrementing generation", districts=len(self.districts))
@@ -454,9 +409,11 @@ class BuildEngine:
             await self.broadcast_all_agents_idle()
             self.running = False
             await self.tasks.stop_token_telemetry()
+            self.tasks.run_phase = EngineRunPhase.idle
 
         except asyncio.CancelledError:
             self.running = False
+            self.tasks.run_phase = EngineRunPhase.idle
             logger.info("BuildEngine.run cancelled")
             await self.tasks.stop_token_telemetry()
             await self.broadcast_all_agents_idle()
@@ -464,128 +421,7 @@ class BuildEngine:
 
     async def _build_generation(self) -> bool:
         """Build all unbuilt districts in two waves. Returns False if cancelled."""
-        trace_event(
-            "engine",
-            "_build_generation() start",
-            generation=self.generation,
-            district_index=self.district_index,
-            districts_total=len(self.districts),
-        )
-        self.update_trace_snapshot(phase="_build_generation", step="start", generation=self.generation)
-        self.tasks.clear_survey_prefetch_handles()
-        self.tasks.start_survey_tasks_from_index(self.district_index, self.district_index + 1)
-        if len(self.districts) > self.district_index + 1:
-            logger.info("Survey priority: district %s/%s first", self.district_index + 1, len(self.districts))
-
-        self.tasks.start_survey_tasks_from_index(self.district_index, len(self.districts))
-        district_plans: dict[int, list] = {}
-
-        async def _get_plan(di: int) -> list | None:
-            try:
-                return await self.tasks.await_survey_for_district_index(di)
-            except asyncio.CancelledError:
-                return None
-            except AgentGenerationError as err:
-                await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
-                return None
-
-        for wave_label, type_filter in [("Wave 1 — Landmarks", WAVE1_TYPES), ("Wave 2 — Infill", None)]:
-            if not self.running:
-                return False
-
-            await self._chat("cartographus", "info", f"=== {wave_label} (gen {self.generation}) ===")
-            log_event("engine", wave_label)
-
-            for di in range(self.district_index, len(self.districts)):
-                if not self.running:
-                    return False
-
-                district = self.districts[di]
-                district_name = district["name"]
-                self.world.current_period = district.get("period", "")
-                self.world.current_year = district.get("year", -44)
-
-                survey_sid = district_survey_key(district)
-                scenery = self._district_scenery_summaries.get(survey_sid, "")
-                region = district.get("region", {})
-                await self.broadcast({
-                    "type": "phase",
-                    "district": district_name,
-                    "description": district.get("description", ""),
-                    "scenery_summary": scenery,
-                    "index": di + 1,
-                    "total_districts": len(self.districts),
-                    "wave": wave_label,
-                    "generation": self.generation,
-                    "region": {
-                        "x1": region.get("x1", 0),
-                        "y1": region.get("y1", 0),
-                        "x2": region.get("x2", 0),
-                        "y2": region.get("y2", 0),
-                    },
-                })
-                await self.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
-
-                self.update_trace_snapshot(
-                    phase="build_wave",
-                    wave=wave_label,
-                    district_index=di,
-                    district=district_name,
-                    generation=self.generation,
-                )
-                if di not in district_plans:
-                    self.update_trace_snapshot(phase="await_survey", district_index=di, district=district_name, wave=wave_label)
-                    trace_event(
-                        "engine",
-                        "Awaiting survey master plan",
-                        district_index=di,
-                        district=district_name,
-                        wave=wave_label,
-                    )
-                    plan = await _get_plan(di)
-                    if plan is None:
-                        if getattr(self, "_auto_retry_pending", False):
-                            self._auto_retry_pending = False
-                            logger.info("Auto-retry: re-entering run() after survey failure")
-                            await self.schedule_run()
-                        return False
-                    district_plans[di] = plan
-
-                master_plan = district_plans[di]
-                if type_filter is not None:
-                    wave_plan = [s for s in master_plan if s.get("building_type", "") in type_filter]
-                else:
-                    wave_plan = [s for s in master_plan if s.get("building_type", "") not in WAVE1_TYPES]
-
-                if not wave_plan:
-                    continue
-
-                logger.info(f"=== {wave_label}: {district_name} ({len(wave_plan)} structures) ===")
-                trace_event(
-                    "engine",
-                    "Calling _build_district()",
-                    district=district_name,
-                    wave=wave_label,
-                    structures=len(wave_plan),
-                )
-                self.update_trace_snapshot(
-                    phase="build_district_call",
-                    district=district_name,
-                    wave=wave_label,
-                    structure_count=len(wave_plan),
-                )
-                district_ok = await self._build_district(district, wave_plan)
-                if not district_ok:
-                    if getattr(self, "_auto_retry_pending", False):
-                        self._auto_retry_pending = False
-                        logger.info("Auto-retry: re-entering run() after district build failure")
-                        await self.schedule_run()
-                    return False
-
-                await self._save_state_thread(flush_mode="incremental")
-
-        self.district_index = len(self.districts)
-        return True
+        return await run_build_generation(self)
 
     async def _pause_for_api_issue(self, pause_reason: str, pause_detail: str, agent_role: str):
         """Stop the build and notify clients (rate limit, API error, network, etc.).
@@ -602,37 +438,36 @@ class BuildEngine:
             agent=agent_role,
             detail_preview=(pause_detail[:240] + "…") if len(pause_detail) > 240 else pause_detail,
         )
+        self.tasks.run_phase = EngineRunPhase.paused_api
         self.update_trace_snapshot(phase="pause_api", reason=pause_reason, agent=agent_role)
 
-        # Auto-retry for transient/retriable errors
-        AUTO_RETRY_MAX = 3
-        AUTO_RETRY_DELAY_S = 5
-        RETRIABLE_REASONS = {"bad_model_output", "api_error", "network"}
+        auto_retry_max = self.system_configuration.performance.maximum_retries_count
+        auto_retry_delay_s = self.system_configuration.api_pause_auto_retry_delay_seconds
+        retriable_reasons = self.system_configuration.api_pause_retriable_reasons_set
 
-        if pause_reason in RETRIABLE_REASONS:
+        if pause_reason in retriable_reasons:
             attempt = getattr(self, "_auto_retry_count", 0) + 1
-            if attempt <= AUTO_RETRY_MAX:
+            if attempt <= auto_retry_max:
                 self._auto_retry_count = attempt
                 logger.warning(
                     "Auto-retry %d/%d for %s (%s): %s",
-                    attempt, AUTO_RETRY_MAX, pause_reason, agent_role,
+                    attempt, auto_retry_max, pause_reason, agent_role,
                     pause_detail[:200] if pause_detail else "(none)",
                 )
-                # Broadcast countdown to client
                 await self.broadcast({
                     "type": "auto_retry",
                     "attempt": attempt,
-                    "max_attempts": AUTO_RETRY_MAX,
-                    "delay_s": AUTO_RETRY_DELAY_S,
+                    "max_attempts": auto_retry_max,
+                    "delay_s": auto_retry_delay_s,
                     "reason": pause_reason,
                     "detail": pause_detail[:400] if pause_detail else "",
                     "agent": agent_role,
                 })
                 await self._chat(
                     agent_role, "warning",
-                    f"Error ({pause_reason}) — auto-retrying in {AUTO_RETRY_DELAY_S}s (attempt {attempt}/{AUTO_RETRY_MAX})...",
+                    f"Error ({pause_reason}) — auto-retrying in {auto_retry_delay_s}s (attempt {attempt}/{auto_retry_max})...",
                 )
-                await asyncio.sleep(AUTO_RETRY_DELAY_S)
+                await asyncio.sleep(auto_retry_delay_s)
                 # Signal auto-retry to the caller so it can re-schedule the run.
                 self._auto_retry_pending = True
                 return
@@ -643,10 +478,9 @@ class BuildEngine:
 
         self.running = False
         await self.tasks.stop_token_telemetry()
-        # Always save on pause — ensures no progress is lost
         await self._save_state_thread(flush_mode="full")
-        self.tasks._structures_since_save = 0
-        await self.tasks._cancel_survey_and_refine_tasks()
+        self.tasks.reset_structure_save_throttle_counter()
+        await self.tasks.cancel_survey_and_refine_tasks_for_pause()
         summaries = {
             "rate_limit": "Build paused: the AI service rate limit was reached. Wait a bit, then try again.",
             "api_error": "Build paused: the AI service reported an error. Check your account, plan, and CLI login, then try again.",
@@ -816,681 +650,7 @@ class BuildEngine:
         return ""
 
     async def _build_district(self, district: dict, master_plan: list) -> bool:
-        district_key = district.get("name", "unknown")
-        survey_sid = district_survey_key(district)
-        trace_event(
-            "engine",
-            "_build_district() entered",
-            district=district_key,
-            master_plan_structures=len(master_plan),
-        )
-        self.update_trace_snapshot(phase="build_district_inner", district=district_key, structures=len(master_plan))
-        if not master_plan:
-            await self._pause_for_api_issue(
-                "unknown",
-                f"No master plan for district {district_key!r}.",
-                "cartographus",
-            )
-            return False
-
-        try:
-            master_plan = self._apply_master_plan_validation(
-                master_plan, f"District {district_key!r} master plan"
-            )
-        except AgentGenerationError as err:
-            await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
-            return False
-
-        log_functional_placement_warnings(master_plan, district_key)
-        placement_warnings = check_functional_placement(master_plan)
-        if placement_warnings:
-            await self.broadcast(
-                {
-                    "type": "placement_warnings",
-                    "district": district_key,
-                    "warnings": placement_warnings,
-                    "count": len(placement_warnings),
-                }
-            )
-            preview = placement_warnings[:12]
-            await self._chat(
-                "cartographus",
-                "info",
-                "Placement checks: "
-                + str(len(placement_warnings))
-                + " note(s). "
-                + preview[0][:200]
-                + ("…" if len(preview[0]) > 200 else ""),
-            )
-
-        self.tasks._structures_since_save = 0
-
-        # Validate no overlapping tiles
-        all_tiles = {}
-        for struct in master_plan:
-            for t in struct.get("tiles", []):
-                key = (t["x"], t["y"])
-                if key in all_tiles:
-                    logger.warning(f"Tile overlap: {struct['name']} and {all_tiles[key]} at {key}")
-                all_tiles[key] = struct.get("name", "?")
-
-        # Filter out structures whose tiles are already occupied by prior districts
-        filtered_plan = []
-        for struct in master_plan:
-            dominated = True
-            for t in struct.get("tiles", []):
-                existing = self.world.get_tile(t.get("x", 0), t.get("y", 0))
-                if not existing or existing.terrain == "empty":
-                    dominated = False
-                    break
-            if not dominated:
-                filtered_plan.append(struct)
-            else:
-                logger.info("Skipping %s — all tiles already occupied by prior district", struct.get("name", "?"))
-        if filtered_plan != master_plan:
-            logger.info("Cross-district overlap: %d/%d structures remain after filtering", len(filtered_plan), len(master_plan))
-            master_plan = filtered_plan
-
-        logger.info(f"Master plan: {len(master_plan)} structures")
-        await self.broadcast({"type": "master_plan", "plan": master_plan})
-
-        scenario = self.scenario or {}
-        city_loc = scenario.get("location") or ""
-        district_scenery = self._district_scenery_summaries.get(survey_sid, "")
-        district_palette = self._district_palettes.get(survey_sid)
-        district_ref_year = district.get("year")
-        if district_ref_year is None:
-            district_ref_year = scenario.get("year_start", 0)
-
-        # Precompute city center and radius for height gradient hints
-        city_center, city_radius = self._compute_city_center_and_radius()
-        try:
-            district_ref_year_i = int(district_ref_year)
-        except (TypeError, ValueError):
-            district_ref_year_i = 0
-
-        # Precompute centers by index (duplicate building names would collide if keyed by name only)
-        n_plan = len(master_plan)
-        centers_list: list[tuple[float, float] | None] = [None] * n_plan
-        for idx, s in enumerate(master_plan):
-            stiles = s.get("tiles", [])
-            if stiles:
-                centers_list[idx] = (
-                    sum(t["x"] for t in stiles) / len(stiles),
-                    sum(t["y"] for t in stiles) / len(stiles),
-                )
-
-        # ─── Neighbor context per structure; physical brief from Cartographus survey only (no Historicus LLM) ───
-        structure_contexts: list[dict] = []
-        buildable = []
-        for struct_idx, structure in enumerate(master_plan):
-            name = structure.get("name", "Structure")
-            btype = structure.get("building_type", "building")
-            tiles = structure.get("tiles", [])
-            if not tiles:
-                continue
-            first_tile = tiles[0]
-            existing_tile = self.world.get_tile(first_tile["x"], first_tile["y"])
-            if existing_tile and existing_tile.terrain != "empty":
-                logger.info(f"Skipping {name} — already built")
-                await self._chat("cartographus", "info", f"Skipping {name} — already built.")
-                continue
-            buildable.append(structure)
-
-            my_center = centers_list[struct_idx]
-            if not my_center:
-                my_center = (0.0, 0.0)
-            neighbors = []
-            for other_idx, other in enumerate(master_plan):
-                if other_idx == struct_idx:
-                    continue
-                oc = centers_list[other_idx]
-                if not oc:
-                    continue
-                other_name = other.get("name", "")
-                dist_tiles = round(((my_center[0] - oc[0]) ** 2 + (my_center[1] - oc[1]) ** 2) ** 0.5, 1)
-                dist_meters = round(dist_tiles * 10)
-                neighbors.append({"name": other_name, "type": other.get("building_type"), "distance_tiles": dist_tiles, "distance_m": dist_meters})
-            neighbors.sort(key=lambda n: n["distance_tiles"])
-            nearest = neighbors[:5]
-            neighbor_desc = "\n".join(
-                f"  - {n['name']} ({n['type']}): {n['distance_tiles']} tiles away ({n['distance_m']}m)"
-                for n in nearest
-            )
-
-            structure_contexts.append({
-                "neighbor_desc": neighbor_desc,
-                "nearest": nearest,
-            })
-
-        # ─── Bounded-parallel Urbanista, then ordered placement ───
-        urban_jobs: list[dict] = []
-        for idx, structure in enumerate(buildable):
-            if not self.running:
-                return False
-
-            name = structure.get("name", "Structure")
-            btype = structure.get("building_type", "building")
-            tiles = structure.get("tiles", [])
-            desc = (structure.get("description") or "").strip()
-            hist_note = (structure.get("historical_note") or "").strip()
-            ctx = structure_contexts[idx]
-            neighbor_desc = ctx["neighbor_desc"]
-            nearest = ctx["nearest"]
-
-            await self._chat(
-                "cartographus",
-                "info",
-                (
-                    f"Scenery: {name} ({btype}, {len(tiles)} tiles). "
-                    if btype in OPEN_TERRAIN_TYPES
-                    else f"Building: {name} ({btype}, {len(tiles)} tiles). "
-                )
-                + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""),
-            )
-
-            hist_result = {
-                "commentary": desc or f"{name} ({btype}) in {district.get('name', 'this district')}.",
-                "historical_note": hist_note,
-            }
-            physical_desc = hist_result["commentary"]
-            hist_detail = hist_result.get("historical_note", "")
-            if hist_detail:
-                physical_desc += f"\n\nSurveyor detail: {hist_detail}"
-
-            xs = [t["x"] for t in tiles]
-            ys = [t["y"] for t in tiles]
-            tile_w = max(xs) - min(xs) + 1
-            tile_d = max(ys) - min(ys) + 1
-            footprint_w = round(tile_w * 0.9, 2)
-            footprint_d = round(tile_d * 0.9, 2)
-            anchor_x, anchor_y = min(xs), min(ys)
-
-            # Compute elevation from blueprint hills (authoritative) instead of AI-specified values
-            # which are on a different scale. This prevents buildings creating sinkholes in terrain.
-            if self.blueprint and self.blueprint.hills:
-                tile_elevations = [
-                    round(self.blueprint.elevation_at(t["x"], t["y"]), 2)
-                    for t in tiles
-                ]
-            else:
-                tile_elevations = [t.get("elevation", district.get("elevation", 0.0)) for t in tiles]
-            avg_elevation = round(sum(tile_elevations) / len(tile_elevations), 2) if tile_elevations else 0.0
-
-            env_note = (structure.get("environment_note") or "").strip()
-
-            if btype in OPEN_TERRAIN_TYPES:
-                # OPTIMIZATION: Generate terrain tiles procedurally (no Urbanista LLM call).
-                # Roads, forums, gardens, water, and grass use simple color + scenery spec.
-                terrain_result = _generate_terrain_procedurally(
-                    name=name, btype=btype, tiles=tiles,
-                    avg_elevation=avg_elevation,
-                    district_palette=district_palette,
-                    physical_desc=physical_desc,
-                )
-                placed_terrain = []
-                for td in terrain_result.get("tiles", []):
-                    x, y = td.get("x"), td.get("y")
-                    if x is not None and y is not None:
-                        # Use hill gaussian for elevation (authoritative)
-                        if self.blueprint and self.blueprint.hills:
-                            td["elevation"] = round(self.blueprint.elevation_at(x, y), 2)
-                        elif "elevation" not in td or td["elevation"] is None:
-                            td["elevation"] = district.get("elevation", 0.0)
-                        td["period"] = district.get("period", "")
-                        td["placed_by"] = "faber"
-                        td["historical_note"] = hist_note
-                        if self.world.place_tile(x, y, td):
-                            tile = self.world.get_tile(x, y)
-                            if tile:
-                                placed_terrain.append(tile.to_dict())
-                if placed_terrain:
-                    await self.broadcast({
-                        "type": "tile_update", "tiles": placed_terrain,
-                        "turn": self.world.turn,
-                        "period": district.get("period", ""),
-                        "year": district.get("year", ""),
-                    })
-                    logger.info("Placed %d terrain tiles for %s (no LLM call)", len(placed_terrain), name)
-                self.world.turn += 1
-                await self.tasks.persist_progress_after_structure()
-                continue  # Skip Urbanista pipeline for terrain
-                # NOTE: build_terrain_prompt path below is now unreachable but kept
-                # as documentation of the old approach.
-                prompt = build_terrain_prompt(
-                    name=name, btype=btype, tiles=tiles,
-                    anchor_x=anchor_x, anchor_y=anchor_y,
-                    tile_w=tile_w, tile_d=tile_d,
-                    footprint_w=footprint_w, footprint_d=footprint_d,
-                    avg_elevation=avg_elevation,
-                    city_loc=city_loc, period=scenario.get("period", ""),
-                    neighbor_desc=neighbor_desc,
-                    physical_desc=physical_desc,
-                    env_note=env_note,
-                    district_palette=district_palette,
-                )
-            else:
-                try:
-                    transition_hint = self._compute_transition_hint(anchor_x, anchor_y, district)
-                    prompt = build_building_prompt(
-                        name=name, btype=btype, tiles=tiles,
-                        anchor_x=anchor_x, anchor_y=anchor_y,
-                        tile_w=tile_w, tile_d=tile_d,
-                        footprint_w=footprint_w, footprint_d=footprint_d,
-                        avg_elevation=avg_elevation,
-                        city_loc=city_loc, period=scenario.get("period", ""),
-                        district_ref_year_i=district_ref_year_i,
-                        neighbor_desc=neighbor_desc,
-                        physical_desc=physical_desc,
-                        district_scenery=district_scenery,
-                        env_note=env_note,
-                        district_palette=district_palette,
-                        world_state=self.world,
-                        city_center=city_center,
-                        city_radius=city_radius,
-                        transition_hint=transition_hint,
-                    )
-                except ValueError as exc:
-                    await self._pause_for_api_issue("unknown", str(exc), "urbanista")
-                    return False
-
-            # ── Inject coherence context (~100-150 tokens) ──
-            context_parts = []
-            if self.blueprint:
-                ctx_line = self.blueprint.build_context_line(
-                    self.world, anchor_x, anchor_y, district_key,
-                )
-                if ctx_line:
-                    context_parts.append(ctx_line)
-            style_ctx = self.style_memory.format_style_context()
-            if style_ctx:
-                context_parts.append(style_ctx)
-            spatial_ctx = self.world_tools.format_context_block(anchor_x, anchor_y, btype)
-            if spatial_ctx:
-                context_parts.append(spatial_ctx)
-            if context_parts:
-                prompt = "\n".join(context_parts) + "\n" + prompt
-
-            urban_jobs.append({
-                "name": name,
-                "btype": btype,
-                "tiles": tiles,
-                "desc": desc,
-                "hist_note": hist_note,
-                "hist_result": hist_result,
-                "anchor_x": anchor_x,
-                "anchor_y": anchor_y,
-                "footprint_w": footprint_w,
-                "footprint_d": footprint_d,
-                "prompt": prompt,
-            })
-
-        # ─── Streaming Urbanista: place each structure as soon as its design completes ───
-        # Instead of waiting for all N structures, fire all tasks and place each result
-        # immediately as it arrives. Buildings appear on screen within seconds of each
-        # Urbanista call finishing, not after a 5-10 minute batch wait.
-        #
-        # OPTIMIZATION: Consecutive small/simple buildings (taberna, warehouse, insula,
-        # domus, market) are batched 2-3 into a single Urbanista call. This saves one
-        # system prompt worth of tokens per additional building in the batch.
-        skipped = 0
-        consecutive_failures = 0
-        max_consecutive_failures = 3
-        placed_count = 0
-
-        if urban_jobs:
-            await self._set_status(
-                "urbanista",
-                "thinking",
-                detail=f"Designing {len(urban_jobs)} structure(s) — each AI call may take minutes.",
-            )
-
-            # ── Group consecutive batchable jobs ──
-            work_units: list[dict] = []  # {"type": "single"|"batch", "indices": [int]}
-            i = 0
-            while i < len(urban_jobs):
-                job = urban_jobs[i]
-                job_tiles = len(job["tiles"])
-                if (
-                    job["btype"] in BATCHABLE_TYPES
-                    and job_tiles <= 4  # small footprint
-                ):
-                    batch_indices = [i]
-                    batch_tiles = job_tiles
-                    j = i + 1
-                    while (
-                        j < len(urban_jobs)
-                        and len(batch_indices) < MAX_BATCH_SIZE
-                        and batch_tiles + len(urban_jobs[j]["tiles"]) <= MAX_BATCH_TILES
-                        and urban_jobs[j]["btype"] in BATCHABLE_TYPES
-                        and len(urban_jobs[j]["tiles"]) <= 4
-                    ):
-                        batch_indices.append(j)
-                        batch_tiles += len(urban_jobs[j]["tiles"])
-                        j += 1
-                    if len(batch_indices) >= 2:
-                        work_units.append({"type": "batch", "indices": batch_indices})
-                        i = j
-                        continue
-                work_units.append({"type": "single", "indices": [i]})
-                i += 1
-
-            batch_count = sum(1 for wu in work_units if wu["type"] == "batch")
-            batched_buildings = sum(len(wu["indices"]) for wu in work_units if wu["type"] == "batch")
-            await self._chat(
-                "urbanista",
-                "info",
-                f"Designing {len(urban_jobs)} structures (max {URBANISTA_MAX_CONCURRENT} concurrent)"
-                + (f" — {batched_buildings} batched into {batch_count} calls" if batch_count else "")
-                + " — placing as each completes...",
-            )
-
-            # Wrap each work unit to carry its index
-            async def _design_work_unit(wu_idx: int, work_unit: dict) -> tuple[int, list[tuple[int, dict | BaseException]]]:
-                """Returns (wu_idx, [(job_idx, result_or_error), ...])."""
-                indices = work_unit["indices"]
-                if work_unit["type"] == "batch" and len(indices) >= 2:
-                    return await self._execute_batch_urbanista(wu_idx, work_unit, urban_jobs)
-                else:
-                    job_idx = indices[0]
-                    try:
-                        result = await self.generators.urbanista_generate_bounded(urban_jobs[job_idx]["prompt"])
-                        return (wu_idx, [(job_idx, result)])
-                    except BaseException as err:
-                        return (wu_idx, [(job_idx, err)])
-
-            pending = [
-                asyncio.create_task(_design_work_unit(wu_i, wu))
-                for wu_i, wu in enumerate(work_units)
-            ]
-
-            try:
-              for coro in asyncio.as_completed(pending):
-                if not self.running:
-                    break
-
-                wu_idx, job_results = await coro
-
-                for idx, arch_result in job_results:
-                    if not self.running:
-                        break
-
-                    job = urban_jobs[idx]
-                    name = job["name"]
-                    placed_count += 1
-                    logger.info(
-                        "Streaming result %d/%d: %s — type=%s keys=%s",
-                        placed_count, len(urban_jobs), name,
-                        type(arch_result).__name__,
-                        sorted(arch_result.keys()) if isinstance(arch_result, dict) else "N/A",
-                    )
-
-                    # --- Per-structure error recovery: skip failures, pause only if excessive ---
-                    if isinstance(arch_result, AgentGenerationError):
-                        consecutive_failures += 1
-                        skipped += 1
-                        logger.warning(
-                            "Urbanista failed for %s (%s): %s — skipping",
-                            name, arch_result.pause_reason, (arch_result.pause_detail or "")[:200],
-                        )
-                        await self._chat("urbanista", "info", f"Skipped {name} — design failed ({arch_result.pause_reason}). Continuing.")
-                        # Broadcast skipped building so the client knows
-                        await self.broadcast({
-                            "type": "building_skipped",
-                            "name": name,
-                            "building_type": job["btype"],
-                            "reason": arch_result.pause_reason,
-                            "detail": (arch_result.pause_detail or "")[:400],
-                            "tiles": [{"x": t["x"], "y": t["y"]} for t in job["tiles"]],
-                            "district": district_key,
-                            "skipped_count": skipped,
-                        })
-                        if consecutive_failures >= max_consecutive_failures:
-                            for t in pending:
-                                if not t.done():
-                                    t.cancel()
-                            await self._pause_for_api_issue(
-                                arch_result.pause_reason,
-                                f"{max_consecutive_failures} consecutive failures — last: {arch_result.pause_detail or ''}",
-                                "urbanista",
-                            )
-                            return False
-                        continue
-                    if isinstance(arch_result, BaseException):
-                        for t in pending:
-                            if not t.done():
-                                t.cancel()
-                        raise arch_result
-                    consecutive_failures = 0
-
-                    tiles = job["tiles"]
-                    hist_note = job["hist_note"]
-                    hist_result = job["hist_result"]
-                    anchor_x = job["anchor_x"]
-                    anchor_y = job["anchor_y"]
-
-                    try:
-                        arch_result = sanitize_urbanista_output(arch_result)
-                        validate_urbanista_arch_result(arch_result)
-                    except UrbanistaValidationError as err:
-                        skipped += 1
-                        logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
-                        await self._chat("urbanista", "info", f"Skipped {name} — validation error. Continuing.")
-                        continue
-
-                    # ── Geometry collision check — detect and fix overlapping components ──
-                    anchor_tile = None
-                    for td in arch_result.get("tiles", []):
-                        if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
-                            anchor_tile = td
-                            break
-                    if anchor_tile and job["btype"] not in OPEN_TERRAIN_TYPES:
-                        fp_w = round((max(t["x"] for t in tiles) - min(t["x"] for t in tiles) + 1) * 0.9, 2)
-                        fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * 0.9, 2)
-                        collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
-                        if collisions:
-                            collision_report = "\n".join(collisions[:6])
-                            logger.warning("Geometry collisions for %s: %d issues", name, len(collisions))
-                            await self._chat("urbanista", "info",
-                                f"Geometry issues in {name}: {len(collisions)} collision(s). Requesting fix...")
-                            fix_prompt = (
-                                f"GEOMETRY FIX for {name} ({fp_w}x{fp_d} footprint):\n"
-                                f"{collision_report}\n\n"
-                                f"RULES:\n"
-                                f"- foundation (podium) is the base — structural sits ABOVE it\n"
-                                f"- Do NOT put colonnade + walls + block all as structural — they overlap!\n"
-                                f"- colonnade wraps the EXTERIOR; walls/cella are INSIDE (use infill role)\n"
-                                f"- Roof sits above the highest structural component\n"
-                                f"- decorative (doors, pilasters) go on the facade, NOT filling the volume\n\n"
-                                f"Return the CORRECTED JSON. Same format, same design, fixed geometry."
-                            )
-                            try:
-                                fixed = await asyncio.wait_for(
-                                    self.urbanista.generate(fix_prompt),
-                                    timeout=300,
-                                )
-                                fixed = sanitize_urbanista_output(fixed)
-                                validate_urbanista_arch_result(fixed)
-                                fixed_anchor = None
-                                for td in fixed.get("tiles", []):
-                                    if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):
-                                        fixed_anchor = td
-                                        break
-                                if fixed_anchor:
-                                    new_collisions = check_component_collisions(fixed_anchor["spec"], fp_w, fp_d)
-                                    if len(new_collisions) < len(collisions):
-                                        arch_result = fixed
-                                        logger.info("Geometry fix for %s: %d->%d collisions", name, len(collisions), len(new_collisions))
-                                        await self._chat("urbanista", "info",
-                                            f"Fixed {name}: {len(collisions)}->{len(new_collisions)} collision(s)")
-                                    else:
-                                        logger.info("Geometry fix for %s did not improve (%d->%d) — using original", name, len(collisions), len(new_collisions))
-                                else:
-                                    arch_result = fixed
-                            except asyncio.TimeoutError:
-                                logger.warning("Geometry fix for %s timed out (5min) — using original", name)
-                            except Exception as fix_err:
-                                logger.warning("Geometry fix failed for %s: %s — using original", name, fix_err)
-
-                    await self._set_status("urbanista", "speaking", detail="Sharing design commentary.")
-                    commentary = arch_result.get("commentary", "Design ready.")
-                    if len(commentary) > 400:
-                        commentary = commentary[:397] + "..."
-                    await self._chat("urbanista", "design", commentary)
-                    await self._set_status(
-                        "urbanista",
-                        "thinking" if placed_count < len(urban_jobs) else "idle",
-                        detail=(
-                            f"Progress {placed_count}/{len(urban_jobs)} — {name} placed; continuing…"
-                            if placed_count < len(urban_jobs)
-                            else None
-                        ),
-                    )
-
-                    # Place tiles
-                    final_tiles = validate_urbanista_tiles(arch_result.get("tiles", []))
-                    if not final_tiles:
-                        skipped += 1
-                        logger.warning("Urbanista returned no in-bounds tiles for %s — skipping", name)
-                        await self._chat("urbanista", "info", f"Skipped {name} — no valid tiles. Continuing.")
-                        continue
-
-                    # Auto-fill secondary tiles
-                    survey_coords = {(t["x"], t["y"]) for t in tiles}
-                    returned_coords = {(td.get("x"), td.get("y")) for td in final_tiles}
-                    missing_coords = survey_coords - returned_coords
-                    if missing_coords and len(final_tiles) >= 1:
-                        template_td = final_tiles[0]
-                        for td in final_tiles:
-                            if td.get("x") == anchor_x and td.get("y") == anchor_y:
-                                template_td = td
-                                break
-                        is_terrain = job["btype"] in OPEN_TERRAIN_TYPES
-                        for (mx, my) in missing_coords:
-                            if is_terrain:
-                                fill_elev = (
-                                    round(self.blueprint.elevation_at(mx, my), 2)
-                                    if self.blueprint and self.blueprint.hills
-                                    else avg_elevation
-                                )
-                                sec_tile = {
-                                    "x": mx, "y": my,
-                                    "terrain": job["btype"],
-                                    "building_name": template_td.get("building_name", name),
-                                    "building_type": job["btype"],
-                                    "description": f"Part of {name}",
-                                    "elevation": fill_elev,
-                                }
-                                t_spec = template_td.get("spec")
-                                if t_spec and isinstance(t_spec, dict):
-                                    sec_tile["spec"] = {k: v for k, v in t_spec.items() if k != "anchor"}
-                                if template_td.get("color"):
-                                    sec_tile["color"] = template_td["color"]
-                            else:
-                                sec_tile = {
-                                    "x": mx, "y": my,
-                                    "terrain": "building",
-                                    "building_name": template_td.get("building_name", name),
-                                    "building_type": template_td.get("building_type", job["btype"]),
-                                    "description": f"Part of {name}",
-                                    "elevation": avg_elevation,
-                                    "spec": {"anchor": {"x": anchor_x, "y": anchor_y}},
-                                }
-                            final_tiles.append(sec_tile)
-                        logger.info("Auto-filled %d secondary tiles for %s (%s)", len(missing_coords), name, job["btype"])
-
-                    # Inject anchors for multi-tile buildings
-                    if len(tiles) > 1 and job["btype"] not in OPEN_TERRAIN_TYPES:
-                        for td in final_tiles:
-                            if not td.get("spec"):
-                                td["spec"] = {}
-                            if not td["spec"].get("anchor"):
-                                td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
-
-                    # Nest grammar data into spec
-                    for td in final_tiles:
-                        g = td.pop("grammar", None)
-                        gp = td.pop("grammar_params", None)
-                        if g:
-                            if not td.get("spec"):
-                                td["spec"] = {}
-                            td["spec"]["grammar"] = g
-                            if gp:
-                                td["spec"]["params"] = gp
-
-                    placed = []
-                    district_elev = district.get("elevation", 0.0)
-                    for td in final_tiles:
-                        x, y = td.get("x"), td.get("y")
-                        if x is not None and y is not None:
-                            if self.blueprint and self.blueprint.hills:
-                                td["elevation"] = round(self.blueprint.elevation_at(int(x), int(y)), 3)
-                            elif "elevation" not in td or td["elevation"] is None:
-                                td["elevation"] = district_elev
-                            td["period"] = district.get("period", "")
-                            td["placed_by"] = "faber"
-                            td["historical_note"] = hist_result.get("historical_note", hist_note)
-                            if self.world.place_tile(x, y, td):
-                                tile = self.world.get_tile(x, y)
-                                if tile:
-                                    placed.append(tile.to_dict())
-
-                    # Record design in style memory
-                    for td_placed in placed:
-                        if td_placed.get("spec"):
-                            self.style_memory.record_design(td_placed.get("spec", {}))
-
-                    logger.info("Placing %d tiles for %s", len(placed), name)
-                    if placed:
-                        await self.broadcast({
-                            "type": "tile_update", "tiles": placed,
-                            "turn": self.world.turn,
-                            "period": district.get("period", ""),
-                            "year": district.get("year", ""),
-                        })
-                        await self.broadcast({
-                            "type": "build_progress",
-                            "structure": name,
-                            "building_type": job["btype"],
-                            "done": placed_count,
-                            "total": len(urban_jobs),
-                            "district": district_key,
-                        })
-
-                    self.world.turn += 1
-                    await self.tasks.persist_progress_after_structure()
-                    await asyncio.sleep(0.05)  # Brief yield for UI rendering
-
-            finally:
-                # Cancel any still-running tasks (pause, error, or normal completion)
-                for t in pending:
-                    if not t.done():
-                        t.cancel()
-                # Await cancellation to prevent "task was destroyed" warnings
-                for t in pending:
-                    if t.cancelled() or t.done():
-                        continue
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
-
-            if not self.running:
-                return False
-            await self._set_status("urbanista", "idle")
-
-        if self.tasks._structures_since_save > 0:
-            await self._save_state_thread(flush_mode="incremental")
-            self.tasks._structures_since_save = 0
-
-        if skipped:
-            logger.warning("District %s: %d/%d structures skipped due to errors", district_key, skipped, len(urban_jobs))
-            await self._chat(
-                "urbanista", "info",
-                f"District complete — {len(urban_jobs) - skipped} placed, {skipped} skipped due to errors.",
-            )
-
-        return True
+        return await run_district_build(self, district, master_plan)
 
     async def _execute_batch_urbanista(
         self,
@@ -1498,76 +658,8 @@ class BuildEngine:
         work_unit: dict,
         urban_jobs: list[dict],
     ) -> tuple[int, list[tuple[int, dict | BaseException]]]:
-        """Execute a batched Urbanista call for 2-3 small buildings.
-
-        Constructs a combined prompt, calls generate_batch(), and splits
-        the results back to individual jobs. On batch failure, falls back
-        to individual calls so no buildings are lost.
-        """
-        indices = work_unit["indices"]
-        jobs = [urban_jobs[i] for i in indices]
-        names = [j["name"] for j in jobs]
-
-        logger.info("Batch Urbanista: %d buildings [%s]", len(indices), ", ".join(names))
-
-        # Build combined prompt
-        batch_prompt_parts = [
-            f"Design these {len(jobs)} buildings. Return a JSON array with one object per building.\n"
-            f"Each object should have the same format as a single-building response "
-            f"(tiles[], commentary, reference).\n\n"
-        ]
-        for bi, job in enumerate(jobs):
-            batch_prompt_parts.append(f"--- BUILDING {bi + 1}: {job['name']} ---\n{job['prompt']}\n")
-
-        batch_prompt = "\n".join(batch_prompt_parts)
-
-        try:
-            async with self.generators._urbanista_semaphore:
-                results = await self.urbanista.generate_batch(batch_prompt, len(jobs))
-        except AgentGenerationError as err:
-            logger.warning(
-                "Batch Urbanista failed (%s): %s — falling back to individual",
-                err.pause_reason,
-                (err.pause_detail or "")[:200],
-            )
-            results = []
-        except Exception as e:
-            logger.warning("Batch Urbanista call failed: %s — falling back to individual", e)
-            results = []
-
-        # If batch returned correct count, map results to jobs
-        if len(results) >= len(jobs):
-            logger.info("Batch Urbanista success: got %d results for %d jobs", len(results), len(jobs))
-            return (wu_idx, [(indices[i], results[i]) for i in range(len(jobs))])
-
-        if results:
-            # Partial results — use what we got, fall back for the rest
-            logger.warning(
-                "Batch Urbanista partial: got %d results for %d jobs — using partial + fallback",
-                len(results), len(jobs),
-            )
-            out: list[tuple[int, dict | BaseException]] = []
-            for i in range(len(results)):
-                out.append((indices[i], results[i]))
-            for i in range(len(results), len(jobs)):
-                try:
-                    async with self.generators._urbanista_semaphore:
-                        r = await self.urbanista.generate(urban_jobs[indices[i]]["prompt"])
-                    out.append((indices[i], r))
-                except BaseException as err:
-                    out.append((indices[i], err))
-            return (wu_idx, out)
-
-        # Full batch failure — fall back to individual calls
-        logger.warning("Batch Urbanista empty — falling back to %d individual calls", len(jobs))
-        out = []
-        for i, job_idx in enumerate(indices):
-            try:
-                r = await self.generators.urbanista_generate_bounded(urban_jobs[job_idx]["prompt"])
-                out.append((job_idx, r))
-            except BaseException as err:
-                out.append((job_idx, err))
-        return (wu_idx, out)
+        """Execute a batched Urbanista call for 2-3 small buildings."""
+        return await execute_batch_urbanista(self, wu_idx, work_unit, urban_jobs)
 
     async def _chat(self, sender, msg_type, content, approved=None):
         msg = BusMessage(sender=sender, msg_type=msg_type, content=content, turn=self.world.turn)

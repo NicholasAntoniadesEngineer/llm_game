@@ -11,58 +11,20 @@ import json
 import logging
 import re
 import time
+from typing import TYPE_CHECKING
 
 from agents import llm_routing as llm_agents
+
+if TYPE_CHECKING:
+    from core.config import Config
 from agents.memory import ConversationMemory, KnowledgeBase
 from agents.providers import LlmProvider, build_provider_from_spec
+from agents.ui_notifier import UiNotifier
 from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text, get_token_summary
 from core.run_log import log_event
 from core.errors import AgentGenerationError, classify_agent_failure
 
 logger = logging.getLogger("eternal.agents")
-
-_ui_broadcast = None
-
-
-def set_ui_broadcast(fn):
-    """Inject async broadcast callable (same signature as ``server.state.broadcast_fn``)."""
-    global _ui_broadcast
-    _ui_broadcast = fn
-
-
-def _resolve_ui_broadcast():
-    if _ui_broadcast is not None:
-        return _ui_broadcast
-    from server.state import broadcast_fn
-    return broadcast_fn
-
-
-def _broadcast_prompt_event(msg: dict):
-    """Fire-and-forget broadcast of prompt/response data to WebSocket clients."""
-    try:
-        fn = _resolve_ui_broadcast()
-        if not fn:
-            return
-        loop = asyncio.get_running_loop()
-        loop.create_task(fn(msg))
-    except (RuntimeError, Exception):
-        pass  # Never let UI broadcasting break agent calls
-
-
-def _broadcast_agent_activity(agent_role: str, detail: str):
-    """Short-lived activity line while the LLM HTTP call is in flight (no timer reset)."""
-    try:
-        fn = _resolve_ui_broadcast()
-        if not fn or not detail:
-            return
-        loop = asyncio.get_running_loop()
-        loop.create_task(fn({
-            "type": "agent_activity",
-            "agent": agent_role,
-            "detail": str(detail).strip()[:280],
-        }))
-    except (RuntimeError, Exception):
-        pass
 
 
 def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
@@ -147,8 +109,13 @@ class BaseAgent:
         system_prompt: str,
         *,
         llm_agent_key: str,
+        system_configuration: "Config",
+        ui_notifier: UiNotifier,
         provider: LlmProvider | None = None,
     ):
+        self.system_configuration = system_configuration
+        self._ui_notifier = ui_notifier
+        self._agent_failure_detail_max_chars = system_configuration.agent_failure_detail_max_chars
         self.role = role
         self.display_name = display_name
         self.system_prompt = system_prompt + (
@@ -165,6 +132,20 @@ class BaseAgent:
         self.memory = ConversationMemory(max_entries=10)
         self.knowledge = KnowledgeBase()
         self._turn_counter = 0
+
+    def _schedule_agent_activity(self, detail: str) -> None:
+        if not detail:
+            return
+        self._ui_notifier.schedule_message(
+            {
+                "type": "agent_activity",
+                "agent": self.role,
+                "detail": str(detail).strip()[:280],
+            }
+        )
+
+    def _schedule_prompt_event(self, msg: dict) -> None:
+        self._ui_notifier.schedule_message(msg)
 
     async def generate(self, instruction: str) -> dict:
         """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure.
@@ -212,7 +193,7 @@ class BaseAgent:
             provider = (
                 self._provider_override
                 if self._provider_override is not None
-                else build_provider_from_spec(spec)
+                else build_provider_from_spec(spec, self.system_configuration)
             )
 
             sys_tokens_est = estimate_tokens_from_text(self.system_prompt)
@@ -226,8 +207,7 @@ class BaseAgent:
                 sys_tokens_est + inst_tokens_est,
             )
 
-            _broadcast_agent_activity(
-                self.role,
+            self._schedule_agent_activity(
                 f"Batch request ({provider_kind}, {model}) ×{count} — waiting for API…",
             )
             _t0 = time.monotonic()
@@ -307,7 +287,11 @@ class BaseAgent:
         except AgentGenerationError:
             raise
         except Exception as e:
-            pr, pd = classify_agent_failure("", e)
+            pr, pd = classify_agent_failure(
+                "",
+                e,
+                agent_failure_detail_max_chars=self._agent_failure_detail_max_chars,
+            )
             raise AgentGenerationError(pr, pd)
 
     def _prepend_memory_context(self, instruction: str) -> str:
@@ -341,7 +325,7 @@ class BaseAgent:
             provider = (
                 self._provider_override
                 if self._provider_override is not None
-                else build_provider_from_spec(spec)
+                else build_provider_from_spec(spec, self.system_configuration)
             )
             inst_preview = _safe_preview_for_logs(instruction, 600)
             # Prompt size logging in estimated tokens (helps identify wastefully large prompts)
@@ -364,17 +348,18 @@ class BaseAgent:
             )
             logger.info("LLM query instruction preview [%s]:\n%s", self.role, inst_preview)
             # Broadcast prompt to UI
-            _broadcast_prompt_event({
-                "type": "agent_prompt",
-                "agent": self.role,
-                "agent_key": self.llm_agent_key,
-                "model": model,
-                "system_prompt_len": len(self.system_prompt),
-                "instruction": instruction[:2000],
-                "timestamp": time.time(),
-            })
-            _broadcast_agent_activity(
-                self.role,
+            self._schedule_prompt_event(
+                {
+                    "type": "agent_prompt",
+                    "agent": self.role,
+                    "agent_key": self.llm_agent_key,
+                    "model": model,
+                    "system_prompt_len": len(self.system_prompt),
+                    "instruction": instruction[:2000],
+                    "timestamp": time.time(),
+                }
+            )
+            self._schedule_agent_activity(
                 f"Waiting for {provider_kind} ({model}) — large prompts can take several minutes.",
             )
             _t0 = time.monotonic()
@@ -434,27 +419,37 @@ class BaseAgent:
             )
             logger.info(f"[{self.role}] parsed: {list(result.keys())}")
             # Broadcast response to UI
-            _broadcast_prompt_event({
-                "type": "agent_response",
-                "agent": self.role,
-                "agent_key": self.llm_agent_key,
-                "response_preview": raw[:2000],
-                "parse_success": True,
-                "elapsed_ms": _elapsed_ms,
-                "tokens": total_tokens,
-                "timestamp": time.time(),
-            })
+            self._schedule_prompt_event(
+                {
+                    "type": "agent_response",
+                    "agent": self.role,
+                    "agent_key": self.llm_agent_key,
+                    "response_preview": raw[:2000],
+                    "parse_success": True,
+                    "elapsed_ms": _elapsed_ms,
+                    "tokens": total_tokens,
+                    "timestamp": time.time(),
+                }
+            )
             return result
 
         except AgentGenerationError:
             raise
         except FileNotFoundError as e:
             logger.error("LLM backend executable not found. Is it installed and on PATH?")
-            pr, pd = classify_agent_failure("", e)
+            pr, pd = classify_agent_failure(
+                "",
+                e,
+                agent_failure_detail_max_chars=self._agent_failure_detail_max_chars,
+            )
             raise AgentGenerationError(pr, pd) from e
         except Exception as e:
             logger.error(f"[{self.role}] unexpected error: {e}")
-            pr, pd = classify_agent_failure("", e)
+            pr, pd = classify_agent_failure(
+                "",
+                e,
+                agent_failure_detail_max_chars=self._agent_failure_detail_max_chars,
+            )
             raise AgentGenerationError(pr, pd) from e
 
     def _parse_json(self, raw: str, *, model: str, provider_kind: str) -> dict:
@@ -514,15 +509,13 @@ class BaseAgent:
 
     async def _broadcast_token_usage(self) -> None:
         try:
-            fn = _resolve_ui_broadcast()
-            if fn is not None:
-                await fn(
-                    {
-                        "type": "token_usage",
-                        "by_ui_agent": aggregate_for_ui(),
-                        "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
-                        "summary": get_token_summary(),
-                    }
-                )
+            await self._ui_notifier.send_message(
+                {
+                    "type": "token_usage",
+                    "by_ui_agent": aggregate_for_ui(),
+                    "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
+                    "summary": get_token_summary(),
+                }
+            )
         except Exception:
             pass

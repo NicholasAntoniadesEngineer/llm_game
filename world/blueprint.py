@@ -6,11 +6,14 @@ Provides compact context strings for injection into Urbanista prompts.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, List
+
+from core.config import Config
+from core.terrain_system import terrain_analyzer
+from world.roads import compute_elevation, smooth_elevation_max_gradient
 
 if TYPE_CHECKING:
     from world.state import WorldState
@@ -49,29 +52,29 @@ class CityBlueprint:
 
     def elevation_at(self, x: int, y: int) -> float:
         """Authoritative elevation at a tile; prefers smoothed ``elevation_map`` when present."""
-        from world.roads import compute_elevation
-
         if (x, y) in self.elevation_map:
             return float(self.elevation_map[(x, y)])
         if not self.hills:
             return 0.0
         return float(compute_elevation(self.hills, x, y))
 
-    def _recompute_smoothed_elevation_for_world(self, world: WorldState) -> dict[tuple[int, int], float]:
+    def _recompute_smoothed_elevation_for_world(
+        self,
+        world: "WorldState",
+        *,
+        system_configuration: Config,
+    ) -> dict[tuple[int, int], float]:
         """Rebuild ``elevation_map`` and return smoothed elevations for placed tiles.
 
         Uses a dirty-chunk + halo subset when the world is large and ``_dirty_chunks`` is
         non-empty; otherwise recomputes all occupied tiles (full pass).
         """
-        from world.roads import compute_elevation, smooth_elevation_max_gradient
-        from core.config import TERRAIN_GRADIENT_ITERATIONS, TERRAIN_MAX_GRADIENT
-
         if not self.hills:
             return {}
 
         tile_keys = set(world.tiles.keys())
         dirty = getattr(world, "_dirty_chunks", None) or set()
-        incremental_threshold = 4000
+        incremental_threshold = system_configuration.blueprint_incremental_tile_threshold
         use_full = (not dirty) or (len(tile_keys) < incremental_threshold)
 
         if use_full:
@@ -85,7 +88,7 @@ class CityBlueprint:
                 raw_coords = tile_keys
             else:
                 expanded = set(inner)
-                for _ in range(4):
+                for _ in range(system_configuration.blueprint_halo_expand_iterations):
                     nxt = set(expanded)
                     for tx, ty in expanded:
                         for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -99,22 +102,25 @@ class CityBlueprint:
         for (x, y) in raw_coords:
             raw[(x, y)] = float(compute_elevation(self.hills, x, y))
 
-        smoothed = smooth_elevation_max_gradient(raw, TERRAIN_MAX_GRADIENT, TERRAIN_GRADIENT_ITERATIONS)
+        smoothed = smooth_elevation_max_gradient(
+            raw,
+            system_configuration.terrain.maximum_gradient_value,
+            system_configuration.terrain.gradient_iterations_count,
+        )
         if use_full:
             self.elevation_map.clear()
         for k, v in smoothed.items():
             self.elevation_map[k] = v
         return smoothed
 
-    def populate_elevation(self, world: WorldState) -> int:
+    def populate_elevation(self, world: WorldState, *, system_configuration: Config) -> int:
         """Set tile elevation from hills (Gaussian), then bound slope between neighbors.
 
         Returns number of tiles updated.
         """
-        from core.config import TERRAIN_GRADIENT_ITERATIONS, TERRAIN_MAX_GRADIENT
-        from core.terrain_system import terrain_analyzer
-
-        smoothed = self._recompute_smoothed_elevation_for_world(world)
+        smoothed = self._recompute_smoothed_elevation_for_world(
+            world, system_configuration=system_configuration
+        )
         if not smoothed:
             return 0
 
@@ -158,8 +164,8 @@ class CityBlueprint:
 
         logger.info(
             "Elevation populated (max_gradient=%s, iterations=%s): %d tiles, %d hills",
-            TERRAIN_MAX_GRADIENT,
-            TERRAIN_GRADIENT_ITERATIONS,
+            system_configuration.terrain.maximum_gradient_value,
+            system_configuration.terrain.gradient_iterations_count,
             updated,
             len(self.hills),
         )
@@ -180,12 +186,14 @@ class CityBlueprint:
                     neighbors.append(float(self.elevation_at(nx, ny)))
         return neighbors
 
-    def apply_elevation_to_world(self, world: WorldState) -> int:
+    def apply_elevation_to_world(self, world: WorldState, *, system_configuration: Config) -> int:
         """Recompute smoothed elevations for every placed tile (e.g. after expansion).
 
         Returns number of tiles updated.
         """
-        smoothed = self._recompute_smoothed_elevation_for_world(world)
+        smoothed = self._recompute_smoothed_elevation_for_world(
+            world, system_configuration=system_configuration
+        )
         if not smoothed:
             return 0
 
@@ -312,7 +320,7 @@ class CityBlueprint:
             return ""
         return "FACE:" + ",".join(f"{k}={v}" for k, v in facings.items())
 
-    def get_adaptive_foundation(self, building_type: str, x: int, y: int, world: WorldState) -> Dict[str, Any]:
+    def get_adaptive_foundation(self, building_type: str, x: int, y: int, world: WorldState) -> dict[str, Any]:
         """Generate adaptive foundation based on terrain, climate, and building type.
 
         Returns foundation specification with height, material, and adaptations.
@@ -451,7 +459,9 @@ class CityBlueprint:
         else:
             return "temperate"  # Default
 
-    def apply_terrain_modifications(self, building_spec: Dict[str, Any], x: int, y: int, world: WorldState) -> Dict[str, Any]:
+    def apply_terrain_modifications(
+        self, building_spec: dict[str, Any], x: int, y: int, world: WorldState
+    ) -> dict[str, Any]:
         """Apply terrain-based modifications to building specifications."""
         modified_spec = building_spec.copy()
 

@@ -7,7 +7,7 @@ to ensure data integrity and provide helpful error messages.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 
 try:
     import jsonschema
@@ -19,11 +19,11 @@ except ImportError:
     SchemaError = Exception
 
 from core.errors import EternalCitiesError
-from .constants import (
-    MAX_SOCIETY_FILE_SIZE,
-    SOCIETY_FILE_EXTENSION,
+
+if TYPE_CHECKING:
+    from core.config import Config
+from core.society_schema_reference import (
     HISTORICAL_PERIODS,
-    CULTURAL_COMPLEXITY,
     COLUMN_ORDERS,
 )
 
@@ -157,7 +157,7 @@ class SocietyValidator:
         self.schema = SOCIETY_SCHEMA
         self._compiled_schema = None
 
-    def validate_file(self, file_path: Path) -> Tuple[bool, List[str]]:
+    def validate_file(self, file_path: Path, *, system_configuration: "Config") -> Tuple[bool, List[str]]:
         """Validate a single society file.
 
         Returns:
@@ -170,14 +170,14 @@ class SocietyValidator:
             errors.append(f"File does not exist: {file_path}")
             return False, errors
 
-        # Check file extension (Path.suffix is only the last segment, e.g. ".json" for "x.society.json")
-        if not file_path.name.endswith(SOCIETY_FILE_EXTENSION):
-            errors.append(f"Invalid file extension. Expected *{SOCIETY_FILE_EXTENSION}, got {file_path.name!r}")
+        society_suffix = system_configuration.society_file_extension_suffix
+        if not file_path.name.endswith(society_suffix):
+            errors.append(f"Invalid file extension. Expected *{society_suffix}, got {file_path.name!r}")
 
-        # Check file size
         file_size = file_path.stat().st_size
-        if file_size > MAX_SOCIETY_FILE_SIZE:
-            errors.append(f"File too large: {file_size} bytes (max {MAX_SOCIETY_FILE_SIZE})")
+        max_society_bytes = system_configuration.maximum_society_file_size_bytes
+        if file_size > max_society_bytes:
+            errors.append(f"File too large: {file_size} bytes (max {max_society_bytes})")
             return False, errors
 
         # Load and parse JSON
@@ -201,7 +201,7 @@ class SocietyValidator:
 
         return len(errors) == 0, errors
 
-    def validate_all_societies(self, societies_dir: Path) -> Dict[str, List[str]]:
+    def validate_all_societies(self, societies_dir: Path, *, system_configuration: "Config") -> Dict[str, List[str]]:
         """Validate all society files in a directory.
 
         Returns:
@@ -212,7 +212,8 @@ class SocietyValidator:
         if not societies_dir.exists():
             raise SocietyValidationError(f"Societies directory does not exist: {societies_dir}")
 
-        society_files = list(societies_dir.glob(f"*{SOCIETY_FILE_EXTENSION}"))
+        society_suffix = system_configuration.society_file_extension_suffix
+        society_files = list(societies_dir.glob(f"*{society_suffix}"))
 
         if not society_files:
             logger.warning(f"No society files found in {societies_dir}")
@@ -220,7 +221,7 @@ class SocietyValidator:
 
         for file_path in society_files:
             society_name = file_path.stem.replace('.society', '')
-            is_valid, errors = self.validate_file(file_path)
+            is_valid, errors = self.validate_file(file_path, system_configuration=system_configuration)
 
             if not is_valid:
                 results[society_name] = errors
@@ -352,9 +353,9 @@ class SocietyValidator:
 society_validator = SocietyValidator()
 
 
-def validate_society_file(file_path: Path) -> None:
+def validate_society_file(file_path: Path, *, system_configuration: "Config") -> None:
     """Validate a single society file and raise exception on failure."""
-    is_valid, errors = society_validator.validate_file(file_path)
+    is_valid, errors = society_validator.validate_file(file_path, system_configuration=system_configuration)
     if not is_valid:
         raise SocietyValidationError(
             f"Validation failed for {file_path.name}",
@@ -363,6 +364,6 @@ def validate_society_file(file_path: Path) -> None:
         )
 
 
-def validate_all_societies(societies_dir: Path) -> Dict[str, List[str]]:
+def validate_all_societies(societies_dir: Path, *, system_configuration: "Config") -> Dict[str, List[str]]:
     """Validate all society files in directory."""
-    return society_validator.validate_all_societies(societies_dir)
+    return society_validator.validate_all_societies(societies_dir, system_configuration=system_configuration)

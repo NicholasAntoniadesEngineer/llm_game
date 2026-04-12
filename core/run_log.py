@@ -12,10 +12,7 @@ import time
 from collections import deque
 from typing import Any
 
-# Max lines kept in memory (oldest dropped when exceeded).
-MAX_LOG_LINES = 10_000
-
-_LOG_BUFFER: deque[str] = deque(maxlen=MAX_LOG_LINES)
+_LOG_BUFFER: deque[str] | None = None
 _RUN_START: float | None = None
 
 
@@ -29,7 +26,8 @@ class RunLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            _LOG_BUFFER.append(msg)
+            if _LOG_BUFFER is not None:
+                _LOG_BUFFER.append(msg)
         except Exception:
             pass
 
@@ -38,12 +36,13 @@ class RunLogHandler(logging.Handler):
 _handler: RunLogHandler | None = None
 
 
-def init_run_log() -> None:
+def init_run_log(*, run_log_buffer_max_lines: int, log_level_string: str) -> None:
     """Attach the RunLogHandler to the root logger. Call once at startup."""
-    global _handler, _RUN_START
+    global _handler, _RUN_START, _LOG_BUFFER
     if _handler is not None:
         return
     _RUN_START = time.time()
+    _LOG_BUFFER = deque(maxlen=run_log_buffer_max_lines)
     _handler = RunLogHandler()
     _handler.setLevel(logging.DEBUG)
     _handler.setFormatter(logging.Formatter(
@@ -53,13 +52,15 @@ def init_run_log() -> None:
     root = logging.getLogger()
     root.addHandler(_handler)
     try:
-        from core.config import LOG_LEVEL
-
+        resolved_level = getattr(logging, log_level_string.upper(), logging.INFO)
         eff = logging.getLevelName(root.level or logging.WARNING)
         _LOG_BUFFER.append(f"{'='*72}")
         _LOG_BUFFER.append("  ETERNAL CITIES — Run Log")
         _LOG_BUFFER.append(f"  Started: {_ts()}")
-        _LOG_BUFFER.append(f"  ETERNAL_LOG_LEVEL={os.environ.get('ETERNAL_LOG_LEVEL', 'INFO')} config.LOG_LEVEL={logging.getLevelName(LOG_LEVEL)} root_effective≈{eff}")
+        _LOG_BUFFER.append(
+            f"  ETERNAL_LOG_LEVEL={os.environ.get('ETERNAL_LOG_LEVEL', 'INFO')} "
+            f"config.log_level_string={logging.getLevelName(resolved_level)} root_effective≈{eff}"
+        )
         _LOG_BUFFER.append(f"{'='*72}")
         _LOG_BUFFER.append("")
     except Exception:
@@ -76,7 +77,8 @@ def log_event(category: str, message: str, **kwargs: Any) -> None:
     for k, v in kwargs.items():
         parts.append(f"  {k}: {v}")
     entry = "\n".join(parts)
-    _LOG_BUFFER.append(f"{_ts()}  {entry}")
+    if _LOG_BUFFER is not None:
+        _LOG_BUFFER.append(f"{_ts()}  {entry}")
 
 
 _TRACE_LOGGER = logging.getLogger("eternal.trace")
@@ -101,11 +103,12 @@ def trace_event(category: str, message: str, **kwargs: Any) -> None:
 
 def get_log_text() -> str:
     """Return the full log as a single string for download."""
+    buf = _LOG_BUFFER if _LOG_BUFFER is not None else deque()
     header_lines = [
         f"{'='*72}",
         f"  ETERNAL CITIES — Run Log Export",
         f"  Exported: {_ts()}",
-        f"  Lines captured: {len(_LOG_BUFFER)}",
+        f"  Lines captured: {len(buf)}",
     ]
     if _RUN_START:
         elapsed = time.time() - _RUN_START
@@ -115,10 +118,11 @@ def get_log_text() -> str:
     header_lines.append(f"{'='*72}")
     header_lines.append("")
 
-    return "\n".join(header_lines) + "\n".join(_LOG_BUFFER) + "\n"
+    return "\n".join(header_lines) + "\n".join(buf) + "\n"
 
 
 def clear_log() -> None:
     """Clear the log buffer (e.g. on reset)."""
-    _LOG_BUFFER.clear()
-    _LOG_BUFFER.append(f"{_ts()}  [LOG] Buffer cleared")
+    if _LOG_BUFFER is not None:
+        _LOG_BUFFER.clear()
+        _LOG_BUFFER.append(f"{_ts()}  [LOG] Buffer cleared")

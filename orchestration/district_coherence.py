@@ -230,7 +230,11 @@ class DistrictCoherenceManager:
         return issues
 
 
-def analyze_urban_patterns(master_plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+def analyze_urban_patterns(
+    master_plan: List[Dict[str, Any]],
+    *,
+    district_coherence_reference_area: int,
+) -> Dict[str, Any]:
     """Analyze urban patterns and provide insights for city planning."""
     analysis = {
         "districts": {},
@@ -246,8 +250,7 @@ def analyze_urban_patterns(master_plan: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     # Calculate urban density
     total_tiles = sum(len(s.get("tiles", [])) for s in master_plan)
-    # Assume city area is roughly 100x100 for density calculation
-    city_area = 10000
+    city_area = float(district_coherence_reference_area)
     analysis["urban_density"] = total_tiles / city_area
 
     # Analyze functional mixing

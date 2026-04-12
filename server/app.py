@@ -10,11 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from core.config import (
-    CITIES,
-    CHAT_HISTORY_MAX_MESSAGES,
-    CHAT_REPLAY_MAX_MESSAGES,
-)
+from core.config import Config
 from server.state import AppState
 from server.broadcast import attach_engine_ui_to_message, broadcast
 
@@ -31,10 +27,11 @@ def _ws_label(websocket: WebSocket) -> str:
     return "unknown-client"
 
 
-def build_app(state: AppState, lifespan=None):
-    """Construct the FastAPI app. Optional ``lifespan`` is set from main.py (banner, auto-resume)."""
-    static_dir = Path(__file__).parent.parent / "static"
+def build_app(state: AppState, system_configuration: "Config", lifespan=None):
+    """Construct the FastAPI app. Optional ``lifespan`` is set from main.py (banner, auto-resume). Config injected for all parameters."""
+    static_dir = Path("static")  # relative path only
     app = FastAPI(title="Roma Aeterna", lifespan=lifespan)
+    app.state.config = system_configuration
 
     class _RedirectStaticIndexMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -66,7 +63,6 @@ def build_app(state: AppState, lifespan=None):
     @app.get("/api/health")
     async def api_health():
         """Health check endpoint -- returns current server status, tile/district counts, and token usage."""
-        from core import config as config_module
         from core.token_usage import get_token_summary
 
         tile_count = len(state.world.tiles)
@@ -93,6 +89,7 @@ def build_app(state: AppState, lifespan=None):
 
     @app.get("/api/cities")
     async def get_cities():
+        """Uses config for cities list (from CSV-driven loader)."""
         return [
             {
                 "name": c["name"],
@@ -100,7 +97,7 @@ def build_app(state: AppState, lifespan=None):
                 "year_max": c["year_max"],
                 "description": c["description"],
             }
-            for c in CITIES
+            for c in system_configuration.get_cities_list()
         ]
 
     @app.get("/api/session")
@@ -121,7 +118,7 @@ def build_app(state: AppState, lifespan=None):
     async def api_get_llm_settings():
         """Load AI routing for the Configure AI panel (HTTP so it always works without WebSocket timing)."""
         logger.info("GET /api/llm-settings")
-        return _build_llm_settings_payload()
+        return _build_llm_settings_payload(system_configuration)
 
     @app.post("/api/llm-settings")
     async def api_post_llm_settings(request: Request):
@@ -196,7 +193,7 @@ def build_app(state: AppState, lifespan=None):
             # the latest paused payload once below.
             replay = [
                 m
-                for m in state.chat_history[-CHAT_REPLAY_MAX_MESSAGES:]
+                for m in state.chat_history[-state.system_configuration.chat_replay_max_messages:]
                 if m.get("type") != "paused"
             ]
             if replay:
@@ -311,7 +308,7 @@ def build_app(state: AppState, lifespan=None):
                         await state.pause_callback()
                 elif msg_type == "get_llm_settings":
                     logger.info(f"[ws#{conn_id}] send llm_settings")
-                    await websocket.send_json(_build_llm_settings_payload())
+                    await websocket.send_json(_build_llm_settings_payload(system_configuration))
                 elif msg_type == "save_llm_settings":
                     overrides = data.get("overrides")
                     logger.info(f"[ws#{conn_id}] save_llm_settings overrides_keys={list(overrides.keys()) if isinstance(overrides, dict) else 'invalid'}")
@@ -379,10 +376,9 @@ def build_app(state: AppState, lifespan=None):
     return app
 
 
-def _build_llm_settings_payload() -> dict:
+def _build_llm_settings_payload(system_configuration: Config) -> dict:
     """Same shape as WebSocket message type llm_settings (for UI)."""
     from agents import llm_routing as llm_agents
-    from core import config
     from core.token_usage import STORE as TOKEN_USAGE_STORE
 
     agents_payload = {}
@@ -396,16 +392,17 @@ def _build_llm_settings_payload() -> dict:
                 row[k] = v
         agents_payload[key] = row
 
-    combined_suggestions = list(
-        dict.fromkeys(list(config.XAI_MODEL_SUGGESTIONS) + list(config.OPENAI_COMPATIBLE_MODEL_SUGGESTIONS))
-    )
+    llm_defaults_raw = system_configuration.load_llm_defaults()
+    xai_model_suggestions = list(llm_defaults_raw["xai"]["model_suggestions"])
+    openai_model_suggestions = list(llm_defaults_raw["openai_compatible"]["model_suggestions"])
+    combined_suggestions = list(dict.fromkeys(xai_model_suggestions + openai_model_suggestions))
 
     return {
         "type": "llm_settings",
         "agents": agents_payload,
         "labels": llm_agents.AGENT_LLM_LABELS,
         "token_usage": TOKEN_USAGE_STORE.to_payload(),
-        "xai_model_suggestions": list(config.XAI_MODEL_SUGGESTIONS),
-        "openai_compatible_model_suggestions": list(config.OPENAI_COMPATIBLE_MODEL_SUGGESTIONS),
+        "xai_model_suggestions": xai_model_suggestions,
+        "openai_compatible_model_suggestions": openai_model_suggestions,
         "model_id_suggestions": combined_suggestions,
     }

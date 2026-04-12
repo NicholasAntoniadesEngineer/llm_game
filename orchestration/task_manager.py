@@ -2,16 +2,15 @@
 
 import asyncio
 import logging
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, TYPE_CHECKING
 
-from core.config import (
-    SURVEY_MAX_CONCURRENT,
-    URBANISTA_MAX_CONCURRENT,
-    SAVE_STATE_EVERY_N_STRUCTURES,
-    TOKEN_TELEMETRY_INTERVAL_S,
-)
+if TYPE_CHECKING:
+    from core.config import Config
+from core.errors import ConfigLoadError
+
 from core.persistence import save_state
 from core.run_log import trace_event
+from orchestration.engine_run_phase import EngineRunPhase
 
 logger = logging.getLogger("eternal.task_manager")
 
@@ -37,7 +36,11 @@ class TaskManager:
         district_index_fn: Callable[[], int],
         generation_fn: Callable[[], int],
         scenario_fn: Callable[[], Any] | None = None,
+        system_configuration: "Config" = None,
     ):
+        if system_configuration is None:
+            raise ConfigLoadError("TaskManager requires system_configuration for config-driven operation.")
+        self.system_configuration = system_configuration
         # Shared references
         self.broadcast = broadcast_fn
         self.world = world
@@ -51,10 +54,11 @@ class TaskManager:
 
         # Authoritative running flag
         self.running: bool = False
+        self.run_phase: EngineRunPhase = EngineRunPhase.idle
 
         # Semaphores
-        self._survey_semaphore = asyncio.Semaphore(SURVEY_MAX_CONCURRENT)
-        self._urbanista_semaphore = asyncio.Semaphore(URBANISTA_MAX_CONCURRENT)
+        self._survey_semaphore = asyncio.Semaphore(self.system_configuration.performance.survey_maximum_concurrent_calls)
+        self._urbanista_semaphore = asyncio.Semaphore(self.system_configuration.performance.urbanista_maximum_concurrent_calls)
 
         # Task handles
         self._survey_task_by_index: dict[int, asyncio.Task] = {}
@@ -79,7 +83,7 @@ class TaskManager:
                 from core.token_usage import STORE as TOKEN_USAGE_STORE
                 from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
                 prev_totals: dict[str, int] = {}
-                interval_s = TOKEN_TELEMETRY_INTERVAL_S
+                interval_s = self.system_configuration.token.token_telemetry_interval_seconds
                 logger.info("Token telemetry enabled: interval_s=%s", interval_s)
                 while self.running:
                     await asyncio.sleep(interval_s)
@@ -147,6 +151,7 @@ class TaskManager:
 
     def reset_pipeline_for_new_run(self) -> None:
         """Clear in-flight survey/refine handles when starting a new scenario (sync; cancel tasks from async)."""
+        self.run_phase = EngineRunPhase.idle
         for idx, task in self._survey_task_by_index.items():
             if task.done() and not task.cancelled():
                 try:
@@ -207,10 +212,12 @@ class TaskManager:
 
     async def graceful_shutdown(self) -> None:
         """Stop the build loop, cancel prefetch/refine, and join the main ``run()`` task."""
+        self.run_phase = EngineRunPhase.shutting_down
         self.running = False
         await self._cancel_survey_and_refine_tasks()
         await self.cancel_run_task_join()
         await self.broadcast_all_agents_idle()
+        self.run_phase = EngineRunPhase.idle
 
     # ------------------------------------------------------------------
     # Survey / refine task helpers
@@ -308,13 +315,13 @@ class TaskManager:
     async def persist_progress_after_structure(self) -> None:
         """Throttle disk writes while keeping periodic checkpoints."""
         self._structures_since_save += 1
-        if self._structures_since_save >= SAVE_STATE_EVERY_N_STRUCTURES:
+        if self._structures_since_save >= self.system_configuration.performance.save_state_every_n_structures_count:
             trace_event(
                 "persist",
                 "save_state (throttled checkpoint)",
                 district_index=self._district_index_fn(),
                 generation=self._generation_fn(),
-                structures_since_reset=SAVE_STATE_EVERY_N_STRUCTURES,
+                structures_since_reset=self.system_configuration.performance.save_state_every_n_structures_count,
             )
             scen = self._scenario_fn() if self._scenario_fn else None
             if not isinstance(scen, dict):
@@ -329,6 +336,15 @@ class TaskManager:
                 self._districts_ref,
                 self._generation_fn(),
                 scenario=scen,
+                system_configuration=self.system_configuration,
                 flush_mode="incremental",
             )
             self._structures_since_save = 0
+
+    def reset_structure_save_throttle_counter(self) -> None:
+        """Reset the counter used to throttle incremental saves (e.g. after a full flush on pause)."""
+        self._structures_since_save = 0
+
+    async def cancel_survey_and_refine_tasks_for_pause(self) -> None:
+        """Cancel prefetch surveys and map refine when the build pauses (public surface for BuildEngine)."""
+        await self._cancel_survey_and_refine_tasks()

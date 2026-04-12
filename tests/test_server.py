@@ -13,6 +13,8 @@ from server.app import build_app, _build_llm_settings_payload
 from world.state import WorldState
 from orchestration.bus import MessageBus, BusMessage
 
+from tests.conftest import SYSTEM_CONFIGURATION
+
 
 # ---------------------------------------------------------------------------
 # AppState
@@ -21,7 +23,7 @@ from orchestration.bus import MessageBus, BusMessage
 
 class TestAppState:
     def test_initial_state(self):
-        state = AppState()
+        state = AppState(system_configuration=SYSTEM_CONFIGURATION)
         assert isinstance(state.world, WorldState)
         assert isinstance(state.bus, MessageBus)
         assert state.ws_connections == []
@@ -34,7 +36,7 @@ class TestAppState:
         assert state.engine_is_running is None
 
     def test_asset_version_is_timestamp(self):
-        state = AppState()
+        state = AppState(system_configuration=SYSTEM_CONFIGURATION)
         # Should be a numeric string
         assert state.asset_version.isdigit()
 
@@ -47,7 +49,7 @@ class TestAppState:
 class TestBroadcast:
     @pytest.fixture
     def state(self):
-        return AppState()
+        return AppState(system_configuration=SYSTEM_CONFIGURATION)
 
     @pytest.mark.asyncio
     async def test_chat_message_appended_to_history(self, state):
@@ -88,10 +90,10 @@ class TestBroadcast:
 
     @pytest.mark.asyncio
     async def test_history_cap_enforced(self, state):
-        from core.config import CHAT_HISTORY_MAX_MESSAGES
-        for i in range(CHAT_HISTORY_MAX_MESSAGES + 50):
+        cap = state.system_configuration.chat_history_max_messages
+        for i in range(cap + 50):
             await broadcast(state, {"type": "chat", "text": f"msg {i}"})
-        assert len(state.chat_history) <= CHAT_HISTORY_MAX_MESSAGES
+        assert len(state.chat_history) <= cap
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +174,9 @@ except ImportError:
 class TestFastAPIEndpoints:
     @pytest.fixture
     def app_and_state(self):
-        state = AppState()
-        app = build_app(state)
+        cfg = SYSTEM_CONFIGURATION
+        state = AppState(system_configuration=cfg)
+        app = build_app(state, system_configuration=cfg)
         return app, state
 
     @pytest.mark.asyncio
@@ -287,7 +290,7 @@ class TestFastAPIEndpoints:
 
 class TestBuildLlmSettingsPayload:
     def test_payload_structure(self):
-        payload = _build_llm_settings_payload()
+        payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
         assert payload["type"] == "llm_settings"
         assert "agents" in payload
         assert "labels" in payload
@@ -296,7 +299,7 @@ class TestBuildLlmSettingsPayload:
         assert "model_id_suggestions" in payload
 
     def test_agents_have_provider_and_model(self):
-        payload = _build_llm_settings_payload()
+        payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
         for key, row in payload["agents"].items():
             assert "provider" in row
             assert "model" in row
@@ -309,7 +312,7 @@ class TestBuildLlmSettingsPayload:
             llm_agents.KEY_URBANISTA: {"openai_api_key": "sk-secret"},
         })
         try:
-            payload = _build_llm_settings_payload()
+            payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
             agent = payload["agents"][llm_agents.KEY_URBANISTA]
             assert "openai_api_key" not in agent
             assert agent.get("has_openai_api_key") is True

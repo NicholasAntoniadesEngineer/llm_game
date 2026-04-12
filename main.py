@@ -24,17 +24,14 @@ from contextlib import asynccontextmanager
 import uvicorn
 from pathlib import Path
 
-from core import config
 from server.state import AppState
 from server.broadcast import broadcast as _broadcast_impl
 from server.app import build_app
 from agents import llm_routing as llm_agents
 from orchestration.engine import BuildEngine
-from agents import base as agents_base
 from core.errors import SaveIndexError
 from core.persistence import (
     clear_saves,
-    load_llm_settings,
     load_blueprint,
     load_state,
     merge_llm_overrides_from_save,
@@ -42,29 +39,38 @@ from core.persistence import (
     save_state,
     validate_blueprint_tile_invariants,
 )
-from core.config import CHAT_PERSIST_DEBOUNCE_S, HEARTBEAT_INTERVAL_S, LOG_LEVEL, create_scenario
+from core.config import load_config
+from core.bootstrap import apply_llm_routing_from_config, bind_application_broadcast
+
+from core.run_log import init_run_log
+from core.heartbeat import start_heartbeat, stop_heartbeat
+
+# Load the single source of truth configuration early (strict CSV validation, fails hard if invalid)
+system_configuration = load_config()
+apply_llm_routing_from_config(system_configuration)
+
+init_run_log(
+    run_log_buffer_max_lines=system_configuration.run_log_buffer_max_lines,
+    log_level_string=system_configuration.ui.log_level_string,
+)
 
 logging.basicConfig(
-    level=LOG_LEVEL,
+    level=getattr(logging, system_configuration.ui.log_level_string.upper(), logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
     stream=sys.stderr,
     force=True,
 )
 
-from core.run_log import init_run_log
-from core.heartbeat import start_heartbeat, stop_heartbeat
-
-init_run_log()
 logging.info(
-    "Eternal Cities startup | ETERNAL_LOG_LEVEL=%s effective=%s argv=%s",
-    os.environ.get("ETERNAL_LOG_LEVEL", "INFO"),
-    logging.getLevelName(LOG_LEVEL),
+    "Eternal Cities startup | log_level=%s effective=%s argv=%s",
+    system_configuration.ui.log_level_string,
+    logging.getLevelName(getattr(logging, system_configuration.ui.log_level_string.upper(), logging.INFO)),
     " ".join(sys.argv[:6]),
 )
 
 # Touched by POST /api/restart-server when ETERNAL_CITIES_RELOAD=1 so uvicorn --reload picks up a restart request.
-RELOAD_SENTINEL = Path(__file__).resolve().parent / "reload_trigger.txt"
+RELOAD_SENTINEL = Path("reload_trigger.txt")  # relative path only
 
 # pkill -f regex: only child processes from agents/base.py (claude --print --system-prompt ...).
 # Broader patterns like "claude.*--print" can match unrelated Claude CLI usage.
@@ -72,8 +78,8 @@ CLAUDE_AGENT_PKILL_PATTERN = r"claude.*--print.*--system-prompt"
 
 # On startup (including uvicorn auto-reload), kill orphaned Claude CLI processes
 # from the previous server instance to prevent token waste.
-import subprocess as _startup_sp
-_startup_sp.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
+import subprocess as startup_subprocess
+startup_subprocess.run(["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
 logging.info("Startup: killed any orphaned Claude CLI processes")
 
 BANNER = """
@@ -88,20 +94,23 @@ BANNER = """
 ╚══════════════════════════════════════════════════╝
 """
 
-load_llm_settings()
-
-# Shared application state
-state = AppState()
+# Shared application state with injected system configuration (no globals)
+state = AppState(system_configuration=system_configuration)
 
 # Bind broadcast to the shared state so callers use broadcast(message) without needing to pass state.
 broadcast = functools.partial(_broadcast_impl, state)
 
-# Make the bound broadcast available for late imports (e.g. agents/base.py token_usage push).
-import server.state as _server_state_mod
-_server_state_mod.broadcast_fn = broadcast
-agents_base.set_ui_broadcast(broadcast)
+bind_application_broadcast(broadcast)
 
-engine = BuildEngine(state.world, state.bus, broadcast, state.chat_history, run_session=state.run_session)
+# Pass the system_configuration to BuildEngine for dependency injection (to be fully updated in modularize todo)
+engine = BuildEngine(
+    state.world,
+    state.bus,
+    broadcast,
+    state.chat_history,
+    run_session=state.run_session,
+    system_configuration=system_configuration,
+)
 
 _heartbeat_thread = None
 
@@ -144,7 +153,7 @@ def _make_heartbeat_snapshot() -> dict[str, Any]:
 
 # Load saved state if available (tiles, chat, districts, scenario — survives server restarts)
 try:
-    saved = load_state(state.world)
+    saved = load_state(state.world, system_configuration=system_configuration)
 except SaveIndexError:
     logging.exception("Save index is corrupt or unreadable — starting without disk restore")
     saved = None
@@ -175,7 +184,7 @@ _persist_chat_generation = 0
 
 
 async def _debounced_persist_after_chat(gen: int) -> None:
-    await asyncio.sleep(CHAT_PERSIST_DEBOUNCE_S)
+    await asyncio.sleep(system_configuration.timing.chat_persist_debounce_seconds)
     if gen != _persist_chat_generation:
         return
     async with _engine_action_lock:
@@ -189,6 +198,7 @@ async def _debounced_persist_after_chat(gen: int) -> None:
             engine.districts,
             engine.generation,
             scenario=state.run_session.scenario,
+            system_configuration=system_configuration,
             flush_mode="incremental",
         )
 
@@ -226,7 +236,7 @@ async def _handle_start_inner(city_name, year):
     await engine.broadcast_all_agents_idle()
 
     # Create and set the scenario
-    new_scenario = create_scenario(city_name, year)
+    new_scenario = system_configuration.create_scenario(city_name, year)
     state.run_session.scenario = new_scenario
     logging.info(f"Starting: {new_scenario['location']}, {new_scenario['period']}")
 
@@ -321,6 +331,7 @@ async def _handle_pause_inner():
         engine.districts,
         engine.generation,
         scenario=state.run_session.scenario,
+        system_configuration=system_configuration,
         flush_mode="full",
     )
     await broadcast({
@@ -350,7 +361,11 @@ async def handle_llm_settings_save(overrides: dict):
     current = llm_agents.get_runtime_overrides()
     merged = merge_llm_overrides_from_save(current, overrides)
     llm_agents.set_runtime_overrides(merged)
-    await asyncio.to_thread(save_llm_settings, merged)
+    await asyncio.to_thread(
+        save_llm_settings,
+        merged,
+        system_configuration=system_configuration,
+    )
 
 
 def _reload_env_enabled() -> bool:
@@ -390,6 +405,7 @@ async def handle_restart_server() -> dict:
             engine.districts,
             engine.generation,
             scenario=state.run_session.scenario,
+            system_configuration=system_configuration,
             flush_mode="full",
         )
 
@@ -424,6 +440,7 @@ async def handle_reset_timeline() -> dict:
             engine.districts,
             engine.generation,
             scenario=merged,
+            system_configuration=system_configuration,
             flush_mode="incremental",
         )
     await broadcast(
@@ -457,14 +474,17 @@ async def _app_lifespan(_app):
     global _heartbeat_thread
     # Restored world/scenario may exist on disk, but the build does not start until the user clicks
     # "Continue current session" in the UI (WebSocket `resume`) or starts a new city.
-    _heartbeat_thread = start_heartbeat(_make_heartbeat_snapshot, HEARTBEAT_INTERVAL_S)
+    _heartbeat_thread = start_heartbeat(
+        _make_heartbeat_snapshot,
+        system_configuration.timing.heartbeat_interval_seconds,
+    )
     yield
     stop_heartbeat(_heartbeat_thread)
     await engine.graceful_shutdown()
     logging.info("Build engine stopped (server shutdown or reload)")
 
 
-app = build_app(state, lifespan=_app_lifespan)
+app = build_app(state, system_configuration=system_configuration, lifespan=_app_lifespan)
 
 
 if __name__ == "__main__":

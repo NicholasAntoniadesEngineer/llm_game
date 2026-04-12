@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
-from world.tiles import Tile, TERRAIN_COLORS, BUILDING_ICONS, TERRAIN_ICONS
+from typing import TYPE_CHECKING
+
+from world.tiles import Tile
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 
 class WorldState:
     """Sparse tile storage with no fixed bounds. World grows as tiles are placed."""
 
-    def __init__(self, *, chunk_size_tiles: int):
+    def __init__(self, *, chunk_size_tiles: int, system_configuration: "Config"):
         if chunk_size_tiles < 1:
             raise ValueError("chunk_size_tiles must be >= 1")
+        self.system_configuration = system_configuration
         self.chunk_size_tiles = chunk_size_tiles
         self.tiles: dict[tuple[int, int], Tile] = {}
         self.min_x: int = 0
@@ -22,8 +28,23 @@ class WorldState:
         self.turn: int = 0
         self.build_log: list[dict] = []
         self._dirty_chunks: set[tuple[int, int]] = set()
-        # Non-empty tiles per chunk — speeds region queries and incremental saves.
         self._tiles_by_chunk: dict[tuple[int, int], set[tuple[int, int]]] = {}
+
+    def _default_terrain_color_hex(self, terrain: str) -> str:
+        td = self.system_configuration.terrain.terrain_defaults_dictionary.get(terrain)
+        if isinstance(td, dict) and td.get("color"):
+            return str(td["color"])
+        extra = self.system_configuration.terrain_type_display_colors_extra_dictionary.get(terrain)
+        if isinstance(extra, str) and extra.strip():
+            return extra.strip()
+        return self.system_configuration.procedural_terrain_fallback_hex_color
+
+    def _default_icon_for_tile(self, building_type: str | None, terrain: str) -> str:
+        if building_type and building_type in self.system_configuration.building_type_display_icons_dictionary:
+            return self.system_configuration.building_type_display_icons_dictionary[building_type]
+        if terrain in self.system_configuration.terrain_display_icons_dictionary:
+            return self.system_configuration.terrain_display_icons_dictionary[terrain]
+        return ""
 
     def _chunk_coord_for_tile(self, x: int, y: int) -> tuple[int, int]:
         cs = self.chunk_size_tiles
@@ -82,10 +103,12 @@ class WorldState:
 
     def place_tile(self, x: int, y: int, data: dict) -> bool:
         """Place or update a tile. World expands to fit — never rejects."""
+        elev_min = self.system_configuration.world_place_tile_min_elevation
+        elev_max = self.system_configuration.grid.maximum_elevation_value
         elev = data.get("elevation")
         if isinstance(elev, (int, float)):
             data = dict(data)
-            data["elevation"] = max(-5.0, min(float(elev), 30.0))
+            data["elevation"] = max(float(elev_min), min(float(elev), float(elev_max)))
 
         tile = self.tiles.get((x, y))
         if tile is None:
@@ -98,21 +121,19 @@ class WorldState:
             if hasattr(tile, key) and value is not None:
                 setattr(tile, key, value)
 
-        # Apply default color/icon if not specified
         if "color" not in data or data.get("color") is None:
             terrain = data.get("terrain", tile.terrain)
-            tile.color = TERRAIN_COLORS[terrain] if terrain in TERRAIN_COLORS else "#c2b280"
+            tile.color = self._default_terrain_color_hex(terrain)
         if "icon" not in data or data.get("icon") is None:
             btype = data.get("building_type", tile.building_type)
             terrain = data.get("terrain", tile.terrain)
-            if btype and btype in BUILDING_ICONS:
-                tile.icon = BUILDING_ICONS[btype]
-            elif terrain in TERRAIN_ICONS:
-                tile.icon = TERRAIN_ICONS[terrain]
+            tile.icon = self._default_icon_for_tile(
+                str(btype) if btype else None,
+                str(terrain) if terrain else "empty",
+            )
 
         tile.turn = self.turn
 
-        # Expand world bounds
         if not self.tiles or len(self.tiles) == 1:
             self.min_x = x
             self.max_x = x
@@ -128,8 +149,10 @@ class WorldState:
         self._sync_chunk_index_for_tile(x, y, tile)
 
         self.build_log.append({"turn": self.turn, "x": x, "y": y, **data})
-        if len(self.build_log) > 5000:
-            self.build_log = self.build_log[-2500:]
+        log_max = self.system_configuration.world_build_log_max_entries
+        log_keep = self.system_configuration.world_build_log_trim_keep_entries
+        if len(self.build_log) > log_max:
+            self.build_log = self.build_log[-log_keep:]
         return True
 
     def get_tile(self, x: int, y: int) -> Tile | None:

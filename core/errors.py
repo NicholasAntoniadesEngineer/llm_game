@@ -33,10 +33,26 @@ class BuildingSkippedError(EternalCitiesError):
         super().__init__(f"Skipped {building_name}: {reason}")
 
 
-def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple[str, str]:
+class ConfigLoadError(EternalCitiesError):
+    """Configuration validation or loading failure. System must fail hard per rules. No continuation on catch."""
+    pass
+
+
+def classify_agent_failure(
+    stderr_text: str,
+    exc: BaseException | None,
+    *,
+    agent_failure_detail_max_chars: int,
+) -> tuple[str, str]:
     """Map stderr / exception to (pause_reason, short_detail) for UI and engine."""
     raw = (stderr_text or "").strip()
     text = raw.lower()
+    detail_limit = agent_failure_detail_max_chars
+
+    def _preview(message: str) -> str:
+        if len(message) <= detail_limit:
+            return message
+        return message[:detail_limit]
 
     if exc is not None:
         if isinstance(exc, FileNotFoundError):
@@ -50,17 +66,17 @@ def classify_agent_failure(stderr_text: str, exc: BaseException | None) -> tuple
                 return ("network", str(exc))
 
     if "429" in text or "rate limit" in text or "too many requests" in text:
-        return ("rate_limit", raw[:400] if raw else "Rate limit exceeded.")
+        return ("rate_limit", _preview(raw) if raw else "Rate limit exceeded.")
     if "503" in text or "502" in text or "504" in text:
-        return ("api_error", raw[:400] if raw else "Service temporarily unavailable.")
+        return ("api_error", _preview(raw) if raw else "Service temporarily unavailable.")
     if "overloaded" in text or "capacity" in text:
-        return ("api_error", raw[:400] if raw else "Service overloaded.")
+        return ("api_error", _preview(raw) if raw else "Service overloaded.")
     if "401" in text or "403" in text or "api key" in text or "authentication" in text or ("invalid" in text and "token" in text):
-        return ("api_error", raw[:400] if raw else "Authentication or API access error.")
+        return ("api_error", _preview(raw) if raw else "Authentication or API access error.")
     if "getaddrinfo" in text or "name or service not known" in text or "connection refused" in text:
-        return ("network", raw[:400] if raw else "Could not reach the service.")
+        return ("network", _preview(raw) if raw else "Could not reach the service.")
     if "econnreset" in text or "network is unreachable" in text or "timed out" in text or "timeout" in text:
-        return ("network", raw[:400] if raw else "Connection problem.")
+        return ("network", _preview(raw) if raw else "Connection problem.")
     if not raw and exc is None:
         return ("api_error", "CLI exited with an error (no stderr output). Check quota, network, and CLI login.")
-    return ("unknown", raw[:400] if raw else "Unknown error.")
+    return ("unknown", _preview(raw) if raw else "Unknown error.")

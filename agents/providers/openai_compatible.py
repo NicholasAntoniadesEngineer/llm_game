@@ -8,8 +8,10 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from typing import TYPE_CHECKING
 
-from core import config
+if TYPE_CHECKING:
+    from core.config import Config
 
 logger = logging.getLogger("eternal.agents.provider")
 
@@ -77,29 +79,32 @@ class OpenAICompatibleProvider:
         api_key: str | None = None,
         default_model: str | None = None,
         http_timeout_s: float | None = None,
+        *,
+        system_configuration: "Config",
     ):
+        openai_defaults = system_configuration.load_llm_defaults()["openai_compatible"]
+        fallback_base = str(openai_defaults.get("base_url") or "").strip()
+        fallback_default_model = str(openai_defaults.get("default_model") or "").strip()
+        fallback_timeout = float(openai_defaults["request_timeout_seconds"])
         self.base_url = (
             base_url
             or os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-            or getattr(config, "OPENAI_COMPATIBLE_BASE_URL", "")
+            or fallback_base
             or ""
         ).strip()
         self.api_key = (
             api_key
             or os.environ.get("OPENAI_COMPATIBLE_API_KEY")
-            or getattr(config, "OPENAI_COMPATIBLE_API_KEY", "")
             or ""
         )
         self.default_model = (
             default_model
             or os.environ.get("OPENAI_COMPATIBLE_MODEL")
-            or getattr(config, "OPENAI_COMPATIBLE_MODEL", "")
+            or fallback_default_model
             or ""
         )
         self.http_timeout_s = float(
-            http_timeout_s
-            if http_timeout_s is not None
-            else getattr(config, "OPENAI_COMPATIBLE_HTTP_TIMEOUT_SECONDS", 180.0)
+            http_timeout_s if http_timeout_s is not None else fallback_timeout
         )
 
     async def complete(
@@ -115,12 +120,12 @@ class OpenAICompatibleProvider:
         if not self.base_url:
             raise AgentGenerationError(
                 "api_error",
-                "openai_compatible: set OPENAI_COMPATIBLE_BASE_URL or config.OPENAI_COMPATIBLE_BASE_URL (e.g. https://api.openai.com/v1).",
+                "openai_compatible: set base URL via AI settings or OPENAI_COMPATIBLE_BASE_URL (e.g. https://api.openai.com/v1).",
             )
         if not self.api_key:
             raise AgentGenerationError(
                 "api_error",
-                "openai_compatible: set OPENAI_COMPATIBLE_API_KEY or config.OPENAI_COMPATIBLE_API_KEY.",
+                "openai_compatible: set API key via AI settings or OPENAI_COMPATIBLE_API_KEY.",
             )
         use_model = model
         if self.default_model:

@@ -22,9 +22,10 @@ from dataclasses import dataclass
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.config import CHUNK_SIZE
 from world.state import WorldState
 from world.tiles import Tile
+
+from tests.conftest import SYSTEM_CONFIGURATION
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -36,33 +37,33 @@ class TestWorldStateBoundaries:
     It accepts any coordinates — no bounds rejection."""
 
     def test_place_tile_at_origin(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.place_tile(0, 0, {"terrain": "road"}) is True
         tile = ws.get_tile(0, 0)
         assert tile.terrain == "road"
 
     def test_place_tile_at_large_coords(self):
         """Sparse world accepts arbitrarily large coordinates."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.place_tile(200, 200, {"terrain": "building"}) is True
         tile = ws.get_tile(200, 200)
         assert tile.terrain == "building"
 
     def test_place_tile_at_negative_coords(self):
         """Sparse world accepts negative coordinates for expansion."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.place_tile(-100, -50, {"terrain": "road"}) is True
         tile = ws.get_tile(-100, -50)
         assert tile.terrain == "road"
 
     def test_get_tile_unplaced_returns_none(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.get_tile(-1, 0) is None
         assert ws.get_tile(10, 0) is None
         assert ws.get_tile(999, 999) is None
 
     def test_bounds_track_placed_tiles(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 10, {"terrain": "road"})
         ws.place_tile(-3, -7, {"terrain": "road"})
         ws.place_tile(20, 15, {"terrain": "road"})
@@ -81,7 +82,7 @@ class TestWorldStateScaling:
 
     def test_build_log_is_capped(self):
         """build_log is pruned to prevent unbounded memory growth."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for i in range(10000):
             x, y = i % 100, i // 100
             ws.place_tile(x, y, {"terrain": "road", "building_name": f"road_{i}"})
@@ -90,7 +91,7 @@ class TestWorldStateScaling:
 
     def test_to_dict_scales_with_tiles(self):
         """to_dict only includes occupied tiles (sparse)."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(0, 0, {"terrain": "road"})
         ws.place_tile(100, 100, {"terrain": "building"})
 
@@ -103,7 +104,7 @@ class TestWorldStateScaling:
 
     def test_tiles_since_filters_by_turn(self):
         """tiles_since only returns tiles from the requested turn onward."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(50, 50, {"terrain": "road"})
         ws.turn = 1
 
@@ -115,7 +116,7 @@ class TestWorldStateScaling:
         assert elapsed < 0.5
 
     def test_get_region_summary_handles_large_regions(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for x in range(100):
             ws.place_tile(x, 0, {"terrain": "road", "building_name": f"road_{x}"})
 
@@ -125,7 +126,7 @@ class TestWorldStateScaling:
     def test_sparse_initialization_instant(self):
         """Sparse world initialization is O(1) — no grid allocation."""
         start = time.time()
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         elapsed = time.time() - start
         assert elapsed < 0.01
         assert len(ws.tiles) == 0
@@ -140,7 +141,7 @@ class TestWorldStateSerialization:
 
     def test_full_state_json_size(self):
         """With 1600 tiles fully populated, the JSON blob size."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(40):
             for x in range(40):
                 ws.place_tile(x, y, {
@@ -160,7 +161,7 @@ class TestWorldStateSerialization:
 
     def test_tiles_since_incremental_size(self):
         """Incremental updates should be much smaller than full state."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(20):
             for x in range(40):
                 ws.place_tile(x, y, {"terrain": "road"})
@@ -241,7 +242,7 @@ class TestEdgeDetection:
 
     def test_single_district_has_edges(self):
         """A single built district should have edge tiles all around it."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(15, 20):
             for x in range(15, 20):
                 ws.place_tile(x, y, {"terrain": "building"})
@@ -252,19 +253,19 @@ class TestEdgeDetection:
 
     def test_isolated_tile_is_edge(self):
         """A single tile is always an edge tile."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(50, 50, {"terrain": "building"})
         edges = self.find_edge_tiles(ws)
         assert len(edges) == 1
 
     def test_empty_world_no_edges(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         edges = self.find_edge_tiles(ws)
         assert len(edges) == 0
 
     def test_expansion_zones_found(self):
         """Should find zones adjacent to built area."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(5, 15):
             for x in range(5, 15):
                 ws.place_tile(x, y, {"terrain": "building"})
@@ -276,7 +277,7 @@ class TestEdgeDetection:
 
     def test_expansion_zones_sparse_world(self):
         """Expansion should work with scattered tiles."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         # Small cluster
         for y in range(3):
             for x in range(3):
@@ -287,7 +288,7 @@ class TestEdgeDetection:
 
     def test_edge_detection_performance(self):
         """Edge detection on many tiles should complete in reasonable time."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(75, 125):
             for x in range(75, 125):
                 ws.place_tile(x, y, {"terrain": "building"})
@@ -308,7 +309,7 @@ class TestTilePlacement:
     """Verify tile placement handles all edge cases correctly."""
 
     def test_place_preserves_existing_fields(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {
             "terrain": "building",
             "building_name": "Temple of Jupiter",
@@ -323,7 +324,7 @@ class TestTilePlacement:
         assert tile.terrain == "building"
 
     def test_place_none_values_ignored(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "building_name": "Forum"})
         ws.place_tile(5, 5, {"building_name": None, "terrain": "building"})
 
@@ -331,14 +332,14 @@ class TestTilePlacement:
         assert tile.building_name == "Forum"
 
     def test_place_updates_turn(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.turn = 5
         ws.place_tile(3, 3, {"terrain": "road"})
         tile = ws.get_tile(3, 3)
         assert tile.turn == 5
 
     def test_overlapping_placements(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "building_name": "Temple A"})
         ws.place_tile(5, 5, {"terrain": "building", "building_name": "Temple B"})
 
@@ -346,13 +347,14 @@ class TestTilePlacement:
         assert tile.building_name == "Temple B"
 
     def test_default_color_applied(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "water"})
         tile = ws.get_tile(5, 5)
-        assert tile.color == "#3498db"
+        expected = SYSTEM_CONFIGURATION.terrain.terrain_defaults_dictionary["water"]["color"]
+        assert tile.color == expected
 
     def test_default_icon_applied(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "building_type": "temple"})
         tile = ws.get_tile(5, 5)
         assert tile.icon == "\U0001f3db"
@@ -366,7 +368,7 @@ class TestConcurrentExpansion:
     """Test that concurrent tile placements don't corrupt state."""
 
     def test_concurrent_placements_to_different_tiles(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         results = []
         for i in range(100):
             results.append(ws.place_tile(i, 0, {"terrain": "road", "building_name": f"road_{i}"}))
@@ -377,7 +379,7 @@ class TestConcurrentExpansion:
             assert tile.building_name == f"road_{i}"
 
     def test_rapid_same_tile_updates(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for i in range(1000):
             ws.place_tile(5, 5, {"terrain": "building", "building_name": f"v{i}"})
 
@@ -451,7 +453,7 @@ class TestCoordinateStress:
     """Test for coordinate overflow and floating-point issues."""
 
     def test_tile_coordinates_preserved_in_serialization(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(0, 0, {"terrain": "road"})
         ws.place_tile(39, 39, {"terrain": "road"})
 
@@ -509,7 +511,7 @@ class TestBuildEngineExpansion:
 
     def test_district_region_bounds(self):
         """Verify district regions can extend beyond initial area (sparse world allows it)."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(0, 0, {"terrain": "road"})
         ws.place_tile(50, 50, {"terrain": "road"})
 
@@ -572,7 +574,7 @@ class TestPersistenceScaling:
         import core.persistence as persistence_mod
         from core.persistence import save_state, load_state
 
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for y in range(10):
             for x in range(20):
                 ws.place_tile(x, y, {
@@ -610,10 +612,17 @@ class TestPersistenceScaling:
                 "year_end": 1,
                 "ruler": "x",
             }
-            save_state(ws, chat, 1, districts, scenario=scenario)
+            save_state(
+                ws,
+                chat,
+                1,
+                districts,
+                scenario=scenario,
+                system_configuration=SYSTEM_CONFIGURATION,
+            )
 
-            ws2 = WorldState(chunk_size_tiles=CHUNK_SIZE)
-            result = load_state(ws2)
+            ws2 = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
+            result = load_state(ws2, system_configuration=SYSTEM_CONFIGURATION)
             if result is not None:
                 loaded_chat, di, loaded_districts, _gen, _scen = result
                 assert di == 1
@@ -637,7 +646,7 @@ class TestRendererIssuesDocumentation:
     def test_shared_material_bug_data_path(self):
         """Two buildings with same color share a cached material.
         Replacing one should NOT dispose the shared material."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(0, 0, {
             "terrain": "building",
             "color": "#d4a373",
@@ -659,7 +668,7 @@ class TestRendererIssuesDocumentation:
 
     def test_hover_mesh_count_at_scale(self):
         """Document the raycast mesh count for large cities."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         shapes_per_building = 20
         building_count = 1600
         mesh_count = building_count * shapes_per_building
@@ -667,7 +676,7 @@ class TestRendererIssuesDocumentation:
 
     def test_expansion_tiles_accepted(self):
         """Sparse world always accepts tiles — no bounds check rejection."""
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         # Initial area
         ws.place_tile(0, 0, {"terrain": "road"})
         # Expansion tile far away
@@ -683,7 +692,7 @@ class TestSparseWorldState:
     """Validate that the sparse WorldState supports infinite expansion."""
 
     def test_sparse_accepts_any_coordinates(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.place_tile(0, 0, {"terrain": "road"})
         assert ws.place_tile(-100, -100, {"terrain": "road"})
         assert ws.place_tile(10000, 10000, {"terrain": "building"})
@@ -693,13 +702,13 @@ class TestSparseWorldState:
         assert ws.get_tile(10000, 10000).terrain == "building"
 
     def test_sparse_memory_efficiency(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         for i in range(100):
             ws.place_tile(i * 1000, i * 1000, {"terrain": "building"})
         assert len(ws.tiles) == 100
 
     def test_sparse_scales_to_thousands_of_tiles(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         start = time.time()
         for i in range(10000):
             x = (i * 7) % 500 - 250
@@ -711,11 +720,11 @@ class TestSparseWorldState:
         assert len(ws.tiles) <= 10000
 
     def test_sparse_get_nonexistent_returns_none(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.get_tile(999, 999) is None
 
     def test_sparse_width_height_computed(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         assert ws.width == 0
         assert ws.height == 0
         ws.place_tile(5, 10, {"terrain": "road"})
@@ -767,7 +776,7 @@ class TestResetRaceCondition:
 
 class TestTileSpecValidation:
     def test_spec_with_empty_shapes(self):
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "spec": {"shapes": []}})
         tile = ws.get_tile(5, 5)
         assert tile.spec == {"shapes": []}
@@ -778,7 +787,7 @@ class TestTileSpecValidation:
             {"type": "cylinder", "pos": [0, 0, 0]},
             {"type": "unknown_shape"},
         ]}
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "spec": spec})
         tile = ws.get_tile(5, 5)
         assert len(tile.spec["shapes"]) == 3
@@ -789,7 +798,7 @@ class TestTileSpecValidation:
             {"type": "sphere", "pos": [0, 0, 0], "radius": 0.0001, "color": "#00ff00"},
             {"type": "cylinder", "pos": [0, -100, 0], "radius": 50, "height": 200, "color": "#0000ff"},
         ]}
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "spec": spec})
         tile = ws.get_tile(5, 5)
         assert tile.spec is not None
@@ -799,7 +808,7 @@ class TestTileSpecValidation:
             {"type": "box", "pos": [float('nan'), 0, 0], "size": [1, 1, 1]},
             {"type": "box", "pos": [float('inf'), 0, 0], "size": [1, 1, 1]},
         ]}
-        ws = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        ws = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         ws.place_tile(5, 5, {"terrain": "building", "spec": spec})
         tile = ws.get_tile(5, 5)
         assert len(tile.spec["shapes"]) == 2

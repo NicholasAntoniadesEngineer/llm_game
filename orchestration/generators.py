@@ -6,14 +6,6 @@ import logging
 from collections import deque
 
 from core.errors import AgentGenerationError
-from core import config as config_module
-from core.config import (
-    GRID_WIDTH,
-    GRID_HEIGHT,
-    SURVEY_BUILDINGS_PER_CHUNK,
-    TERRAIN_GRADIENT_ITERATIONS,
-    TERRAIN_MAX_GRADIENT,
-)
 from core.run_log import trace_event
 from core.fingerprint import district_survey_key, ensure_district_ids
 from core.persistence import (
@@ -37,6 +29,17 @@ class Generators:
 
     def __init__(self, engine):
         self.engine = engine
+
+    def _spacing_enforced_plan(self, master_plan: list, min_gap: int) -> list:
+        system_configuration = self.engine.system_configuration
+        return enforce_spacing(
+            master_plan,
+            min_gap=min_gap,
+            system_configuration=system_configuration,
+            world_grid_width_tiles=system_configuration.grid.world_grid_width,
+            world_grid_height_tiles=system_configuration.grid.world_grid_height,
+            spatial_optimal_shift_step_tiles=system_configuration.spatial_optimal_shift_step_tiles,
+        )
 
     # ── Convenience delegates ──────────────────────────────────────────
 
@@ -140,8 +143,7 @@ class Generators:
 
     # ── Road connectivity ─────────────────────────────────────────────
 
-    @staticmethod
-    def _ensure_road_connectivity(master_plan: list, region: dict) -> list:
+    def _ensure_road_connectivity(self, master_plan: list, region: dict) -> list:
         """Ensure road tiles form a connected graph; add bridging tiles if needed.
 
         1. Build a graph of all road tiles and find connected components.
@@ -150,6 +152,8 @@ class Generators:
 
         Modifies master_plan in-place and returns it.
         """
+        system_configuration = self.engine.system_configuration
+        road_bridge_elevation = system_configuration.road_bridge_default_elevation
         # Collect all road tile coords
         road_coords: set[tuple[int, int]] = set()
         non_road_coords: set[tuple[int, int]] = set()
@@ -191,7 +195,12 @@ class Generators:
 
         if len(components) <= 1:
             # Already connected -- check boundary connectivity
-            Generators._ensure_boundary_road(master_plan, road_coords, non_road_coords, region)
+            self._ensure_boundary_road(
+                master_plan,
+                road_coords,
+                non_road_coords,
+                region,
+            )
             return master_plan
 
         # Connect components: greedily bridge closest pairs
@@ -218,13 +227,13 @@ class Generators:
                 x += 1 if bx > x else -1
                 pos = (x, y)
                 if pos not in road_coords and pos not in non_road_coords:
-                    bridge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                    bridge_tiles.append({"x": x, "y": y, "elevation": road_bridge_elevation})
                     road_coords.add(pos)
             while y != by:
                 y += 1 if by > y else -1
                 pos = (x, y)
                 if pos not in road_coords and pos not in non_road_coords:
-                    bridge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                    bridge_tiles.append({"x": x, "y": y, "elevation": road_bridge_elevation})
                     road_coords.add(pos)
             trunk |= comp
 
@@ -238,21 +247,30 @@ class Generators:
             logger.info("Road connectivity: added %d bridge tiles across %d isolated segments",
                         len(bridge_tiles), len(components) - 1)
 
-        Generators._ensure_boundary_road(master_plan, road_coords, non_road_coords, region)
+        self._ensure_boundary_road(
+            master_plan,
+            road_coords,
+            non_road_coords,
+            region,
+        )
         return master_plan
 
-    @staticmethod
     def _ensure_boundary_road(
+        self,
         master_plan: list,
         road_coords: set[tuple[int, int]],
         non_road_coords: set[tuple[int, int]],
         region: dict,
     ) -> None:
         """Ensure at least one road tile touches the region boundary for inter-district links."""
+        grid_cfg = self.engine.system_configuration.grid
+        road_bridge_default_elevation = self.engine.system_configuration.road_bridge_default_elevation
+        world_grid_width_tiles = grid_cfg.world_grid_width
+        world_grid_height_tiles = grid_cfg.world_grid_height
         x1 = region.get("x1", 0)
         y1 = region.get("y1", 0)
-        x2 = region.get("x2", GRID_WIDTH - 1)
-        y2 = region.get("y2", GRID_HEIGHT - 1)
+        x2 = region.get("x2", world_grid_width_tiles - 1)
+        y2 = region.get("y2", world_grid_height_tiles - 1)
 
         # Check if any road tile is on the boundary
         for rx, ry in road_coords:
@@ -286,11 +304,11 @@ class Generators:
         while x != tx:
             x += 1 if tx > x else -1
             if (x, y) not in road_coords and (x, y) not in non_road_coords:
-                edge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                edge_tiles.append({"x": x, "y": y, "elevation": road_bridge_default_elevation})
         while y != ty:
             y += 1 if ty > y else -1
             if (x, y) not in road_coords and (x, y) not in non_road_coords:
-                edge_tiles.append({"x": x, "y": y, "elevation": 0.1})
+                edge_tiles.append({"x": x, "y": y, "elevation": road_bridge_default_elevation})
 
         if edge_tiles:
             master_plan.append({
@@ -341,6 +359,9 @@ class Generators:
             "thinking",
             detail="Mapping districts — first AI pass can take several minutes.",
         )
+        scfg = self.engine.system_configuration
+        gw, gh = scfg.grid.world_grid_width, scfg.grid.world_grid_height
+        mpt = scfg.grid.world_scale_meters_per_tile
         plan_prompt = (
             f"Research and map the city of {scen['location']} during {scen['period']}.\n"
             f"Time span: {scen['year_start']} to {scen['year_end']}.\n"
@@ -348,12 +369,12 @@ class Generators:
             f"ABOUT THIS CITY:\n{scen.get('description', '')}\n"
             f"Key features: {scen.get('features', '')}\n"
             f"Layout notes: {scen.get('grid_note', '')}\n\n"
-            f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters = {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m).\n\n"
+            f"Grid size: {gw}x{gh} (each tile ≈ {mpt} meters = {gw * mpt}m x {gh * mpt}m).\n\n"
             f"RESEARCH DEEPLY: What districts existed at this exact time? Which buildings had been built? "
             f"Which hadn't been constructed yet? What was the terrain like?\n\n"
             f"For each district: real name, function, footprint in tile coordinates, named buildings that existed, "
             f"roads and natural features.\n\n"
-            f"IMPORTANT: List at most {config_module.MAX_BUILDINGS_PER_DISTRICT} buildings per district. "
+            f"IMPORTANT: List at most {scfg.grid.maximum_buildings_per_district_count} buildings per district. "
             f"Choose the most significant and visually distinctive structures. Include roads and open spaces between them.\n\n"
             f"Be historically precise: only include structures that existed at this time."
         )
@@ -362,7 +383,8 @@ class Generators:
                 trace_event("discovery", "Calling planner_skeleton.generate() for district skeleton", attempt=attempt)
                 self.engine.update_trace_snapshot(phase="skeleton_planner", step="generate_in_progress", attempt=attempt)
                 result = await asyncio.wait_for(
-                    self.planner_skeleton.generate(plan_prompt), timeout=300  # 5 min (CLI may do web searches)
+                    self.planner_skeleton.generate(plan_prompt),
+                    timeout=scfg.llm.agent_timeout_long_seconds,
                 )
                 break
             except (AgentGenerationError, asyncio.TimeoutError) as err:
@@ -374,14 +396,17 @@ class Generators:
                     retriable = reason in ("bad_model_output", "api_error", "network")
                     if retriable:
                         logger.warning("Skeleton planner failed (%s), retrying once", reason)
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(scfg.skeleton_planner_inter_retry_wait_seconds)
                         continue
                 # Second attempt or non-retriable
                 await self._set_status("cartographus", "idle")
                 if isinstance(err, asyncio.TimeoutError):
                     await self._pause_for_api_issue(
                         "network",
-                        "Skeleton planner timed out after 5 minutes (300s wait limit).",
+                        (
+                            "Skeleton planner timed out after "
+                            f"{scfg.llm.agent_timeout_long_seconds}s wait limit."
+                        ),
                         "cartographus",
                     )
                 else:
@@ -408,9 +433,10 @@ class Generators:
         self.districts = result.get("districts", [])
         # Store full result so _create_blueprint can access AI-generated geography
         self._last_skeleton_result = result
-        if len(self.districts) > config_module.MAX_DISTRICTS:
-            logger.warning("District count %d exceeds cap of %d — truncating", len(self.districts), config_module.MAX_DISTRICTS)
-            self.districts = self.districts[:config_module.MAX_DISTRICTS]
+        max_dist = scfg.grid.maximum_districts_count
+        if len(self.districts) > max_dist:
+            logger.warning("District count %d exceeds cap of %d — truncating", len(self.districts), max_dist)
+            self.districts = self.districts[:max_dist]
         logger.info(f"Skeleton: {len(self.districts)} districts")
         if self.districts:
             from core.run_log import log_event
@@ -419,9 +445,10 @@ class Generators:
 
         if not self.districts:
             # Log the full result for debugging
+            dbg_max = scfg.skeleton_planner_debug_json_max_chars
             logger.error(
                 "Skeleton planner returned no districts. Full result: %s",
-                json.dumps(result, indent=2)[:3000],
+                json.dumps(result, indent=2)[:dbg_max],
             )
             await self._pause_for_api_issue(
                 "bad_model_output",
@@ -605,6 +632,7 @@ class Generators:
             self.engine.districts,
             self.engine.generation,
             scenario=self.engine.scenario,
+            system_configuration=self.engine.system_configuration,
             flush_mode="full",
         )
 
@@ -622,7 +650,9 @@ class Generators:
         # extends to cover the new district regions
         if bp and (bp.hills or bp.water):
             # Apply elevation to any newly created tiles in expanded area
-            elev_count = bp.apply_elevation_to_world(self.world)
+            elev_count = bp.apply_elevation_to_world(
+                self.world, system_configuration=self.engine.system_configuration
+            )
             if elev_count:
                 logger.info("Expansion: applied elevation to %d new tiles", elev_count)
             await self.broadcast({
@@ -630,8 +660,8 @@ class Generators:
                 "hills": bp.hills,
                 "water": bp.water,
                 "roads": bp.roads,
-                "max_gradient": TERRAIN_MAX_GRADIENT,
-                "gradient_iterations": TERRAIN_GRADIENT_ITERATIONS,
+                "max_gradient": self.engine.system_configuration.terrain.maximum_gradient_value,
+                "gradient_iterations": self.engine.system_configuration.terrain.gradient_iterations_count,
             })
 
         return True
@@ -758,8 +788,11 @@ class Generators:
             self._fused_seed_master_plan = None
             master_plan = self.validate_master_plan_structures(raw_seed)
             if master_plan:
-                gap = get_district_spacing(self._district_style(district))
-                master_plan = enforce_spacing(master_plan, min_gap=gap)
+                gap = get_district_spacing(
+                    self._district_style(district),
+                    system_configuration=self.engine.system_configuration,
+                )
+                master_plan = self._spacing_enforced_plan(master_plan, min_gap=gap)
                 region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
                 master_plan = self._ensure_road_connectivity(master_plan, region)
                 master_plan = self._apply_master_plan_validation(
@@ -818,7 +851,8 @@ class Generators:
         district_key = district.get("name", "unknown")
         survey_sid = district_survey_key(district)
 
-        if len(buildings) <= SURVEY_BUILDINGS_PER_CHUNK:
+        survey_chunk = self.engine.system_configuration.grid.survey_buildings_per_chunk_count
+        if len(buildings) <= survey_chunk:
             survey = await self.survey_district_single_pass(district, buildings_filter=None, prior_summary="")
             master_plan = survey.get("master_plan", [])
             if not master_plan:
@@ -843,8 +877,11 @@ class Generators:
             if isinstance(palette, dict):
                 self._district_palettes[survey_sid] = palette
                 logger.info("District %s palette: %s", district_key, palette)
-            gap = get_district_spacing(self._district_style(district))
-            mp = enforce_spacing(master_plan, min_gap=gap)
+            gap = get_district_spacing(
+                    self._district_style(district),
+                    system_configuration=self.engine.system_configuration,
+                )
+            mp = self._spacing_enforced_plan(master_plan, min_gap=gap)
             region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
             mp = self._ensure_road_connectivity(mp, region)
             return self._apply_master_plan_validation(mp, f"Survey {district.get('name', '?')}")
@@ -852,10 +889,10 @@ class Generators:
         merged: list = []
         occupied_summary = "No tiles placed yet in this chunked survey."
         chunks_failed = 0
-        total_chunks = (len(buildings) + SURVEY_BUILDINGS_PER_CHUNK - 1) // SURVEY_BUILDINGS_PER_CHUNK
+        total_chunks = (len(buildings) + survey_chunk - 1) // survey_chunk
         district_name = district.get("name", "?")
-        for i, chunk_start in enumerate(range(0, len(buildings), SURVEY_BUILDINGS_PER_CHUNK)):
-            chunk = buildings[chunk_start : chunk_start + SURVEY_BUILDINGS_PER_CHUNK]
+        for i, chunk_start in enumerate(range(0, len(buildings), survey_chunk)):
+            chunk = buildings[chunk_start : chunk_start + survey_chunk]
             try:
                 survey = await self.survey_district_single_pass(district, buildings_filter=chunk, prior_summary=occupied_summary)
                 part = survey.get("master_plan", [])
@@ -904,8 +941,11 @@ class Generators:
                 district_name, chunks_failed, total_chunks,
             )
 
-        gap = get_district_spacing(self._district_style(district))
-        mp = enforce_spacing(merged, min_gap=gap)
+        gap = get_district_spacing(
+                    self._district_style(district),
+                    system_configuration=self.engine.system_configuration,
+                )
+        mp = self._spacing_enforced_plan(merged, min_gap=gap)
         region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
         mp = self._ensure_road_connectivity(mp, region)
         return self._apply_master_plan_validation(mp, f"Survey (chunked) {district_name}")
@@ -939,7 +979,10 @@ class Generators:
             f"Description: {district.get('description', '')}\n"
             f"Terrain: {terrain_notes}\n"
             f"Base elevation: {district_elev} (0.0=water level, 0.3=gentle hill, 0.6=steep hill)\n"
-            f"Grid region: {region_str} (each tile = 10 meters, full grid is {GRID_WIDTH}x{GRID_HEIGHT} = {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m)\n"
+            f"Grid region: {region_str} (each tile = {self.engine.system_configuration.grid.world_scale_meters_per_tile} meters, "
+            f"full grid is {self.engine.system_configuration.grid.world_grid_width}x{self.engine.system_configuration.grid.world_grid_height} = "
+            f"{self.engine.system_configuration.grid.world_grid_width * self.engine.system_configuration.grid.world_scale_meters_per_tile}m x "
+            f"{self.engine.system_configuration.grid.world_grid_height * self.engine.system_configuration.grid.world_scale_meters_per_tile}m)\n"
             f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
             f"Known buildings to place (full list for context): {', '.join(district.get('buildings', []))}\n"
             f"Already built in nearby areas:\n{existing}\n"

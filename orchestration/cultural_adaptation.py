@@ -11,12 +11,20 @@ import json
 import os
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.config import Config
+
+_cultural_adaptation_by_config_id: dict[int, "CulturalAdaptationSystem"] = {}
+
 
 class CulturalAdaptationSystem:
     """Manages cultural and historical adaptation rules for building generation."""
 
-    def __init__(self):
-        self._data_dir = Path(__file__).resolve().parent.parent / "data" / "societies"
+    def __init__(self, system_configuration: "Config"):
+        self._system_configuration = system_configuration
+        self._data_dir = Path(system_configuration.data_directory_relative) / "societies"
         self.cultures = self._load_cultures()
 
         self.historical_periods = {
@@ -37,7 +45,10 @@ class CulturalAdaptationSystem:
             raise FileNotFoundError(f"Societies directory not found: {self._data_dir}")
 
         # Validate all society files first
-        validation_results = validate_all_societies(self._data_dir)
+        validation_results = validate_all_societies(
+            self._data_dir,
+            system_configuration=self._system_configuration,
+        )
         invalid_societies = {name: errors for name, errors in validation_results.items() if errors}
 
         if invalid_societies:
@@ -207,5 +218,12 @@ class CulturalAdaptationSystem:
         return " | ".join(context_parts)
 
 
-# Global instance for easy access
-cultural_system = CulturalAdaptationSystem()
+def cultural_adaptation_system_for(system_configuration: "Config") -> CulturalAdaptationSystem:
+    """Reuse one CulturalAdaptationSystem per Config object identity."""
+    key = id(system_configuration)
+    existing = _cultural_adaptation_by_config_id.get(key)
+    if existing is not None:
+        return existing
+    created = CulturalAdaptationSystem(system_configuration)
+    _cultural_adaptation_by_config_id[key] = created
+    return created

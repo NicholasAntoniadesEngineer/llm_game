@@ -6,10 +6,12 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from world.state import WorldState
-from core import config
+
+if TYPE_CHECKING:
+    from core.config import Config
 from core.errors import SaveIndexError
 from core.fingerprint import (
     CACHE_WRAP_VERSION,
@@ -28,7 +30,10 @@ INDEX_FILE = SAVES_DIR / "index.json"
 DISTRICTS_CACHE = SAVES_DIR / "districts_cache.json"
 SURVEYS_CACHE = SAVES_DIR / "surveys_cache.json"
 BLUEPRINT_FILE = SAVES_DIR / "blueprint.json"
-LLM_SETTINGS_FILE = _PROJECT_ROOT / "data" / "llm_settings.json"
+
+
+def _llm_settings_file_path(system_configuration: "Config") -> Path:
+    return _PROJECT_ROOT / system_configuration.llm_settings_file_relative
 
 
 def _ensure_dirs():
@@ -53,12 +58,17 @@ def _chunk_filename(cx: int, cy: int) -> str:
     return f"chunk_{cx}_{cy}.json"
 
 
-def _current_run_fingerprint(scenario: dict[str, Any] | None, chunk_size_tiles: int) -> str:
+def _current_run_fingerprint(
+    scenario: dict[str, Any] | None,
+    chunk_size_tiles: int,
+    *,
+    system_configuration: "Config",
+) -> str:
     return compute_run_fingerprint(
         scenario,
         chunk_size_tiles,
-        config.GRID_WIDTH,
-        config.GRID_HEIGHT,
+        system_configuration.grid.world_grid_width,
+        system_configuration.grid.world_grid_height,
     )
 
 
@@ -103,6 +113,7 @@ def save_state(
     generation: int = 0,
     *,
     scenario: dict[str, Any],
+    system_configuration: "Config",
     flush_mode: str = "incremental",
 ) -> None:
     """Save world state: ``index.json`` + chunk JSON files + ``chat_history.json``.
@@ -130,7 +141,11 @@ def save_state(
         scenario_effective["started_at_s"] = run_started_at_s
 
     chunk_sz = world.chunk_size_tiles
-    run_fp = _current_run_fingerprint(scenario_effective, chunk_sz)
+    run_fp = _current_run_fingerprint(
+        scenario_effective,
+        chunk_sz,
+        system_configuration=system_configuration,
+    )
     layout_fp = compute_districts_layout_fingerprint(districts or [])
 
     chunks_to_write: set[tuple[int, int]]
@@ -242,7 +257,11 @@ def _load_index_dict() -> dict[str, Any]:
     return out
 
 
-def load_state(world: WorldState) -> tuple[list[dict], int, list[dict], int, dict[str, Any] | None] | None:
+def load_state(
+    world: WorldState,
+    *,
+    system_configuration: "Config",
+) -> tuple[list[dict], int, list[dict], int, dict[str, Any] | None] | None:
     """Load from chunked format.
 
     Returns ``(chat_history, district_index, districts, generation, scenario)`` or None.
@@ -488,14 +507,18 @@ def validate_blueprint_tile_invariants(world: WorldState, blueprint_dict: dict |
 # ─── LLM Settings ──────────────────────────────────────────────────
 
 
-def save_llm_settings(overrides: dict):
-    _atomic_write(LLM_SETTINGS_FILE, json.dumps(overrides, indent=2))
+def save_llm_settings(overrides: dict, *, system_configuration: "Config") -> None:
+    _atomic_write(
+        _llm_settings_file_path(system_configuration),
+        json.dumps(overrides, indent=2),
+    )
 
 
-def load_llm_settings():
-    if not LLM_SETTINGS_FILE.exists():
+def load_llm_settings(*, system_configuration: "Config") -> None:
+    path = _llm_settings_file_path(system_configuration)
+    if not path.exists():
         return
-    data = json.loads(LLM_SETTINGS_FILE.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and data:
         llm_agents.set_runtime_overrides(data)
         logger.info("Loaded LLM settings (%s agents)", len(data))

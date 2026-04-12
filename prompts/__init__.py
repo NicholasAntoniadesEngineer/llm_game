@@ -3,8 +3,8 @@
 Usage:
     from prompts import load_prompt, load_data
     text = load_prompt("urbanista")                       # no substitution
-    text = load_prompt("cartographus_plan_skeleton",      # with variables
-                       GRID_WIDTH=320, GRID_HEIGHT=320)
+    text = load_prompt("cartographus_plan_skeleton",      # with variables (values from Config at call site)
+                       GRID_WIDTH=320, GRID_HEIGHT=320)       # example only
 
 Template variables use Python str.format_map() syntax: {VARIABLE_NAME}.
 Literal braces in the text (JSON examples) must be doubled: {{ and }}.

@@ -10,12 +10,18 @@ import hashlib
 import json
 import math
 from collections import deque
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 from agents.golden_specs import get_golden_example_for_culture
 from orchestration.reference_db import format_reference_for_prompt, lookup_architectural_reference
 from orchestration.schema import format_compact_neighbors as _fmt_compact_nb
-from orchestration.cultural_adaptation import cultural_system
+from orchestration.cultural_adaptation import (
+    CulturalAdaptationSystem,
+    cultural_adaptation_system_for,
+)
 from prompts import format_pbr_hint, format_composition_directive
 
 
@@ -48,7 +54,13 @@ def clear_variety_history() -> None:
     _RECENT_BUILDS.clear()
 
 
-def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "classical") -> str:
+def _generate_variety_hint(
+    btype: str,
+    culture: str = "roman",
+    period: str = "classical",
+    *,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> str:
     """Generate a compact variety suggestion based on recent builds and cultural context.
 
     Enhanced with cultural and historical awareness for more appropriate variety suggestions.
@@ -59,7 +71,7 @@ def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "cl
     hints: list[str] = []
 
     # Cultural context adjustments
-    cultural_hints = _get_cultural_variety_hints(btype, culture, period)
+    cultural_hints = _get_cultural_variety_hints(btype, culture, period, cultural_adaptation)
     hints.extend(cultural_hints)
 
     # 1. Column order rotation for temples/basilicas (culturally appropriate)
@@ -69,7 +81,9 @@ def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "cl
         if recent_orders:
             last_order = recent_orders[-1]
             # Suggest culturally appropriate alternatives
-            alternatives = _get_culturally_appropriate_orders(culture, period, last_order)
+            alternatives = _get_culturally_appropriate_orders(
+                culture, period, last_order, cultural_adaptation
+            )
             if alternatives:
                 hints.append(f"Prefer {alternatives[0]} columns (last used {last_order})")
 
@@ -92,7 +106,9 @@ def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "cl
         last_3 = recent_materials[-3:]
         if len(set(last_3)) == 1:
             material = last_3[0]
-            alternative = _suggest_alternative_material(material, culture, period)
+            alternative = _suggest_alternative_material(
+                material, culture, period, cultural_adaptation
+            )
             if alternative:
                 hints.append(f"Use {alternative} instead of {material} — diversify materials")
 
@@ -103,14 +119,16 @@ def _generate_variety_hint(btype: str, culture: str = "roman", period: str = "cl
         avg_h = sum(recent_heights) / len(recent_heights)
         last_h = recent_heights[-1]
         if last_h > 0 and abs(last_h - avg_h) < avg_h * 0.15:  # Stricter check
-            cultural_scale_hint = _get_cultural_scale_hint(btype, culture, period)
+            cultural_scale_hint = _get_cultural_scale_hint(
+                btype, culture, period, cultural_adaptation
+            )
             if cultural_scale_hint:
                 hints.append(cultural_scale_hint)
             else:
                 hints.append("Vary height +/-25% from neighbors for visual interest")
 
     # 4. Grammar mode suggestion with cultural appropriateness
-    grammar_types = _get_grammar_types_for_culture(culture, period)
+    grammar_types = _get_grammar_types_for_culture(culture, period, cultural_adaptation)
     if btype in grammar_types:
         recent_grammar_use = sum(1 for b in _RECENT_BUILDS if b["btype"] in grammar_types)
         if recent_grammar_use > 0 and recent_grammar_use % 4 == 0:  # Less frequent
@@ -272,6 +290,8 @@ def build_building_prompt(
     physical_desc: str,
     district_scenery: str,
     env_note: str,
+    *,
+    system_configuration: "Config",
     district_palette: dict | None = None,
     world_state: Any = None,
     city_center: tuple[float, float] | None = None,
@@ -359,7 +379,10 @@ def build_building_prompt(
         prompt += f"\n{transition_hint}"
 
     # Variety hint based on recent builds
-    variety = _generate_variety_hint(btype)
+    variety = _generate_variety_hint(
+        btype,
+        cultural_adaptation=cultural_adaptation_system_for(system_configuration),
+    )
     if variety:
         prompt += f"\n{variety}"
 
@@ -387,22 +410,32 @@ def build_compact_neighbor_desc(neighbors: list[dict]) -> str:
     return _fmt_compact_nb(neighbors)
 
 
-def _get_cultural_variety_hints(btype: str, culture: str, period: str) -> list[str]:
+def _get_cultural_variety_hints(
+    btype: str,
+    culture: str,
+    period: str,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> list[str]:
     """Get variety hints specific to cultural and historical context."""
-    if culture not in cultural_system.cultures:
+    if culture not in cultural_adaptation.cultures:
         return []
 
-    culture_data = cultural_system.cultures[culture]
+    culture_data = cultural_adaptation.cultures[culture]
     hints = culture_data.get("prompt_hints", {}).get("variety_suggestions", [])
     return hints
 
 
-def _get_culturally_appropriate_orders(culture: str, period: str, exclude_order: str) -> list[str]:
+def _get_culturally_appropriate_orders(
+    culture: str,
+    period: str,
+    exclude_order: str,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> list[str]:
     """Get column orders appropriate for the culture and period."""
-    if culture not in cultural_system.cultures:
+    if culture not in cultural_adaptation.cultures:
         return [order for order in ["doric", "ionic", "corinthian"] if order != exclude_order]
 
-    culture_data = cultural_system.cultures[culture]
+    culture_data = cultural_adaptation.cultures[culture]
     # For now, return all available orders from building types
     all_orders = set()
     for building_type in culture_data.get("building_types", {}).values():
@@ -413,12 +446,17 @@ def _get_culturally_appropriate_orders(culture: str, period: str, exclude_order:
     return [order for order in orders if order != exclude_order]
 
 
-def _suggest_alternative_material(current: str, culture: str, period: str) -> str | None:
+def _suggest_alternative_material(
+    current: str,
+    culture: str,
+    period: str,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> str | None:
     """Suggest alternative material based on cultural preferences."""
-    if culture not in cultural_system.cultures:
+    if culture not in cultural_adaptation.cultures:
         return None
 
-    culture_data = cultural_system.cultures[culture]
+    culture_data = cultural_adaptation.cultures[culture]
     material_alternatives = culture_data.get("prompt_hints", {}).get("material_alternatives", {})
 
     if current in material_alternatives:
@@ -427,12 +465,17 @@ def _suggest_alternative_material(current: str, culture: str, period: str) -> st
     return None
 
 
-def _get_cultural_scale_hint(btype: str, culture: str, period: str) -> str | None:
+def _get_cultural_scale_hint(
+    btype: str,
+    culture: str,
+    period: str,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> str | None:
     """Get culturally appropriate scale variation hints."""
-    if culture not in cultural_system.cultures:
+    if culture not in cultural_adaptation.cultures:
         return None
 
-    culture_data = cultural_system.cultures[culture]
+    culture_data = cultural_adaptation.cultures[culture]
     scale_hints = culture_data.get("prompt_hints", {}).get("scale_hints", {})
 
     if btype in scale_hints:
@@ -441,12 +484,16 @@ def _get_cultural_scale_hint(btype: str, culture: str, period: str) -> str | Non
     return None
 
 
-def _get_grammar_types_for_culture(culture: str, period: str) -> set[str]:
+def _get_grammar_types_for_culture(
+    culture: str,
+    period: str,
+    cultural_adaptation: CulturalAdaptationSystem,
+) -> set[str]:
     """Get building types that have standard forms for the culture/period."""
-    if culture not in cultural_system.cultures:
+    if culture not in cultural_adaptation.cultures:
         return {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
 
-    culture_data = cultural_system.cultures[culture]
+    culture_data = cultural_adaptation.cultures[culture]
     grammar_types = culture_data.get("prompt_hints", {}).get("grammar_types", [])
     return set(grammar_types) if grammar_types else {"temple", "basilica", "insula", "domus", "thermae", "amphitheater"}
 
