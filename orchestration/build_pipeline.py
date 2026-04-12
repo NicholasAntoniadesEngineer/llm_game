@@ -14,6 +14,7 @@ from orchestration.master_plan_geometry import (
     normalize_master_plan_tile_coordinates,
 )
 from orchestration.placement import check_functional_placement, log_functional_placement_warnings
+from orchestration.placement_repair import prune_bridges_not_adjacent_to_water_when_water_exists
 
 logger = logging.getLogger("eternal.engine")
 
@@ -91,6 +92,17 @@ async def _step_functional_placement_warnings(ctx: MasterPlanPreplaceContext) ->
     )
 
 
+async def _step_prune_unusable_bridges(ctx: MasterPlanPreplaceContext) -> None:
+    removed = prune_bridges_not_adjacent_to_water_when_water_exists(ctx.master_plan)
+    if removed:
+        trace_event(
+            "engine",
+            "placement_repair_pruned_bridges",
+            district=ctx.district_key,
+            removed_count=removed,
+        )
+
+
 async def _step_log_intra_plan_tile_overlaps(ctx: MasterPlanPreplaceContext) -> None:
     overlaps = intra_plan_tile_overlaps(ctx.master_plan)
     for overlap_line in overlaps:
@@ -141,6 +153,10 @@ MASTER_PLAN_PREPLACE_STEPS: tuple[BuildPipelineStep, ...] = (
     BuildPipelineStep(
         name="functional_placement_warnings",
         coro_fn=_step_functional_placement_warnings,
+    ),
+    BuildPipelineStep(
+        name="prune_unusable_bridges",
+        coro_fn=_step_prune_unusable_bridges,
     ),
     BuildPipelineStep(
         name="log_intra_plan_tile_overlaps",

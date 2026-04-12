@@ -187,4 +187,61 @@ def ensure_road_connectivity_in_master_plan(
         world_grid_height_tiles=world_grid_height_tiles,
         road_bridge_default_elevation=road_bridge_default_elevation,
     )
+    return collapse_connectivity_road_structures(master_plan)
+
+
+_SYNTHETIC_CONNECTIVITY_ROAD_NAMES = frozenset({"Connecting road", "District edge road"})
+
+
+def collapse_connectivity_road_structures(master_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge synthetic connectivity road entries into one structure to reduce master_plan cardinality."""
+    if not isinstance(master_plan, list):
+        return master_plan
+
+    synthetic_structs: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for struct in master_plan:
+        if not isinstance(struct, dict):
+            rest.append(struct)
+            continue
+        nm = str(struct.get("name", ""))
+        if struct.get("building_type") == "road" and nm in _SYNTHETIC_CONNECTIVITY_ROAD_NAMES:
+            synthetic_structs.append(struct)
+        else:
+            rest.append(struct)
+
+    if len(synthetic_structs) <= 1:
+        return master_plan
+
+    merged_tiles_raw: list[dict[str, Any]] = []
+    for s in synthetic_structs:
+        for t in s.get("tiles", []):
+            if isinstance(t, dict):
+                merged_tiles_raw.append(dict(t))
+
+    seen: set[tuple[int, int]] = set()
+    deduped: list[dict[str, Any]] = []
+    for t in merged_tiles_raw:
+        try:
+            key = (int(t["x"]), int(t["y"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(t)
+
+    combined = {
+        "name": "Connectivity roads",
+        "building_type": "road",
+        "tiles": deduped,
+        "description": "Merged synthetic road segments for inter-district and intra-district connectivity.",
+    }
+    master_plan.clear()
+    master_plan.extend(rest + [combined])
+    logger.info(
+        "Road connectivity: collapsed %d synthetic road structures into one (%d tiles)",
+        len(synthetic_structs),
+        len(deduped),
+    )
     return master_plan

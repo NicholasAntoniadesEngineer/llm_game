@@ -408,6 +408,8 @@ class TaskManager:
                 scenario=scen,
                 system_configuration=self.system_configuration,
                 flush_mode="incremental",
+                build_wave_phase=self._persistence_reads.build_wave_phase,
+                district_build_cursor=self._persistence_reads.district_build_cursor,
             )
             self._structures_since_save = 0
 

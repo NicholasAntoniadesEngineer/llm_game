@@ -608,7 +608,7 @@ class TestPersistenceScaling:
         ws2 = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         result = load_state(ws2, system_configuration=SYSTEM_CONFIGURATION)
         assert result is not None
-        loaded_chat, di, loaded_districts, _gen, _scen = result
+        loaded_chat, di, loaded_districts, _gen, _scen, _wave, _cursor = result
         assert di == 1
         assert len(loaded_districts) == 1
 

@@ -28,7 +28,7 @@ SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
     "terrain_max_gradient", "terrain_gradient_iterations",
     "max_buildings_per_district", "survey_buildings_per_chunk", "urbanista_max_concurrent",
     "survey_max_concurrent", "save_state_every_n_structures", "chat_persist_debounce_s",
-    "heartbeat_interval_s", "expansion_cooldown", "chat_history_max_messages",
+    "heartbeat_interval_s", "llm_trace_heartbeat_interval_s", "expansion_cooldown", "chat_history_max_messages",
     "chat_replay_max_messages", "token_telemetry_interval_s", "timeline_window", "step_delay",
     "max_generations", "claude_cli_binary", "max_batch_size", "max_batch_tiles",
     "cost_per_1m_input", "cost_per_1m_output", "max_retries", "retry_backoff_base", "retry_jitter",
@@ -183,6 +183,7 @@ class TimingConfig:
     step_delay_seconds: float
     chat_persist_debounce_seconds: float
     heartbeat_interval_seconds: float
+    llm_trace_heartbeat_interval_seconds: float
     expansion_cooldown_seconds: float
     rate_limit_window_seconds: int
 
@@ -486,10 +487,14 @@ class Config:
                 token_telemetry_interval_seconds=params["token_telemetry_interval_s"],
                 estimated_chars_per_token_for_heuristic=float(params["token_estimate_chars_per_token"]),
             )
+            llm_trace_hb = float(params["llm_trace_heartbeat_interval_s"])
+            if llm_trace_hb < 0:
+                raise ConfigLoadError("llm_trace_heartbeat_interval_s must be >= 0")
             timing_config_instance = TimingConfig(
                 step_delay_seconds=params["step_delay"],
                 chat_persist_debounce_seconds=params["chat_persist_debounce_s"],
                 heartbeat_interval_seconds=params["heartbeat_interval_s"],
+                llm_trace_heartbeat_interval_seconds=llm_trace_hb,
                 expansion_cooldown_seconds=params["expansion_cooldown"],
                 rate_limit_window_seconds=params["rate_limit_window"],
             )

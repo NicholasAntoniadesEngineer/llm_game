@@ -222,6 +222,51 @@ def check_component_collisions(spec: dict, footprint_w: float, footprint_d: floa
     return collisions
 
 
+def try_prune_colliding_decorative_components(
+    spec: dict,
+    footprint_w: float,
+    footprint_d: float,
+    *,
+    max_removals: int = 8,
+) -> int:
+    """Remove ``decorative`` stack-role components from the tail until collisions shrink.
+
+    Returns how many components were removed (0 if none / not applicable).
+    """
+    if not isinstance(spec, dict):
+        return 0
+    comps = spec.get("components")
+    if not isinstance(comps, list) or len(comps) < 2:
+        return 0
+
+    removed_total = 0
+    while removed_total < max_removals:
+        collisions_before = check_component_collisions(spec, footprint_w, footprint_d)
+        if not collisions_before:
+            break
+        remove_idx: int | None = None
+        for i in range(len(comps) - 1, -1, -1):
+            c = comps[i]
+            if isinstance(c, dict) and _resolve_stack_role(c) == "decorative":
+                remove_idx = i
+                break
+        if remove_idx is None:
+            break
+        comps.pop(remove_idx)
+        removed_total += 1
+        if len(comps) < 2:
+            break
+        collisions_after = check_component_collisions(spec, footprint_w, footprint_d)
+        if len(collisions_after) >= len(collisions_before):
+            continue
+    if removed_total:
+        logger.info(
+            "Geometry prune: removed %d decorative component(s) to reduce collisions",
+            removed_total,
+        )
+    return removed_total
+
+
 def generate_architectural_feedback(spec: dict, footprint_w: float, footprint_d: float) -> str:
     """Generate detailed feedback for the Urbanista LLM about architectural issues.
 

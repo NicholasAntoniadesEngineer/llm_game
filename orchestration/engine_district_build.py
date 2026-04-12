@@ -1,10 +1,12 @@
 """District build wave — extracted from BuildEngine for maintainability."""
 
 import asyncio
+import copy
 import logging
 from typing import TYPE_CHECKING
 
 from agents.base import BaseAgent
+from agents.golden_specs import get_fallback_spec_components_for_building_type
 from core.errors import AgentGenerationError, UrbanistaValidationError
 from core.fingerprint import district_survey_key
 from core.run_log import trace_event
@@ -19,6 +21,7 @@ from orchestration.urbanista_place_pipeline import run_traced_urbanista_arch_san
 from orchestration.validation import (
     validate_urbanista_tiles,
     check_component_collisions,
+    try_prune_colliding_decorative_components,
 )
 from orchestration.world_commit import apply_tile_placements
 
@@ -151,16 +154,15 @@ async def run_district_build(
         neighbor_desc = ctx["neighbor_desc"]
         nearest = ctx["nearest"]
 
-        await engine._chat(
-            "cartographus",
-            "info",
-            (
-                f"Scenery: {name} ({btype}, {len(tiles)} tiles). "
-                if btype in engine._open_terrain_types_set
-                else f"Building: {name} ({btype}, {len(tiles)} tiles). "
+        if btype not in engine._open_terrain_types_set:
+            await engine._chat(
+                "cartographus",
+                "info",
+                (
+                    f"Building: {name} ({btype}, {len(tiles)} tiles). "
+                    + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else "")
+                ),
             )
-            + (f"Nearest: {nearest[0]['name']} at {nearest[0]['distance_m']}m" if nearest else ""),
-        )
 
         hist_result = {
             "commentary": desc or f"{name} ({btype}) in {district.get('name', 'this district')}.",
@@ -309,7 +311,7 @@ async def run_district_build(
     max_consecutive_failures = (
         engine.system_configuration.urbanista_max_consecutive_failures_before_pause
     )
-    placed_count = 0
+    completed_design_jobs_count = 0
 
     if urban_jobs:
         await engine._set_status(
@@ -372,7 +374,15 @@ async def run_district_build(
             else:
                 job_idx = indices[0]
                 try:
-                    result = await engine.generators.urbanista_generate_bounded(urban_jobs[job_idx]["prompt"])
+                    result = await engine.generators.urbanista_generate_bounded(
+                        urban_jobs[job_idx]["prompt"],
+                        trace_extra={
+                            "district": district_key,
+                            "structure": urban_jobs[job_idx]["name"],
+                            "building_type": urban_jobs[job_idx]["btype"],
+                            "work_unit_index": wu_idx,
+                        },
+                    )
                     return (wu_idx, [(job_idx, result)])
                 except BaseException as err:
                     return (wu_idx, [(job_idx, err)])
@@ -395,10 +405,10 @@ async def run_district_build(
 
                 job = urban_jobs[idx]
                 name = job["name"]
-                placed_count += 1
+                completed_design_jobs_count += 1
                 logger.info(
                     "Streaming result %d/%d: %s — type=%s keys=%s",
-                    placed_count, len(urban_jobs), name,
+                    completed_design_jobs_count, len(urban_jobs), name,
                     type(arch_result).__name__,
                     sorted(arch_result.keys()) if isinstance(arch_result, dict) else "N/A",
                 )
@@ -471,6 +481,19 @@ async def run_district_build(
                     fp_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * _fs, 2)
                     collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
                     if collisions:
+                        pruned_n = try_prune_colliding_decorative_components(
+                            anchor_tile["spec"],
+                            fp_w,
+                            fp_d,
+                            max_removals=8,
+                        )
+                        if pruned_n:
+                            collisions = check_component_collisions(anchor_tile["spec"], fp_w, fp_d)
+                            logger.info(
+                                "Geometry prune for %s: removed %d decorative component(s); %d issue(s) remain",
+                                name, pruned_n, len(collisions),
+                            )
+                    if collisions:
                         max_entries = (
                             engine.system_configuration.urbanista_geometry_collision_report_max_entries
                         )
@@ -528,10 +551,10 @@ async def run_district_build(
                 await engine._chat("urbanista", "design", commentary)
                 await engine._set_status(
                     "urbanista",
-                    "thinking" if placed_count < len(urban_jobs) else "idle",
+                    "thinking" if completed_design_jobs_count < len(urban_jobs) else "idle",
                     detail=(
-                        f"Progress {placed_count}/{len(urban_jobs)} — {name} placed; continuing…"
-                        if placed_count < len(urban_jobs)
+                        f"Progress {completed_design_jobs_count}/{len(urban_jobs)} — {name} design finished; continuing…"
+                        if completed_design_jobs_count < len(urban_jobs)
                         else None
                     ),
                 )
@@ -596,6 +619,30 @@ async def run_district_build(
                         if not td["spec"].get("anchor"):
                             td["spec"]["anchor"] = {"x": anchor_x, "y": anchor_y}
 
+                if job["btype"] not in engine._open_terrain_types_set:
+                    _fs_fallback = engine.system_configuration.footprint_width_depth_scale_factor
+                    fb_w = round((max(t["x"] for t in tiles) - min(t["x"] for t in tiles) + 1) * _fs_fallback, 2)
+                    fb_d = round((max(t["y"] for t in tiles) - min(t["y"] for t in tiles) + 1) * _fs_fallback, 2)
+                    fallback_components = get_fallback_spec_components_for_building_type(
+                        str(job["btype"]),
+                        fb_w,
+                        fb_d,
+                        city_loc=city_loc,
+                    )
+                    if fallback_components:
+                        for td in final_tiles:
+                            btt = str(td.get("building_type") or job["btype"] or "")
+                            if btt in engine._open_terrain_types_set:
+                                continue
+                            spec_existing = td.get("spec")
+                            if isinstance(spec_existing, dict) and spec_existing.get("components"):
+                                continue
+                            td["spec"] = {
+                                "components": copy.deepcopy(fallback_components),
+                                "anchor": {"x": anchor_x, "y": anchor_y},
+                            }
+                        logger.info("Applied golden fallback components for %s (%s)", name, job["btype"])
+
                 # Nest grammar data into spec
                 for td in final_tiles:
                     g = td.pop("grammar", None)
@@ -649,7 +696,7 @@ async def run_district_build(
                         "type": "build_progress",
                         "structure": name,
                         "building_type": job["btype"],
-                        "done": placed_count,
+                        "done": completed_design_jobs_count,
                         "total": len(urban_jobs),
                         "district": district_key,
                     })

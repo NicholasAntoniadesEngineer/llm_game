@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from core.errors import AgentGenerationError
 from core.run_log import trace_event
@@ -466,7 +467,12 @@ class Generators:
             scenario=self._host.scenario,
             system_configuration=self._host.system_configuration,
             flush_mode="full",
+            build_wave_phase=self._host.build_wave_phase,
+            district_build_cursor=self._host.district_build_cursor,
         )
+
+        self._host.build_wave_phase = "landmark"
+        self._host.district_build_cursor = self._host.district_index
 
         # Start surveys for new districts
         self._host.tasks.start_survey_tasks_from_index(self._host.district_index, len(self.districts))
@@ -831,8 +837,58 @@ class Generators:
             f"Already built in nearby areas:\n{existing}\n"
             f"{scope_extra}\n"
             f"Map the complete district for this pass: buildings, roads/paths, open spaces, and per-tile elevation.\n"
-            f"Follow the system prompt's prose and evidence requirements for description/historical_note/environment_note."
+            f"Follow the system prompt's prose and evidence requirements for description/historical_note/environment_note.",
+            trace_extra={
+                "district": str(district.get("name", "?")),
+                "phase": "survey_single_pass",
+            },
         )
+
+    async def _await_llm_with_optional_trace_heartbeat(
+        self,
+        coro_factory,
+        *,
+        agent_label: str,
+        trace_extra: dict | None,
+    ):
+        """Run awaitable from ``coro_factory``; emit periodic ``trace_event`` while waiting if configured."""
+        interval_s = float(self._host.system_configuration.timing.llm_trace_heartbeat_interval_seconds)
+        extra = dict(trace_extra) if trace_extra else {}
+        trace_event("llm", f"{agent_label}_call_start", **extra)
+        started = time.monotonic()
+        main_task = asyncio.create_task(coro_factory())
+
+        async def _ticker() -> None:
+            while not main_task.done():
+                await asyncio.sleep(interval_s)
+                if not main_task.done():
+                    trace_event(
+                        "llm",
+                        f"{agent_label}_call_waiting",
+                        elapsed_s=round(time.monotonic() - started, 1),
+                        **extra,
+                    )
+
+        tick_task: asyncio.Task | None = None
+        if interval_s > 0:
+            tick_task = asyncio.create_task(_ticker())
+        try:
+            return await main_task
+        finally:
+            if tick_task is not None:
+                tick_task.cancel()
+                try:
+                    await tick_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.debug("llm trace ticker cleanup", exc_info=True)
+            trace_event(
+                "llm",
+                f"{agent_label}_call_done",
+                elapsed_s=round(time.monotonic() - started, 2),
+                **extra,
+            )
 
     async def _generate_with_retry(
         self,
@@ -842,11 +898,38 @@ class Generators:
         *,
         retry_delay_seconds: float,
         agent_label: str,
+        trace_extra: dict | None = None,
     ) -> dict:
         for attempt in range(2):
             try:
-                async with semaphore:
-                    return await agent.generate(prompt)
+
+                timeout_s = float(self._host.system_configuration.llm.agent_timeout_long_seconds)
+
+                async def _guarded_generate():
+                    async with semaphore:
+                        return await asyncio.wait_for(
+                            agent.generate(prompt),
+                            timeout=timeout_s,
+                        )
+
+                return await self._await_llm_with_optional_trace_heartbeat(
+                    _guarded_generate,
+                    agent_label=agent_label,
+                    trace_extra=trace_extra,
+                )
+            except asyncio.TimeoutError:
+                err = AgentGenerationError(
+                    "network",
+                    f"{agent_label} timed out after {timeout_s}s (agent_timeout)",
+                )
+                if attempt == 0:
+                    logger.warning(
+                        "[roma.engine] %s call timed out, retrying once",
+                        agent_label,
+                    )
+                    await asyncio.sleep(retry_delay_seconds)
+                    continue
+                raise err
             except AgentGenerationError as err:
                 retriable = err.pause_reason in ("bad_model_output", "api_error", "network")
                 if attempt == 0 and retriable:
@@ -860,23 +943,50 @@ class Generators:
                     continue
                 raise
 
-    async def surveyor_generate_bounded(self, prompt: str) -> dict:
+    async def surveyor_generate_bounded(self, prompt: str, *, trace_extra: dict | None = None) -> dict:
         return await self._generate_with_retry(
             self.surveyor,
             prompt,
             self._survey_semaphore,
             retry_delay_seconds=1.5,
             agent_label="Surveyor",
+            trace_extra=trace_extra,
         )
 
-    async def urbanista_generate_bounded(self, prompt: str) -> dict:
+    async def urbanista_generate_bounded(self, prompt: str, *, trace_extra: dict | None = None) -> dict:
         return await self._generate_with_retry(
             self.urbanista,
             prompt,
             self._host.tasks.urbanista_concurrency_semaphore,
             retry_delay_seconds=2.0,
             agent_label="Urbanista",
+            trace_extra=trace_extra,
         )
+
+    async def urbanista_generate_batch_bounded(
+        self, batch_prompt: str, batch_count: int, *, trace_extra: dict | None = None
+    ) -> list[dict]:
+        """Single batched Urbanista call under concurrency semaphore, with trace heartbeats."""
+        timeout_s = float(self._host.system_configuration.llm.agent_timeout_long_seconds)
+
+        async def _batch_call():
+            async with self._host.tasks.urbanista_concurrency_semaphore:
+                return await asyncio.wait_for(
+                    self.urbanista.generate_batch(batch_prompt, batch_count),
+                    timeout=timeout_s,
+                )
+
+        try:
+            return await self._await_llm_with_optional_trace_heartbeat(
+                _batch_call,
+                agent_label="Urbanista_batch",
+                trace_extra=trace_extra,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AgentGenerationError(
+                "network",
+                f"Urbanista batch timed out after {timeout_s}s",
+            ) from exc
 
     async def find_map_image(self):
         """Provide a known map for the selected city (URLs from system_config.csv)."""

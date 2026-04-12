@@ -105,3 +105,22 @@ def infer_culture_key_for_prompt(city_loc: str) -> str:
     """Culture group key for prompts; defaults to roman when the city has no culture_city_map entry."""
     culture = _detect_culture(city_loc)
     return culture if culture else "roman"
+
+
+def get_fallback_spec_components_for_building_type(
+    building_type: str,
+    target_w: float,
+    target_d: float,
+    *,
+    city_loc: str = "",
+) -> list[dict] | None:
+    """Scaled ``components`` list from golden specs for server-side 3D fallback, or None if unknown."""
+    try:
+        culture = _detect_culture(city_loc)
+        ref = _resolve_spec(building_type, culture)
+        raw = json.loads(_scale_spec(ref, target_w, target_d))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, list) or not raw:
+        return None
+    return copy.deepcopy(raw)

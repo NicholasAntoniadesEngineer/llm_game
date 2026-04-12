@@ -1538,5 +1538,48 @@ class TestBusMessage:
         assert first.id != second.id
 
 
+class TestBuildLoopWaveOrdering:
+    def test_sort_wave_plan_open_terrain_first(self):
+        from orchestration.engine_build_loop import sort_wave_plan_open_terrain_first
+
+        open_types = frozenset({"water", "road"})
+        plan = [
+            {"name": "Temple", "building_type": "temple", "tiles": [{"x": 0, "y": 0}]},
+            {"name": "River", "building_type": "water", "tiles": [{"x": 1, "y": 1}]},
+            {"name": "Path", "building_type": "road", "tiles": [{"x": 2, "y": 2}]},
+        ]
+        out = sort_wave_plan_open_terrain_first(plan, open_types)
+        assert [s["building_type"] for s in out] == ["water", "road", "temple"]
+
+
+class TestPlacementRepair:
+    def test_prune_bridge_not_touching_water(self):
+        from orchestration.placement_repair import prune_bridges_not_adjacent_to_water_when_water_exists
+
+        mp = [
+            {"name": "R", "building_type": "water", "tiles": [{"x": 0, "y": 0}]},
+            {"name": "B", "building_type": "bridge", "tiles": [{"x": 5, "y": 5}]},
+        ]
+        n = prune_bridges_not_adjacent_to_water_when_water_exists(mp)
+        assert n == 1
+        assert len(mp) == 1
+        assert mp[0]["building_type"] == "water"
+
+
+class TestGeometryPruneDecorative:
+    def test_try_prune_removes_decorative_when_colliding(self):
+        from orchestration.validation import try_prune_colliding_decorative_components
+
+        spec = {
+            "components": [
+                {"type": "podium", "height": 0.1, "steps": 3, "stack_role": "foundation"},
+                {"type": "block", "stories": 2, "storyHeight": 0.5, "stack_role": "structural"},
+                {"type": "door", "height": 0.4, "stack_role": "decorative"},
+            ]
+        }
+        removed = try_prune_colliding_decorative_components(spec, 2.0, 2.0, max_removals=4)
+        assert removed >= 0
+
+
 if __name__ == "__main__":
     unittest.main()

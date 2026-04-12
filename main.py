@@ -172,11 +172,21 @@ except SaveIndexError:
     logging.exception("Save index is corrupt or unreadable — starting without disk restore")
     saved = None
 if saved:
-    loaded_chat, district_index, districts, loaded_generation, loaded_scenario = saved
+    (
+        loaded_chat,
+        district_index,
+        districts,
+        loaded_generation,
+        loaded_scenario,
+        loaded_build_wave_phase,
+        loaded_district_build_cursor,
+    ) = saved
     state.chat_history.extend(loaded_chat)
     engine.district_index = district_index
     engine.districts = districts
     engine.generation = loaded_generation
+    engine.build_wave_phase = loaded_build_wave_phase
+    engine.district_build_cursor = loaded_district_build_cursor
     state.run_session.scenario = loaded_scenario
     for msg in validate_blueprint_tile_invariants(
         state.world, load_blueprint(system_configuration=system_configuration)
@@ -216,6 +226,8 @@ async def _debounced_persist_after_chat(gen: int) -> None:
             scenario=state.run_session.scenario,
             system_configuration=system_configuration,
             flush_mode="incremental",
+            build_wave_phase=engine.build_wave_phase,
+            district_build_cursor=engine.district_build_cursor,
         )
 
 
@@ -349,6 +361,8 @@ async def _handle_pause_inner():
         scenario=state.run_session.scenario,
         system_configuration=system_configuration,
         flush_mode="full",
+        build_wave_phase=engine.build_wave_phase,
+        district_build_cursor=engine.district_build_cursor,
     )
     await broadcast({
         "type": "paused",
@@ -427,6 +441,8 @@ async def handle_restart_server() -> dict:
             scenario=state.run_session.scenario,
             system_configuration=system_configuration,
             flush_mode="full",
+            build_wave_phase=engine.build_wave_phase,
+            district_build_cursor=engine.district_build_cursor,
         )
 
     async def _touch_reload_sentinel_after_response() -> None:
@@ -462,6 +478,8 @@ async def handle_reset_timeline() -> dict:
             scenario=merged,
             system_configuration=system_configuration,
             flush_mode="incremental",
+            build_wave_phase=engine.build_wave_phase,
+            district_build_cursor=engine.district_build_cursor,
         )
     await broadcast(
         {

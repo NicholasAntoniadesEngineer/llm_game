@@ -17,6 +17,18 @@ if TYPE_CHECKING:
     from orchestration.engine_ports import BuildGenerationEnginePort
 
 
+def sort_wave_plan_open_terrain_first(master_plan: list, open_terrain_types: frozenset) -> list:
+    """Deterministic order: procedural open-terrain structures first, then others (stable within each group)."""
+    procedural: list = []
+    rest: list = []
+    for struct in master_plan:
+        if struct.get("building_type", "") in open_terrain_types:
+            procedural.append(struct)
+        else:
+            rest.append(struct)
+    return procedural + rest
+
+
 async def _schedule_auto_retry_if_pending(engine: "BuildGenerationEnginePort", failure_label: str) -> None:
     if getattr(engine, "_auto_retry_pending", False):
         engine._auto_retry_pending = False
@@ -31,6 +43,8 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         "_build_generation() start",
         generation=engine.generation,
         district_index=engine.district_index,
+        district_build_cursor=engine.district_build_cursor,
+        build_wave_phase=engine.build_wave_phase,
         districts_total=len(engine.districts),
     )
     engine.update_trace_snapshot(phase="_build_generation", step="start", generation=engine.generation)
@@ -44,6 +58,9 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         )
     district_plans: dict[int, list] = {}
 
+    if engine.district_build_cursor < engine.district_index:
+        engine.district_build_cursor = engine.district_index
+
     async def _get_plan(di: int) -> list | None:
         try:
             return await engine.tasks.await_survey_for_district_index(di)
@@ -53,17 +70,31 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
             await engine._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
             return None
 
-    for wave_label, type_filter in [
-        ("Wave 1 — Landmarks", engine._wave_one_building_types_set),
-        ("Wave 2 — Infill", None),
-    ]:
+    wave_defs: list[tuple[str, frozenset | None, str]] = [
+        ("Wave 1 — Landmarks", engine._wave_one_building_types_set, "landmark"),
+        ("Wave 2 — Infill", None, "infill"),
+    ]
+
+    wave_outer_started = False
+
+    for wave_label, type_filter, phase_key in wave_defs:
+        if not wave_outer_started:
+            if phase_key != engine.build_wave_phase:
+                continue
+            wave_outer_started = True
+            start_di = engine.district_build_cursor
+        else:
+            engine.build_wave_phase = phase_key
+            start_di = engine.district_index
+            engine.district_build_cursor = engine.district_index
+
         if not engine.running:
             return False
 
         await engine._chat("cartographus", "info", f"=== {wave_label} (gen {engine.generation}) ===")
         log_event("engine", wave_label)
 
-        for di in range(engine.district_index, len(engine.districts)):
+        for di in range(start_di, len(engine.districts)):
             if not engine.running:
                 return False
 
@@ -135,7 +166,24 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
                     if s.get("building_type", "") not in engine._wave_one_building_types_set
                 ]
 
+            wave_plan = sort_wave_plan_open_terrain_first(wave_plan, engine._open_terrain_types_set)
+
             if not wave_plan:
+                logger.info(
+                    "Empty wave plan — skipping district %r wave %s (no structures match this wave)",
+                    district_name,
+                    wave_label,
+                )
+                trace_event(
+                    "engine",
+                    "empty_wave_plan_skip",
+                    district=district_name,
+                    wave=wave_label,
+                    district_index=di,
+                )
+                engine.district_build_cursor = di + 1
+                engine.build_wave_phase = phase_key
+                await engine._save_state_thread(flush_mode="incremental")
                 continue
 
             logger.info(f"=== {wave_label}: {district_name} ({len(wave_plan)} structures) ===")
@@ -157,7 +205,15 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
                 await _schedule_auto_retry_if_pending(engine, "district build failure")
                 return False
 
+            engine.district_build_cursor = di + 1
+            engine.build_wave_phase = phase_key
             await engine._save_state_thread(flush_mode="incremental")
 
+        engine.district_build_cursor = engine.district_index
+        if phase_key == "landmark":
+            engine.build_wave_phase = "infill"
+
+    engine.build_wave_phase = "landmark"
+    engine.district_build_cursor = engine.district_index
     engine.district_index = len(engine.districts)
     return True

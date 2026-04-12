@@ -608,6 +608,8 @@ class TestPersistenceSaveLoad:
             generation=3,
             scenario=scenario,
             system_configuration=SYSTEM_CONFIGURATION,
+            build_wave_phase="infill",
+            district_build_cursor=1,
         )
 
         # Load into a fresh world
@@ -617,9 +619,19 @@ class TestPersistenceSaveLoad:
         )
         result = persistence.load_state(world2, system_configuration=SYSTEM_CONFIGURATION)
         assert result is not None
-        loaded_chat, loaded_idx, loaded_districts, loaded_gen, _loaded_scen = result
+        (
+            loaded_chat,
+            loaded_idx,
+            loaded_districts,
+            loaded_gen,
+            _loaded_scen,
+            loaded_wave,
+            loaded_cursor,
+        ) = result
         assert loaded_idx == 2
         assert loaded_gen == 3
+        assert loaded_wave == "infill"
+        assert loaded_cursor == 1
         assert loaded_chat == chat
         assert len(loaded_districts) == 1
         assert world2.current_period == "Republican Rome"

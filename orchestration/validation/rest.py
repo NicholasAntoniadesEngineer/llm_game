@@ -8,6 +8,7 @@ from orchestration.validation.rest_geometry import (
     _aabb_overlap_volume,
     check_component_collisions,
     generate_architectural_feedback,
+    try_prune_colliding_decorative_components,
 )
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "validate_urbanista_arch_result",
     "check_component_collisions",
     "generate_architectural_feedback",
+    "try_prune_colliding_decorative_components",
     "_aabb_overlap_volume",
 ]

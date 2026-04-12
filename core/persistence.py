@@ -170,6 +170,8 @@ def save_state(
     scenario: dict[str, Any],
     system_configuration: "Config",
     flush_mode: str = "incremental",
+    build_wave_phase: str = "landmark",
+    district_build_cursor: int | None = None,
 ) -> str:
     """Save world state: ``index.json`` + chunk JSON files + ``chat_history.json``.
 
@@ -182,6 +184,11 @@ def save_state(
     """
     if not isinstance(scenario, dict):
         raise TypeError("save_state requires scenario: dict[str, Any]")
+
+    wave_phase_normalized = str(build_wave_phase or "landmark").strip().lower()
+    if wave_phase_normalized not in ("landmark", "infill"):
+        raise TypeError("save_state build_wave_phase must be 'landmark' or 'infill'")
+    cursor_effective = int(district_index if district_build_cursor is None else district_build_cursor)
 
     paths = _ensure_dirs(system_configuration)
 
@@ -243,6 +250,8 @@ def save_state(
         "districts_layout_fingerprint": layout_fp,
         "chunk_manifest": chunk_manifest,
         "district_index": district_index,
+        "build_wave_phase": wave_phase_normalized,
+        "district_build_cursor": cursor_effective,
         "districts": districts or [],
         "generation": generation,
         "turn": world.turn,
@@ -264,12 +273,14 @@ def save_state(
     if isinstance(scenario_effective, dict):
         scen_loc = str(scenario_effective.get("location") or "")
     logger.info(
-        "Saved (%s): %s tiles in %s chunks | district_index=%s generation=%s turn=%s | "
+        "Saved (%s): %s tiles in %s chunks | district_index=%s cursor=%s wave=%s generation=%s turn=%s | "
         "chat_msgs=%s districts=%s world_bounds=(%s..%s,%s..%s) scenario=%s | pruned=%s",
         flush_mode,
         total_tiles,
         len(chunk_manifest),
         district_index,
+        cursor_effective,
+        wave_phase_normalized,
         generation,
         world.turn,
         len(chat_history),
@@ -317,10 +328,11 @@ def load_state(
     world: WorldState,
     *,
     system_configuration: "Config",
-) -> tuple[list[dict], int, list[dict], int, dict[str, Any] | None] | None:
+) -> tuple[list[dict], int, list[dict], int, dict[str, Any] | None, str, int] | None:
     """Load from chunked format.
 
-    Returns ``(chat_history, district_index, districts, generation, scenario)`` or None.
+    Returns ``(chat_history, district_index, districts, generation, scenario, build_wave_phase,
+    district_build_cursor)`` or None.
     """
     paths = _save_layout_paths(system_configuration)
     if not paths.index_file.exists():
@@ -386,6 +398,10 @@ def load_state(
     else:
         chat_history = []
     district_index = int(index.get("district_index", 0))
+    build_wave_phase_raw = str(index.get("build_wave_phase", "landmark")).strip().lower()
+    if build_wave_phase_raw not in ("landmark", "infill"):
+        build_wave_phase_raw = "landmark"
+    district_build_cursor = int(index.get("district_build_cursor", district_index))
     districts = index.get("districts")
     if not isinstance(districts, list):
         districts = []
@@ -413,13 +429,15 @@ def load_state(
             world.current_year = int(fy)
 
     logger.info(
-        "Loaded: %s tiles, district #%s, %s districts, generation %s",
+        "Loaded: %s tiles, district #%s, cursor=%s wave=%s, %s districts, generation %s",
         tile_count,
         district_index,
+        district_build_cursor,
+        build_wave_phase_raw,
         len(districts),
         generation,
     )
-    return chat_history, district_index, districts, generation, scen
+    return chat_history, district_index, districts, generation, scen, build_wave_phase_raw, district_build_cursor
 
 
 def clear_saves(*, system_configuration: "Config") -> int:

@@ -53,6 +53,7 @@ class UrbanistaBatchEnginePort(Protocol):
 
     urbanista: Any
     tasks: Any
+    generators: Any
 
 
 @runtime_checkable
@@ -100,6 +101,8 @@ class TaskManagerPersistenceReadsPort(Protocol):
 
     district_index: int
     generation: int
+    build_wave_phase: str
+    district_build_cursor: int
 
     @property
     def scenario(self) -> dict[str, Any] | None: ...
@@ -114,6 +117,8 @@ class GeneratorsHostPort(Protocol):
     chat_history: list[Any]
     districts: list[Any]
     district_index: int
+    district_build_cursor: int
+    build_wave_phase: str
     generation: int
     blueprint: Any
     tasks: Any

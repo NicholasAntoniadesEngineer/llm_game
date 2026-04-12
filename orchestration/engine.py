@@ -70,6 +70,8 @@ class BuildEngine:
         self.chat_history = chat_history_ref
         self.run_session = run_session
         self.district_index = 0
+        self.district_build_cursor = 0
+        self.build_wave_phase: str = "landmark"
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
         # Phase-1 skeleton planner starts builds early; phase-2 refine adds map prose in background.
@@ -182,6 +184,8 @@ class BuildEngine:
             scenario=scen,
             system_configuration=self.system_configuration,
             flush_mode=flush_mode,
+            build_wave_phase=self.build_wave_phase,
+            district_build_cursor=self.district_build_cursor,
         )
 
     # --- running flag delegates to TaskManager (single source of truth) ---
@@ -204,6 +208,8 @@ class BuildEngine:
     def reset_pipeline_for_new_run(self):
         """Clear in-flight survey/refine handles when starting a new scenario."""
         self.tasks.reset_pipeline_for_new_run()
+        self.district_build_cursor = 0
+        self.build_wave_phase = "landmark"
         # Also clear engine-local caches that TaskManager does not own.
         self._district_scenery_summaries.clear()
         self._district_palettes.clear()
