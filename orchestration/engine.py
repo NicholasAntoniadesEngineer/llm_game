@@ -12,7 +12,6 @@ from world.blueprint import CityBlueprint
 from agents.memory import StyleMemory
 from agents.tools import WorldQueryTools
 from orchestration.debate import DebateProtocol
-from orchestration.proposals import ProposalQueue, WorkProposal
 from orchestration.bus import MessageBus, BusMessage
 from orchestration.task_manager import TaskManager
 from core.run_log import log_event, trace_event
@@ -45,9 +44,6 @@ logger = logging.getLogger("eternal.engine")
 
 
 class BuildEngine:
-    # Toolbar / start-screen status strip (must match static/tiles.js AGENT_NAMES keys).
-    UI_STATUS_STRIP_AGENT_KEYS = ("cartographus", "urbanista")
-
     def __init__(
         self,
         world: "WorldState",
@@ -124,12 +120,13 @@ class BuildEngine:
         self._district_palettes: dict[str, dict] = {}  # {district_name: {primary, secondary, accent}}
         self._fused_seed_master_plan: list | None = None
         self._survey_cache_lock = asyncio.Lock()
+        self._survey_cache: dict[str, list] | None = None
+        self._last_skeleton_result: dict[str, Any] | None = None
 
         # Intelligence subsystems
         self.style_memory = StyleMemory()
         self.world_tools = WorldQueryTools(world)
         self.debate = DebateProtocol()
-        self.proposals = ProposalQueue()
 
         # TaskManager owns running flag, task handles, semaphores, and save-throttling.
         # Note: survey_work_item_fn uses a lambda so it resolves self.generators at call time
@@ -141,9 +138,7 @@ class BuildEngine:
             districts_ref=self.districts,
             survey_work_item_fn=lambda di: self.generators.survey_work_item(di),
             set_status_fn=self._set_status,
-            district_index_fn=lambda: self.district_index,
-            generation_fn=lambda: self.generation,
-            scenario_fn=lambda: self.scenario,
+            persistence_reads=self,
             system_configuration=self.system_configuration,
         )
 
@@ -205,15 +200,14 @@ class BuildEngine:
         self._district_palettes.clear()
         self._fused_seed_master_plan = None
         self.blueprint = None
-        if hasattr(self, "_survey_cache"):
-            del self._survey_cache
+        self._last_skeleton_result = None
+        self._survey_cache = None
         # Clear agent memory so stale context from a prior city doesn't leak.
         for agent in (self.planner_skeleton, self.planner_refine, self.surveyor, self.urbanista):
             agent.memory.history.clear()
             agent._turn_counter = 0
         # Clear intelligence subsystems
         self.style_memory = StyleMemory()
-        self.proposals = ProposalQueue()
         self._trace_snapshot = {"phase": "reset"}
 
     async def abort_pipeline_tasks(self):
@@ -302,7 +296,10 @@ class BuildEngine:
                 self.update_trace_snapshot(phase="resume_loaded_districts", districts=len(self.districts))
                 self._fused_seed_master_plan = None
                 if self.tasks.map_refine_task_idle():
-                    cached = load_districts_cache(expected_run_fingerprint=self.run_fingerprint)
+                    cached = load_districts_cache(
+                        expected_run_fingerprint=self.run_fingerprint,
+                        system_configuration=self.system_configuration,
+                    )
                     map_desc = cached[1] if cached else ""
                     if not map_desc:
                         self.tasks.start_map_refine_background(
@@ -314,15 +311,21 @@ class BuildEngine:
             self.update_trace_snapshot(phase="blueprint", has_blueprint=self.blueprint is not None)
             if self.blueprint is None:
                 # Try loading persisted blueprint first
-                bp_data = load_blueprint()
+                bp_data = load_blueprint(system_configuration=self.system_configuration)
                 if bp_data:
-                    self.blueprint = CityBlueprint.from_dict(bp_data)
+                    self.blueprint = CityBlueprint.from_dict(
+                        bp_data, system_configuration=self.system_configuration
+                    )
                     logger.info("Blueprint restored from disk")
                 else:
                     self.blueprint = self._create_blueprint()
                     if self.blueprint:
                         # Persist for resumption
-                        await asyncio.to_thread(save_blueprint, self.blueprint.to_dict())
+                        await asyncio.to_thread(
+                            save_blueprint,
+                            self.blueprint.to_dict(),
+                            system_configuration=self.system_configuration,
+                        )
                 if self.blueprint:
                     # Pre-rasterize roads as immutable infrastructure
                     road_count = self.blueprint.rasterize_roads(self.world)
@@ -504,7 +507,7 @@ class BuildEngine:
             "detail": pause_detail[:1200] if pause_detail else "",
             "agent": agent_role,
         })
-        for agent_name in self.UI_STATUS_STRIP_AGENT_KEYS:
+        for agent_name in TaskManager.UI_STATUS_STRIP_AGENT_KEYS:
             await self._set_status(agent_name, "idle")
 
     def _apply_master_plan_validation(self, master_plan: list, context: str) -> list:
@@ -525,11 +528,11 @@ class BuildEngine:
         if not scenario:
             return None
 
-        bp = CityBlueprint()
+        bp = CityBlueprint.from_config(self.system_configuration)
 
         # PRIMARY: Use AI-researched geography from the planner's response
         # The skeleton planner returns a "geography" field with hills, water, materials
-        skeleton_result = getattr(self.generators, '_last_skeleton_result', None)
+        skeleton_result = self._last_skeleton_result
         if self.districts and skeleton_result:
             geo = skeleton_result.get("geography", {})
             if isinstance(geo, dict):
@@ -538,17 +541,22 @@ class BuildEngine:
                     logger.info("AI researched %d geographic features (hills/peaks)", len(bp.hills))
                 if isinstance(geo.get("water"), list):
                     bp.water = geo["water"]
+                    bp.reset_water_adjacency_cache()
                     logger.info("AI researched %d water features", len(bp.water))
-                bp.primary_stone = geo.get("primary_stone", "travertine")
-                bp.secondary_stone = geo.get("secondary_stone", "tufa")
-                bp.roof_material = geo.get("roof_material", "terracotta")
+                bp.primary_stone = geo.get("primary_stone", bp.primary_stone)
+                bp.secondary_stone = geo.get("secondary_stone", bp.secondary_stone)
+                bp.roof_material = geo.get("roof_material", bp.roof_material)
 
         # FALLBACK: If the AI didn't provide geography, try known_cities.json as a seed
         if not bp.hills and not bp.water:
             import json as _json
             from pathlib import Path
+
             city_name = scenario.get("location", "")
-            known_cities_path = Path(__file__).resolve().parent.parent / "data" / "known_cities.json"
+            known_cities_path = (
+                Path(__file__).resolve().parent.parent
+                / self.system_configuration.known_cities_json_relative
+            )
             if known_cities_path.exists():
                 try:
                     known = _json.loads(known_cities_path.read_text(encoding="utf-8"))
@@ -556,6 +564,7 @@ class BuildEngine:
                         seed = known[city_name]
                         bp.hills = seed.get("hills", [])
                         bp.water = seed.get("water", [])
+                        bp.reset_water_adjacency_cache()
                         mats = seed.get("default_materials", {})
                         bp.primary_stone = mats.get("primary_stone", bp.primary_stone)
                         bp.secondary_stone = mats.get("secondary_stone", bp.secondary_stone)
@@ -567,19 +576,15 @@ class BuildEngine:
 
         # Enrich district_characters from discovered districts
         if self.districts:
+            from orchestration.district_inference import infer_district_character_from_description
+
             for d in self.districts:
                 dname = d.get("name", "")
                 if dname and dname not in bp.district_characters:
-                    char: dict = {}
-                    desc = d.get("description", "").lower()
-                    if any(w in desc for w in ("monumental", "sacred", "temple", "imperial", "forum")):
-                        char = {"style": "monumental", "wealth": 9, "height_range": [2, 4]}
-                    elif any(w in desc for w in ("market", "commerce", "trade")):
-                        char = {"style": "commercial", "wealth": 6, "height_range": [1, 3]}
-                    elif any(w in desc for w in ("residential", "insula", "domus")):
-                        char = {"style": "residential", "wealth": 4, "height_range": [1, 3]}
-                    elif any(w in desc for w in ("military", "barracks", "wall")):
-                        char = {"style": "military", "wealth": 5, "height_range": [1, 2]}
+                    char = infer_district_character_from_description(
+                        str(d.get("description", "")),
+                        elevation=None,
+                    )
                     if char:
                         bp.district_characters[dname] = char
 
@@ -672,11 +677,9 @@ class BuildEngine:
     async def _set_status(self, agent, status, detail=None):
         payload = {"type": "agent_status", "agent": agent, "status": status}
         if status == "thinking":
-            if agent not in self.tasks._agent_thinking_started:
-                self.tasks._agent_thinking_started[agent] = time.time()
-            payload["thinking_started_at_s"] = self.tasks._agent_thinking_started[agent]
+            payload["thinking_started_at_s"] = self.tasks.touch_agent_thinking_started_timestamp(agent)
         else:
-            self.tasks._agent_thinking_started.pop(agent, None)
+            self.tasks.clear_agent_thinking_timestamp(agent)
         if detail is not None:
             d = str(detail).strip()
             payload["detail"] = d[:280] if d else ""

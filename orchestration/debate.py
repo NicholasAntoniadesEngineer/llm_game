@@ -21,7 +21,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -258,6 +257,7 @@ class DebateProtocol:
         current_output = output
         revised = False
         all_issues: list[str] = []
+        round_num = 0
 
         for round_num in range(1, max_rounds + 1):
             # Collect all critic reviews

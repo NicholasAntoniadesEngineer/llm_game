@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-from collections import deque
 
 from core.errors import AgentGenerationError
 from core.run_log import trace_event
@@ -15,7 +14,10 @@ from core.persistence import (
     save_state,
     save_surveys_cache,
 )
+from orchestration.district_inference import infer_district_style_string
+from orchestration.engine_ports import GeneratorsHostPort
 from orchestration.spatial import enforce_spacing, get_district_spacing, occupancy_summary_for_survey
+from world.road_connectivity import ensure_road_connectivity_in_master_plan
 
 logger = logging.getLogger("eternal.generators")
 
@@ -23,15 +25,14 @@ logger = logging.getLogger("eternal.generators")
 class Generators:
     """Holds generation/discovery methods extracted from BuildEngine.
 
-    Takes a back-reference to the engine for access to agents, state,
-    broadcasting, and helper methods.
+    Uses a narrow ``GeneratorsHostPort`` (implemented by ``BuildEngine``) instead of a generic engine reference.
     """
 
-    def __init__(self, engine):
-        self.engine = engine
+    def __init__(self, host: GeneratorsHostPort):
+        self._host = host
 
     def _spacing_enforced_plan(self, master_plan: list, min_gap: int) -> list:
-        system_configuration = self.engine.system_configuration
+        system_configuration = self._host.system_configuration
         return enforce_spacing(
             master_plan,
             min_gap=min_gap,
@@ -41,301 +42,122 @@ class Generators:
             spatial_optimal_shift_step_tiles=system_configuration.spatial_optimal_shift_step_tiles,
         )
 
+    def _apply_road_connectivity(self, master_plan: list, region: dict) -> list:
+        cfg = self._host.system_configuration
+        return ensure_road_connectivity_in_master_plan(
+            master_plan,
+            region,
+            road_bridge_default_elevation=cfg.road_bridge_default_elevation,
+            world_grid_width_tiles=cfg.grid.world_grid_width,
+            world_grid_height_tiles=cfg.grid.world_grid_height,
+        )
+
     # ── Convenience delegates ──────────────────────────────────────────
 
     @property
     def world(self):
-        return self.engine.world
+        return self._host.world
 
     @property
     def broadcast(self):
-        return self.engine.broadcast
+        return self._host.broadcast
 
     @property
     def districts(self):
-        return self.engine.districts
+        return self._host.districts
 
     @districts.setter
     def districts(self, value):
-        self.engine.districts = value
+        self._host.districts = value
 
     @property
     def running(self):
-        return self.engine.running
+        return self._host.tasks.running
 
     @property
     def planner_skeleton(self):
-        return self.engine.planner_skeleton
+        return self._host.planner_skeleton
 
     @property
     def planner_refine(self):
-        return self.engine.planner_refine
+        return self._host.planner_refine
 
     @property
     def surveyor(self):
-        return self.engine.surveyor
+        return self._host.surveyor
 
     @property
     def urbanista(self):
-        return self.engine.urbanista
+        return self._host.urbanista
 
     @property
     def _source_policy(self):
-        return self.engine._source_policy
+        return self._host._source_policy
 
     @property
     def _survey_semaphore(self):
-        return self.engine.tasks._survey_semaphore
-
-    @property
-    def _urbanista_semaphore(self):
-        return self.engine.tasks._urbanista_semaphore
+        return self._host.tasks._survey_semaphore
 
     @property
     def _fused_seed_master_plan(self):
-        return self.engine._fused_seed_master_plan
+        return self._host._fused_seed_master_plan
 
     @_fused_seed_master_plan.setter
     def _fused_seed_master_plan(self, value):
-        self.engine._fused_seed_master_plan = value
+        self._host._fused_seed_master_plan = value
 
     @property
     def _survey_cache_lock(self):
-        return self.engine._survey_cache_lock
+        return self._host._survey_cache_lock
 
     @property
     def _district_scenery_summaries(self):
-        return self.engine._district_scenery_summaries
+        return self._host._district_scenery_summaries
 
     @property
     def _district_palettes(self):
-        return self.engine._district_palettes
+        return self._host._district_palettes
 
     async def _chat(self, *args, **kwargs):
-        return await self.engine._chat(*args, **kwargs)
+        return await self._host._chat(*args, **kwargs)
 
     async def _set_status(self, *args, **kwargs):
-        return await self.engine._set_status(*args, **kwargs)
+        return await self._host._set_status(*args, **kwargs)
 
     async def _pause_for_api_issue(self, *args, **kwargs):
-        return await self.engine._pause_for_api_issue(*args, **kwargs)
+        return await self._host._pause_for_api_issue(*args, **kwargs)
 
     def _apply_master_plan_validation(self, *args, **kwargs):
-        return self.engine._apply_master_plan_validation(*args, **kwargs)
+        return self._host._apply_master_plan_validation(*args, **kwargs)
 
     def _district_style(self, district: dict) -> str | None:
         """Extract district style from blueprint or infer from description."""
-        name = district.get("name", "")
-        bp = self.engine.blueprint
-        if bp and name in bp.district_characters:
-            return bp.district_characters[name].get("style")
-        # Infer from description
-        desc = district.get("description", "").lower()
-        if any(w in desc for w in ("monumental", "sacred", "temple", "imperial", "forum")):
-            return "monumental"
-        if any(w in desc for w in ("market", "commerce", "trade")):
-            return "commercial"
-        if any(w in desc for w in ("residential", "insula", "domus")):
-            return "residential"
-        if any(w in desc for w in ("garden", "park", "grove")):
-            return "garden"
-        return None
-
-    # ── Road connectivity ─────────────────────────────────────────────
-
-    def _ensure_road_connectivity(self, master_plan: list, region: dict) -> list:
-        """Ensure road tiles form a connected graph; add bridging tiles if needed.
-
-        1. Build a graph of all road tiles and find connected components.
-        2. If isolated road segments exist, connect them via shortest Manhattan bridges.
-        3. Ensure at least one road tile touches the region boundary (inter-district link).
-
-        Modifies master_plan in-place and returns it.
-        """
-        system_configuration = self.engine.system_configuration
-        road_bridge_elevation = system_configuration.road_bridge_default_elevation
-        # Collect all road tile coords
-        road_coords: set[tuple[int, int]] = set()
-        non_road_coords: set[tuple[int, int]] = set()
-        for struct in master_plan:
-            btype = struct.get("building_type", "")
-            for t in struct.get("tiles", []):
-                try:
-                    x, y = int(t["x"]), int(t["y"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if btype == "road":
-                    road_coords.add((x, y))
-                else:
-                    non_road_coords.add((x, y))
-
-        if len(road_coords) < 2:
-            return master_plan
-
-        # BFS to find connected components (4-connected)
-        visited: set[tuple[int, int]] = set()
-        components: list[set[tuple[int, int]]] = []
-        for start in road_coords:
-            if start in visited:
-                continue
-            comp: set[tuple[int, int]] = set()
-            queue = deque([start])
-            while queue:
-                cx, cy = queue.popleft()
-                if (cx, cy) in visited:
-                    continue
-                visited.add((cx, cy))
-                comp.add((cx, cy))
-                for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-                    nb = (cx + dx, cy + dy)
-                    if nb in road_coords and nb not in visited:
-                        queue.append(nb)
-            if comp:
-                components.append(comp)
-
-        if len(components) <= 1:
-            # Already connected -- check boundary connectivity
-            self._ensure_boundary_road(
-                master_plan,
-                road_coords,
-                non_road_coords,
-                region,
-            )
-            return master_plan
-
-        # Connect components: greedily bridge closest pairs
-        bridge_tiles: list[dict] = []
-        # Sort components by size descending so largest is the "trunk"
-        components.sort(key=len, reverse=True)
-        trunk = components[0]
-        for comp in components[1:]:
-            # Find closest pair between trunk and this component
-            best_dist = float("inf")
-            best_pair = None
-            for tx, ty in trunk:
-                for cx, cy in comp:
-                    d = abs(tx - cx) + abs(ty - cy)
-                    if d < best_dist:
-                        best_dist = d
-                        best_pair = ((tx, ty), (cx, cy))
-            if best_pair is None:
-                continue
-            (ax, ay), (bx, by) = best_pair
-            # Build Manhattan path: horizontal then vertical
-            x, y = ax, ay
-            while x != bx:
-                x += 1 if bx > x else -1
-                pos = (x, y)
-                if pos not in road_coords and pos not in non_road_coords:
-                    bridge_tiles.append({"x": x, "y": y, "elevation": road_bridge_elevation})
-                    road_coords.add(pos)
-            while y != by:
-                y += 1 if by > y else -1
-                pos = (x, y)
-                if pos not in road_coords and pos not in non_road_coords:
-                    bridge_tiles.append({"x": x, "y": y, "elevation": road_bridge_elevation})
-                    road_coords.add(pos)
-            trunk |= comp
-
-        if bridge_tiles:
-            master_plan.append({
-                "name": "Connecting road",
-                "building_type": "road",
-                "tiles": bridge_tiles,
-                "description": "Road segment connecting isolated street sections.",
-            })
-            logger.info("Road connectivity: added %d bridge tiles across %d isolated segments",
-                        len(bridge_tiles), len(components) - 1)
-
-        self._ensure_boundary_road(
-            master_plan,
-            road_coords,
-            non_road_coords,
-            region,
+        return infer_district_style_string(
+            district.get("description", ""),
+            district_name=str(district.get("name", "")),
+            blueprint=self._host.blueprint,
         )
-        return master_plan
-
-    def _ensure_boundary_road(
-        self,
-        master_plan: list,
-        road_coords: set[tuple[int, int]],
-        non_road_coords: set[tuple[int, int]],
-        region: dict,
-    ) -> None:
-        """Ensure at least one road tile touches the region boundary for inter-district links."""
-        grid_cfg = self.engine.system_configuration.grid
-        road_bridge_default_elevation = self.engine.system_configuration.road_bridge_default_elevation
-        world_grid_width_tiles = grid_cfg.world_grid_width
-        world_grid_height_tiles = grid_cfg.world_grid_height
-        x1 = region.get("x1", 0)
-        y1 = region.get("y1", 0)
-        x2 = region.get("x2", world_grid_width_tiles - 1)
-        y2 = region.get("y2", world_grid_height_tiles - 1)
-
-        # Check if any road tile is on the boundary
-        for rx, ry in road_coords:
-            if rx == x1 or rx == x2 or ry == y1 or ry == y2:
-                return  # Already connected to boundary
-
-        # Find road tile closest to any boundary edge and extend to it
-        best_road = None
-        best_dist = float("inf")
-        best_edge_pos = None
-        for rx, ry in road_coords:
-            for edge_val, axis in [(x1, "x_min"), (x2, "x_max"), (y1, "y_min"), (y2, "y_max")]:
-                if axis.startswith("x"):
-                    d = abs(rx - edge_val)
-                    target = (edge_val, ry)
-                else:
-                    d = abs(ry - edge_val)
-                    target = (rx, edge_val)
-                if d < best_dist:
-                    best_dist = d
-                    best_road = (rx, ry)
-                    best_edge_pos = target
-
-        if best_road is None or best_edge_pos is None or best_dist == 0:
-            return
-
-        # Build path from best_road to best_edge_pos
-        edge_tiles: list[dict] = []
-        x, y = best_road
-        tx, ty = best_edge_pos
-        while x != tx:
-            x += 1 if tx > x else -1
-            if (x, y) not in road_coords and (x, y) not in non_road_coords:
-                edge_tiles.append({"x": x, "y": y, "elevation": road_bridge_default_elevation})
-        while y != ty:
-            y += 1 if ty > y else -1
-            if (x, y) not in road_coords and (x, y) not in non_road_coords:
-                edge_tiles.append({"x": x, "y": y, "elevation": road_bridge_default_elevation})
-
-        if edge_tiles:
-            master_plan.append({
-                "name": "District edge road",
-                "building_type": "road",
-                "tiles": edge_tiles,
-                "description": "Road extending to district boundary for inter-district connectivity.",
-            })
-            logger.info("Boundary road: added %d tiles connecting to district edge", len(edge_tiles))
 
     # ── Extracted methods ──────────────────────────────────────────────
 
     async def discover_districts(self) -> bool:
         """Load cached layout, or run phase-1 skeleton planner then background map refine."""
-        scen = self.engine.scenario
+        scen = self._host.scenario
         if not isinstance(scen, dict):
             logger.error("discover_districts: RunSession.scenario is missing or not a dict")
             return False
-        run_fp = self.engine.run_fingerprint
-        cached = load_districts_cache(expected_run_fingerprint=run_fp)
+        run_fp = self._host.run_fingerprint
+        cached = load_districts_cache(
+            expected_run_fingerprint=run_fp,
+            system_configuration=self._host.system_configuration,
+        )
         if cached:
             self.districts, map_desc = cached
             ensure_district_ids(self.districts)
             self._fused_seed_master_plan = None
             logger.info(f"Using cached districts: {len(self.districts)}")
             trace_event("discovery", "Using cached districts layout", districts=len(self.districts))
-            self.engine.update_trace_snapshot(phase="discover_cached", districts=len(self.districts))
+            self._host.update_trace_snapshot(phase="discover_cached", districts=len(self.districts))
             await self._chat("cartographus", "research",
                 f"Using cached survey of {scen['location']} — {len(self.districts)} districts mapped.")
             if map_desc:
@@ -344,7 +166,7 @@ class Generators:
             return True
 
         trace_event("discovery", "No district cache — running skeleton planner (long-running)", location=scen.get("location", ""))
-        self.engine.update_trace_snapshot(phase="skeleton_planner", step="before_generate")
+        self._host.update_trace_snapshot(phase="skeleton_planner", step="before_generate")
 
         await self.broadcast({
             "type": "loading",
@@ -359,7 +181,7 @@ class Generators:
             "thinking",
             detail="Mapping districts — first AI pass can take several minutes.",
         )
-        scfg = self.engine.system_configuration
+        scfg = self._host.system_configuration
         gw, gh = scfg.grid.world_grid_width, scfg.grid.world_grid_height
         mpt = scfg.grid.world_scale_meters_per_tile
         plan_prompt = (
@@ -381,16 +203,21 @@ class Generators:
         for attempt in range(2):
             try:
                 trace_event("discovery", "Calling planner_skeleton.generate() for district skeleton", attempt=attempt)
-                self.engine.update_trace_snapshot(phase="skeleton_planner", step="generate_in_progress", attempt=attempt)
+                self._host.update_trace_snapshot(phase="skeleton_planner", step="generate_in_progress", attempt=attempt)
                 result = await asyncio.wait_for(
                     self.planner_skeleton.generate(plan_prompt),
                     timeout=scfg.llm.agent_timeout_long_seconds,
                 )
                 break
             except (AgentGenerationError, asyncio.TimeoutError) as err:
-                # Kill any orphaned CLI process on timeout
-                import subprocess as _sp
-                await asyncio.to_thread(_sp.run, ["pkill", "-f", r"claude.*--print.*--system-prompt"], capture_output=True)
+                if int(scfg.skeleton_cli_kill_subprocess_on_timeout) == 1:
+                    import subprocess as _sp
+
+                    await asyncio.to_thread(
+                        _sp.run,
+                        ["pkill", "-f", r"claude.*--print.*--system-prompt"],
+                        capture_output=True,
+                    )
                 if attempt == 0:
                     reason = "network" if isinstance(err, asyncio.TimeoutError) else err.pause_reason
                     retriable = reason in ("bad_model_output", "api_error", "network")
@@ -420,7 +247,7 @@ class Generators:
             districts_count=len(result.get("districts") or []),
             keys=sorted(result.keys()),
         )
-        self.engine.update_trace_snapshot(phase="skeleton_planner", step="after_generate", districts=len(result.get("districts") or []))
+        self._host.update_trace_snapshot(phase="skeleton_planner", step="after_generate", districts=len(result.get("districts") or []))
         logger.info(
             "Skeleton planner result keys=%s districts_count=%s commentary_len=%s",
             sorted(result.keys()),
@@ -431,8 +258,7 @@ class Generators:
         await self._set_status("cartographus", "idle")
 
         self.districts = result.get("districts", [])
-        # Store full result so _create_blueprint can access AI-generated geography
-        self._last_skeleton_result = result
+        self._host._last_skeleton_result = result
         max_dist = scfg.grid.maximum_districts_count
         if len(self.districts) > max_dist:
             logger.warning("District count %d exceeds cap of %d — truncating", len(self.districts), max_dist)
@@ -468,20 +294,25 @@ class Generators:
         else:
             self._fused_seed_master_plan = None
 
-        save_districts_cache(self.districts, "", run_fingerprint=self.engine.run_fingerprint)
-        self.engine.tasks.start_map_refine_background(self.refine_map_description_background())
+        save_districts_cache(
+            self.districts,
+            "",
+            run_fingerprint=self._host.run_fingerprint,
+            system_configuration=self._host.system_configuration,
+        )
+        self._host.tasks.start_map_refine_background(self.refine_map_description_background())
         logger.info("Map refine started immediately after skeleton (non-blocking).")
         asyncio.create_task(self.find_map_image())
         return True
 
     async def expand_city(self) -> bool:
         """Discover new districts at the city edges. Returns True if new districts found."""
-        scenario = self.engine.scenario
+        scenario = self._host.scenario
         if not scenario:
             return False
 
-        trace_event("expansion", "expand_city() start", generation=self.engine.generation, districts=len(self.districts))
-        self.engine.update_trace_snapshot(phase="expand_city", step="start")
+        trace_event("expansion", "expand_city() start", generation=self._host.generation, districts=len(self.districts))
+        self._host.update_trace_snapshot(phase="expand_city", step="start")
 
         city_name = scenario.get("location", "Unknown")
         period = scenario.get("period", "")
@@ -501,7 +332,7 @@ class Generators:
             occupied_tiles |= self.world.chunk_tile_coords(ck)
 
         # Build geography context from blueprint (if available)
-        bp = self.engine.blueprint
+        bp = self._host.blueprint
         geo_context = ""
         mat_context = ""
         if bp:
@@ -520,7 +351,7 @@ class Generators:
         prompt = load_prompt("cartographus_expand",
             SOURCE_POLICY=self._source_policy,
             CITY_NAME=city_name,
-            GENERATION=self.engine.generation,
+            GENERATION=self._host.generation,
             MIN_X=w.min_x, MAX_X=w.max_x,
             MIN_Y=w.min_y, MAX_Y=w.max_y,
             WIDTH=w.width, HEIGHT=w.height,
@@ -537,12 +368,12 @@ class Generators:
             "thinking",
             detail="Discovering new districts at the city edge…",
         )
-        await self._chat("cartographus", "info", f"Expanding city — generation {self.engine.generation + 1}...")
+        await self._chat("cartographus", "info", f"Expanding city — generation {self._host.generation + 1}...")
 
         # Use skeleton planner agent for expansion (same LLM routing)
         try:
             trace_event("expansion", "Calling planner_skeleton.generate() for expansion")
-            self.engine.update_trace_snapshot(phase="expand_city", step="planner_generate")
+            self._host.update_trace_snapshot(phase="expand_city", step="planner_generate")
             result = await self.planner_skeleton.generate(prompt)
         except AgentGenerationError as err:
             trace_event(
@@ -559,7 +390,7 @@ class Generators:
         if not new_districts:
             await self._chat("cartographus", "info", "No expansion districts found.")
             await self._set_status("cartographus", "idle")
-            self.engine.update_trace_snapshot(phase="expand_city", step="no_new_districts")
+            self._host.update_trace_snapshot(phase="expand_city", step="no_new_districts")
             return False
 
         # Validate new districts: no overlap with existing, no water regions
@@ -606,7 +437,7 @@ class Generators:
             return False
 
         for nd in validated:
-            nd["expansion_generation"] = self.engine.generation + 1
+            nd["expansion_generation"] = self._host.generation + 1
             self.districts.append(nd)
 
         ensure_district_ids(self.districts)
@@ -621,27 +452,28 @@ class Generators:
             save_districts_cache,
             self.districts,
             "",
-            run_fingerprint=self.engine.run_fingerprint,
+            run_fingerprint=self._host.run_fingerprint,
+            system_configuration=self._host.system_configuration,
         )
         # Align index.json with expanded district list (crash safety before new tiles)
         await asyncio.to_thread(
             save_state,
-            self.engine.world,
-            self.engine.chat_history,
-            self.engine.district_index,
-            self.engine.districts,
-            self.engine.generation,
-            scenario=self.engine.scenario,
-            system_configuration=self.engine.system_configuration,
+            self._host.world,
+            self._host.chat_history,
+            self._host.district_index,
+            self._host.districts,
+            self._host.generation,
+            scenario=self._host.scenario,
+            system_configuration=self._host.system_configuration,
             flush_mode="full",
         )
 
         # Start surveys for new districts
-        self.engine.tasks.start_survey_tasks_from_index(self.engine.district_index, len(self.districts))
+        self._host.tasks.start_survey_tasks_from_index(self._host.district_index, len(self.districts))
 
         logger.info(f"Expansion: +{len(validated)} districts, total now {len(self.districts)}")
         trace_event("expansion", "expand_city() validated new districts", added=len(validated), total_districts=len(self.districts))
-        self.engine.update_trace_snapshot(phase="expand_city", step="done", added=len(validated))
+        self._host.update_trace_snapshot(phase="expand_city", step="done", added=len(validated))
 
         # Send updated world bounds so client can expand its grid
         await self.broadcast(self.world.to_dict())
@@ -651,7 +483,7 @@ class Generators:
         if bp and (bp.hills or bp.water):
             # Apply elevation to any newly created tiles in expanded area
             elev_count = bp.apply_elevation_to_world(
-                self.world, system_configuration=self.engine.system_configuration
+                self.world, system_configuration=self._host.system_configuration
             )
             if elev_count:
                 logger.info("Expansion: applied elevation to %d new tiles", elev_count)
@@ -660,8 +492,8 @@ class Generators:
                 "hills": bp.hills,
                 "water": bp.water,
                 "roads": bp.roads,
-                "max_gradient": self.engine.system_configuration.terrain.maximum_gradient_value,
-                "gradient_iterations": self.engine.system_configuration.terrain.gradient_iterations_count,
+                "max_gradient": self._host.system_configuration.terrain.maximum_gradient_value,
+                "gradient_iterations": self._host.system_configuration.terrain.gradient_iterations_count,
             })
 
         return True
@@ -712,7 +544,7 @@ class Generators:
         try:
             if not self.running:
                 return
-            scen = self.engine.scenario
+            scen = self._host.scenario
             if not isinstance(scen, dict):
                 return
             skeleton_payload = json.dumps(
@@ -738,7 +570,8 @@ class Generators:
                     save_districts_cache,
                     self.districts,
                     map_desc,
-                    run_fingerprint=self.engine.run_fingerprint,
+                    run_fingerprint=self._host.run_fingerprint,
+                    system_configuration=self._host.system_configuration,
                 )
                 logger.info("Background map_description saved (%s chars)", len(map_desc))
             commentary = result.get("commentary", "")
@@ -760,12 +593,13 @@ class Generators:
 
         cached_plan = None
         async with self._survey_cache_lock:
-            if not hasattr(self.engine, "_survey_cache"):
-                self.engine._survey_cache = load_surveys_cache(
-                    expected_run_fingerprint=self.engine.run_fingerprint,
+            if self._host._survey_cache is None:
+                self._host._survey_cache = load_surveys_cache(
+                    expected_run_fingerprint=self._host.run_fingerprint,
+                    system_configuration=self._host.system_configuration,
                 )
-            if survey_sid in self.engine._survey_cache:
-                cached_plan = self.engine._survey_cache[survey_sid]
+            if survey_sid in self._host._survey_cache:
+                cached_plan = self._host._survey_cache[survey_sid]
         if cached_plan is not None:
             if isinstance(cached_plan, list) and len(cached_plan) > 0:
                 if all(isinstance(s, dict) and "name" in s for s in cached_plan):
@@ -790,20 +624,21 @@ class Generators:
             if master_plan:
                 gap = get_district_spacing(
                     self._district_style(district),
-                    system_configuration=self.engine.system_configuration,
+                    system_configuration=self._host.system_configuration,
                 )
                 master_plan = self._spacing_enforced_plan(master_plan, min_gap=gap)
                 region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
-                master_plan = self._ensure_road_connectivity(master_plan, region)
+                master_plan = self._apply_road_connectivity(master_plan, region)
                 master_plan = self._apply_master_plan_validation(
                     master_plan, f"Fused seed {district_key!r}"
                 )
                 async with self._survey_cache_lock:
-                    self.engine._survey_cache[survey_sid] = master_plan
+                    self._host._survey_cache[survey_sid] = master_plan
                     await asyncio.to_thread(
                         save_surveys_cache,
-                        self.engine._survey_cache,
-                        run_fingerprint=self.engine.run_fingerprint,
+                        self._host._survey_cache,
+                        run_fingerprint=self._host.run_fingerprint,
+                        system_configuration=self._host.system_configuration,
                     )
                 logger.info("Using fused seed_master_plan for %s (%d structures)", district_key, len(master_plan))
                 return master_plan
@@ -825,11 +660,12 @@ class Generators:
         await self._set_status("cartographus", "idle")
 
         async with self._survey_cache_lock:
-            self.engine._survey_cache[survey_sid] = master_plan
+            self._host._survey_cache[survey_sid] = master_plan
             await asyncio.to_thread(
                 save_surveys_cache,
-                self.engine._survey_cache,
-                run_fingerprint=self.engine.run_fingerprint,
+                self._host._survey_cache,
+                run_fingerprint=self._host.run_fingerprint,
+                system_configuration=self._host.system_configuration,
             )
 
         return master_plan
@@ -851,7 +687,7 @@ class Generators:
         district_key = district.get("name", "unknown")
         survey_sid = district_survey_key(district)
 
-        survey_chunk = self.engine.system_configuration.grid.survey_buildings_per_chunk_count
+        survey_chunk = self._host.system_configuration.grid.survey_buildings_per_chunk_count
         if len(buildings) <= survey_chunk:
             survey = await self.survey_district_single_pass(district, buildings_filter=None, prior_summary="")
             master_plan = survey.get("master_plan", [])
@@ -879,11 +715,11 @@ class Generators:
                 logger.info("District %s palette: %s", district_key, palette)
             gap = get_district_spacing(
                     self._district_style(district),
-                    system_configuration=self.engine.system_configuration,
+                    system_configuration=self._host.system_configuration,
                 )
             mp = self._spacing_enforced_plan(master_plan, min_gap=gap)
             region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
-            mp = self._ensure_road_connectivity(mp, region)
+            mp = self._apply_road_connectivity(mp, region)
             return self._apply_master_plan_validation(mp, f"Survey {district.get('name', '?')}")
 
         merged: list = []
@@ -940,14 +776,21 @@ class Generators:
                 "Survey for %s completed with %d/%d chunks failed — returning partial results.",
                 district_name, chunks_failed, total_chunks,
             )
+            trace_event(
+                "survey",
+                "chunked_survey_partial",
+                district=district_name,
+                chunks_failed=chunks_failed,
+                total_chunks=total_chunks,
+            )
 
         gap = get_district_spacing(
                     self._district_style(district),
-                    system_configuration=self.engine.system_configuration,
+                    system_configuration=self._host.system_configuration,
                 )
         mp = self._spacing_enforced_plan(merged, min_gap=gap)
         region = district.get("region", {"x1": 0, "y1": 0, "x2": 10, "y2": 10})
-        mp = self._ensure_road_connectivity(mp, region)
+        mp = self._apply_road_connectivity(mp, region)
         return self._apply_master_plan_validation(mp, f"Survey (chunked) {district_name}")
 
     async def survey_district_single_pass(
@@ -961,7 +804,7 @@ class Generators:
         existing = self.world.get_region_summary(region["x1"], region["y1"], region["x2"], region["y2"])
         district_elev = district.get("elevation", 0.0)
         terrain_notes = district.get("terrain_notes", "")
-        scen = self.engine.scenario
+        scen = self._host.scenario
         if not isinstance(scen, dict):
             raise AgentGenerationError("bad_model_output", "survey_district_single_pass: missing RunSession.scenario")
 
@@ -979,10 +822,10 @@ class Generators:
             f"Description: {district.get('description', '')}\n"
             f"Terrain: {terrain_notes}\n"
             f"Base elevation: {district_elev} (0.0=water level, 0.3=gentle hill, 0.6=steep hill)\n"
-            f"Grid region: {region_str} (each tile = {self.engine.system_configuration.grid.world_scale_meters_per_tile} meters, "
-            f"full grid is {self.engine.system_configuration.grid.world_grid_width}x{self.engine.system_configuration.grid.world_grid_height} = "
-            f"{self.engine.system_configuration.grid.world_grid_width * self.engine.system_configuration.grid.world_scale_meters_per_tile}m x "
-            f"{self.engine.system_configuration.grid.world_grid_height * self.engine.system_configuration.grid.world_scale_meters_per_tile}m)\n"
+            f"Grid region: {region_str} (each tile = {self._host.system_configuration.grid.world_scale_meters_per_tile} meters, "
+            f"full grid is {self._host.system_configuration.grid.world_grid_width}x{self._host.system_configuration.grid.world_grid_height} = "
+            f"{self._host.system_configuration.grid.world_grid_width * self._host.system_configuration.grid.world_scale_meters_per_tile}m x "
+            f"{self._host.system_configuration.grid.world_grid_height * self._host.system_configuration.grid.world_scale_meters_per_tile}m)\n"
             f"Period: {district.get('period', '')}, Year: {district.get('year', '')}\n"
             f"Known buildings to place (full list for context): {', '.join(district.get('buildings', []))}\n"
             f"Already built in nearby areas:\n{existing}\n"
@@ -991,60 +834,62 @@ class Generators:
             f"Follow the system prompt's prose and evidence requirements for description/historical_note/environment_note."
         )
 
-    async def surveyor_generate_bounded(self, prompt: str) -> dict:
+    async def _generate_with_retry(
+        self,
+        agent,
+        prompt: str,
+        semaphore: asyncio.Semaphore,
+        *,
+        retry_delay_seconds: float,
+        agent_label: str,
+    ) -> dict:
         for attempt in range(2):
             try:
-                async with self._survey_semaphore:
-                    return await self.surveyor.generate(prompt)
+                async with semaphore:
+                    return await agent.generate(prompt)
             except AgentGenerationError as err:
                 retriable = err.pause_reason in ("bad_model_output", "api_error", "network")
                 if attempt == 0 and retriable:
                     logger.warning(
-                        "[roma.engine] Surveyor call failed (%s), retrying once: %s",
+                        "[roma.engine] %s call failed (%s), retrying once: %s",
+                        agent_label,
                         err.pause_reason,
                         err.pause_detail[:200] if err.pause_detail else "",
                     )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(retry_delay_seconds)
                     continue
                 raise
+
+    async def surveyor_generate_bounded(self, prompt: str) -> dict:
+        return await self._generate_with_retry(
+            self.surveyor,
+            prompt,
+            self._survey_semaphore,
+            retry_delay_seconds=1.5,
+            agent_label="Surveyor",
+        )
 
     async def urbanista_generate_bounded(self, prompt: str) -> dict:
-        for attempt in range(2):
-            try:
-                async with self._urbanista_semaphore:
-                    return await self.urbanista.generate(prompt)
-            except AgentGenerationError as err:
-                retriable = err.pause_reason in ("bad_model_output", "api_error", "network")
-                if attempt == 0 and retriable:
-                    logger.warning(
-                        "[roma.engine] Urbanista call failed (%s), retrying once: %s",
-                        err.pause_reason,
-                        err.pause_detail[:200] if err.pause_detail else "",
-                    )
-                    await asyncio.sleep(2.0)
-                    continue
-                raise
+        return await self._generate_with_retry(
+            self.urbanista,
+            prompt,
+            self._host.tasks.urbanista_concurrency_semaphore,
+            retry_delay_seconds=2.0,
+            agent_label="Urbanista",
+        )
 
     async def find_map_image(self):
-        """Provide a known map for the selected city."""
-        known_maps = {
-            "Rome": ("https://upload.wikimedia.org/wikipedia/commons/thumb/8/88/Plan_de_Rome.jpg/1280px-Plan_de_Rome.jpg", "Paul Bigot's plan of ancient Rome"),
-            "Athens": ("https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/Map_ancient_athens.png/800px-Map_ancient_athens.png", "Map of ancient Athens"),
-            "Constantinople": ("https://upload.wikimedia.org/wikipedia/commons/thumb/2/2b/Byzantine_Constantinople-en.png/800px-Byzantine_Constantinople-en.png", "Map of Byzantine Constantinople"),
-            "Jerusalem": ("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Jerusalem_in_the_first_century.jpg/800px-Jerusalem_in_the_first_century.jpg", "Jerusalem in the 1st century"),
-            "Pompeii": ("https://upload.wikimedia.org/wikipedia/commons/thumb/6/66/Pompeii_map-en.svg/800px-Pompeii_map-en.svg.png", "Archaeological map of Pompeii"),
-            "Alexandria": ("https://upload.wikimedia.org/wikipedia/commons/thumb/0/07/Alexandria_-_Teknisk_Tidskrift_-_1906.jpg/800px-Alexandria_-_Teknisk_Tidskrift_-_1906.jpg", "Map of ancient Alexandria"),
-            "Carthage": ("https://upload.wikimedia.org/wikipedia/commons/thumb/5/50/Carthage_topography.svg/800px-Carthage_topography.svg.png", "Topographic map of ancient Carthage"),
-            "Baghdad": ("https://upload.wikimedia.org/wikipedia/commons/thumb/c/cc/CASEY2007_BAG_fig3-2.jpg/800px-CASEY2007_BAG_fig3-2.jpg", "Plan of Round City of Baghdad"),
-            "Tenochtitlan": ("https://upload.wikimedia.org/wikipedia/commons/thumb/b/b4/Tenochtitlan_y_los_lagos_del_valle_de_Mexico.png/800px-Tenochtitlan_y_los_lagos_del_valle_de_Mexico.png", "Map of Tenochtitlan and the Valley of Mexico"),
-            "Chang'an": ("https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Chang%27an_of_Tang.png/800px-Chang%27an_of_Tang.png", "Map of Tang dynasty Chang'an"),
-        }
+        """Provide a known map for the selected city (URLs from system_config.csv)."""
         try:
-            scen = self.engine.scenario
+            scen = self._host.scenario
             location = scen.get("location", "Rome") if isinstance(scen, dict) else "Rome"
-            if location in known_maps:
-                url, source = known_maps[location]
-                await self.broadcast({"type": "map_image", "url": url, "source": source})
-                logger.info(f"Map image: {source}")
+            catalog = self._host.system_configuration.known_cartography_map_dictionary
+            entry = catalog.get(location) if isinstance(catalog, dict) else None
+            if isinstance(entry, dict):
+                url = str(entry.get("image_url", "")).strip()
+                source = str(entry.get("attribution", "")).strip()
+                if url:
+                    await self.broadcast({"type": "map_image", "url": url, "source": source})
+                    logger.info("Map image: %s", source or url)
         except Exception as e:
-            logger.warning(f"Map image failed: {e}")
+            logger.warning("Map image failed: %s", e)

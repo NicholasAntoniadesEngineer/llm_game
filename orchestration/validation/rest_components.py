@@ -7,6 +7,7 @@ points live in ``rest_flow`` and ``rest_geometry``; this module holds shared hel
 from __future__ import annotations
 
 import logging
+import math
 
 from core.errors import UrbanistaValidationError
 from orchestration.schema import (
@@ -262,10 +263,10 @@ def _validate_architectural_coherence(parts: list, ctx: str) -> None:
             elif part.get("shape") in ("cylinder", "cone"):
                 r = float(part.get("radius", 0.1))
                 h = float(part.get("height", 0.2))
-                volumes.append(3.14159 * r * r * h)
+                volumes.append(math.pi * r * r * h)
             elif part.get("shape") == "sphere":
                 r = float(part.get("radius", 0.1))
-                volumes.append(4/3 * 3.14159 * r * r * r)
+                volumes.append(4 / 3 * math.pi * r * r * r)
         except (TypeError, ValueError):
             continue
 

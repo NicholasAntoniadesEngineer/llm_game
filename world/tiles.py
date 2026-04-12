@@ -1,6 +1,6 @@
 """Tile data model and building/terrain catalogs."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # Fields always included in serialized output (even when default/None).
@@ -34,6 +34,17 @@ class Tile:
     moisture: Optional[float] = None
     temperature: Optional[float] = None
 
+    def apply_placement_payload(self, data: dict) -> None:
+        """Set fields from ``data``; rejects keys that are not ``Tile`` slots (except x/y)."""
+        allowed = frozenset(self.__slots__) - {"x", "y"}
+        for key, value in data.items():
+            if key in ("x", "y"):
+                continue
+            if key not in allowed:
+                raise ValueError(f"Unknown tile placement field: {key!r}")
+            if value is not None:
+                setattr(self, key, value)
+
     def to_dict(self) -> dict:
         d: dict = {}
         for k in self.__slots__:
@@ -41,41 +52,3 @@ class Tile:
             if v is not None or k in _ALWAYS_SERIALIZE:
                 d[k] = v
         return d
-
-
-# Default colors for terrain types
-TERRAIN_COLORS = {
-    "empty": "#c2b280",
-    "road": "#808080",
-    "building": "#d4a373",
-    "water": "#3498db",
-    "garden": "#27ae60",
-    "forum": "#f0e68c",
-    "wall": "#5d4037",
-}
-
-# Default icons for building types
-BUILDING_ICONS = {
-    "temple": "🏛",
-    "basilica": "🏛",
-    "insula": "🏠",
-    "domus": "🏡",
-    "aqueduct": "🌉",
-    "thermae": "♨️",
-    "circus": "🏟",
-    "amphitheater": "🏟",
-    "market": "🏪",
-    "gate": "⛩",
-    "bridge": "🌉",
-    "monument": "🗿",
-    "taberna": "🍷",
-    "warehouse": "📦",
-}
-
-TERRAIN_ICONS = {
-    "road": "▪️",
-    "garden": "🌿",
-    "water": "🌊",
-    "wall": "🧱",
-    "forum": "⚖️",
-}

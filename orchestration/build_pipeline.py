@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Awaitable, Callable, Sequence
 
+from core.errors import AgentGenerationError
 from core.run_log import trace_event
+from orchestration.engine_ports import MasterPlanPreplaceEnginePort
+from orchestration.master_plan_geometry import (
+    intra_plan_tile_overlaps,
+    normalize_master_plan_tile_coordinates,
+)
 from orchestration.placement import check_functional_placement, log_functional_placement_warnings
 
 logger = logging.getLogger("eternal.engine")
@@ -16,7 +22,7 @@ logger = logging.getLogger("eternal.engine")
 class MasterPlanPreplaceContext:
     """Mutable master plan and engine reference for pipeline steps."""
 
-    engine: Any
+    engine: MasterPlanPreplaceEnginePort
     district_key: str
     district: dict
     master_plan: list
@@ -54,6 +60,12 @@ async def _step_validate_master_plan(ctx: MasterPlanPreplaceContext) -> None:
     ctx.master_plan.extend(validated)
 
 
+async def _step_normalize_master_plan_tile_coordinates(
+    ctx: MasterPlanPreplaceContext,
+) -> None:
+    normalize_master_plan_tile_coordinates(ctx.master_plan)
+
+
 async def _step_functional_placement_warnings(ctx: MasterPlanPreplaceContext) -> None:
     log_functional_placement_warnings(ctx.master_plan, ctx.district_key)
     placement_warnings = check_functional_placement(ctx.master_plan)
@@ -80,18 +92,17 @@ async def _step_functional_placement_warnings(ctx: MasterPlanPreplaceContext) ->
 
 
 async def _step_log_intra_plan_tile_overlaps(ctx: MasterPlanPreplaceContext) -> None:
-    all_tiles: dict[tuple[int, int], str] = {}
-    for struct in ctx.master_plan:
-        for t in struct.get("tiles", []):
-            key = (t["x"], t["y"])
-            if key in all_tiles:
-                logger.warning(
-                    "Tile overlap: %s and %s at %s",
-                    struct["name"],
-                    all_tiles[key],
-                    key,
-                )
-            all_tiles[key] = struct.get("name", "?")
+    overlaps = intra_plan_tile_overlaps(ctx.master_plan)
+    for overlap_line in overlaps:
+        logger.warning("%s", overlap_line)
+    if (
+        int(ctx.engine.system_configuration.master_plan_fail_on_intra_plan_tile_overlap_flag) == 1
+        and overlaps
+    ):
+        raise AgentGenerationError(
+            "bad_model_output",
+            "Intra-plan tile overlap(s): " + "; ".join(overlaps[:24]),
+        )
 
 
 async def _step_filter_already_occupied_structures(ctx: MasterPlanPreplaceContext) -> None:
@@ -123,6 +134,10 @@ async def _step_filter_already_occupied_structures(ctx: MasterPlanPreplaceContex
 
 MASTER_PLAN_PREPLACE_STEPS: tuple[BuildPipelineStep, ...] = (
     BuildPipelineStep(name="validate_master_plan", coro_fn=_step_validate_master_plan),
+    BuildPipelineStep(
+        name="normalize_master_plan_tile_coordinates",
+        coro_fn=_step_normalize_master_plan_tile_coordinates,
+    ),
     BuildPipelineStep(
         name="functional_placement_warnings",
         coro_fn=_step_functional_placement_warnings,

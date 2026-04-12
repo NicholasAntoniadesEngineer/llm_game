@@ -40,8 +40,18 @@ class AsyncBroadcastNotifier:
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._broadcast_async(message))
-        except (RuntimeError, Exception):
-            logger.warning("UI broadcast schedule skipped or failed (non-fatal)", exc_info=True)
+        except RuntimeError as no_loop:
+            logger.error(
+                "UI broadcast schedule failed: no running event loop",
+                exc_info=no_loop,
+            )
+            raise
+        except Exception as schedule_error:
+            logger.exception(
+                "UI broadcast schedule failed",
+                exc_info=schedule_error,
+            )
+            raise
 
     async def send_message(self, message: dict[str, Any]) -> None:
         await self._broadcast_async(message)

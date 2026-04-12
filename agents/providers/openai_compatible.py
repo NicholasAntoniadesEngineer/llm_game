@@ -42,6 +42,8 @@ def _openai_compatible_request_sync(
     system_prompt: str,
     user_text: str,
     timeout_s: float,
+    *,
+    sampling_temperature: float,
 ) -> tuple[int, str, str]:
     """Returns (http_status, response_body, error_body_if_any)."""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -51,7 +53,7 @@ def _openai_compatible_request_sync(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        "temperature": 0.4,
+        "temperature": float(sampling_temperature),
     }
     body = json.dumps(payload).encode("utf-8")
     headers = {
@@ -106,6 +108,7 @@ class OpenAICompatibleProvider:
         self.http_timeout_s = float(
             http_timeout_s if http_timeout_s is not None else fallback_timeout
         )
+        self._system_configuration = system_configuration
 
     async def complete(
         self,
@@ -127,9 +130,14 @@ class OpenAICompatibleProvider:
                 "api_error",
                 "openai_compatible: set API key via AI settings or OPENAI_COMPATIBLE_API_KEY.",
             )
-        use_model = model
-        if self.default_model:
-            use_model = self.default_model
+        requested = (model or "").strip()
+        default_m = (self.default_model or "").strip()
+        use_model = requested if requested else default_m
+        if not use_model:
+            raise AgentGenerationError(
+                "api_error",
+                "openai_compatible: no model id — set model in AI settings or pass a non-empty model.",
+            )
 
         forbidden = _is_xai_multi_agent_model_forbidden(self.base_url, use_model)
         if forbidden:
@@ -154,6 +162,7 @@ class OpenAICompatibleProvider:
             system_prompt,
             user_text,
             self.http_timeout_s,
+            sampling_temperature=self._system_configuration.openai_compatible_temperature,
         )
         if status != 200:
             detail = (err or body)[:800]
@@ -196,11 +205,7 @@ class OpenAICompatibleProvider:
                 f"OpenAI-compatible response was not valid JSON: {e}. "
                 "Confirm the base URL points to /v1 chat/completions (not an HTML page).",
             ) from e
-        # Best-effort usage reporting (OpenAI-compatible servers often include usage.*).
-        try:
-            self.last_usage = data.get("usage") if isinstance(data, dict) else None
-        except Exception:
-            self.last_usage = None
+        self.last_usage = data.get("usage") if isinstance(data, dict) else None
         choices = data.get("choices")
         if not choices:
             raise AgentGenerationError("api_error", "API response missing choices[].")

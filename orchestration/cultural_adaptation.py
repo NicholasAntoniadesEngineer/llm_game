@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import random
 import math
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     from core.config import Config
 
 _cultural_adaptation_by_config_id: dict[int, "CulturalAdaptationSystem"] = {}
+
+logger = logging.getLogger("eternal.cultural_adaptation")
 
 
 class CulturalAdaptationSystem:
@@ -54,9 +57,8 @@ class CulturalAdaptationSystem:
         if invalid_societies:
             from core.society_validator import society_validator
             summary = society_validator.get_validation_summary(validation_results)
-            print("Society validation issues found:")
-            print(summary)
-            print("\nContinuing with valid societies only...")
+            logger.warning("Society validation issues found:\n%s", summary)
+            logger.warning("Continuing with valid societies only")
 
         # Load valid societies
         for society_file in self._data_dir.glob("*.society.json"):
@@ -64,16 +66,20 @@ class CulturalAdaptationSystem:
 
             # Skip invalid societies
             if society_key in invalid_societies:
-                print(f"Skipping invalid society: {society_key}")
+                logger.warning("Skipping invalid society: %s", society_key)
                 continue
 
             try:
                 with open(society_file, 'r', encoding='utf-8') as f:
                     society_data = json.load(f)
                     cultures[society_key] = society_data
-                    print(f"Loaded society: {society_key} ({society_data.get('name', 'Unknown')})")
+                    logger.info(
+                        "Loaded society: %s (%s)",
+                        society_key,
+                        society_data.get("name", "Unknown"),
+                    )
             except Exception as e:
-                print(f"Warning: Failed to load society {society_key}: {e}")
+                logger.warning("Failed to load society %s: %s", society_key, e)
 
         if not cultures:
             raise RuntimeError("No valid societies found! Check society file validation errors above.")

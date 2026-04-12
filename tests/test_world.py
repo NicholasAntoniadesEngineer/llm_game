@@ -2,7 +2,7 @@
 
 import pytest
 
-from world.tiles import Tile, TERRAIN_COLORS, BUILDING_ICONS, TERRAIN_ICONS
+from world.tiles import Tile
 from world.state import WorldState
 from world.blueprint import CityBlueprint
 
@@ -52,18 +52,29 @@ class TestTile:
         assert d["spec"] == {"components": [{"type": "podium"}]}
 
 
+def _terrain_types_with_display_color(system_configuration) -> set[str]:
+    keys = set(system_configuration.terrain_type_display_colors_extra_dictionary.keys())
+    for name, entry in system_configuration.terrain.terrain_defaults_dictionary.items():
+        if isinstance(entry, dict) and entry.get("color"):
+            keys.add(str(name))
+    return keys
+
+
 class TestTerrainMaps:
     def test_terrain_colors_has_common_types(self):
+        keys = _terrain_types_with_display_color(SYSTEM_CONFIGURATION)
         for terrain in ("empty", "road", "building", "water", "garden", "forum"):
-            assert terrain in TERRAIN_COLORS
+            assert terrain in keys
 
     def test_building_icons_has_common_types(self):
+        icons = SYSTEM_CONFIGURATION.building_type_display_icons_dictionary
         for btype in ("temple", "domus", "insula", "aqueduct"):
-            assert btype in BUILDING_ICONS
+            assert btype in icons
 
     def test_terrain_icons_has_common_types(self):
+        icons = SYSTEM_CONFIGURATION.terrain_display_icons_dictionary
         for terrain in ("road", "garden", "water"):
-            assert terrain in TERRAIN_ICONS
+            assert terrain in icons
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +347,7 @@ class TestCityBlueprintElevationParity:
         w1 = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         w1.place_tile(0, 0, {"terrain": "grass"})
         w1.place_tile(2, 1, {"terrain": "grass"})
-        bp1 = CityBlueprint()
+        bp1 = CityBlueprint.from_config(SYSTEM_CONFIGURATION)
         bp1.hills = [{"name": "test_hill", "cx": 1, "cy": 1, "radius": 8, "peak": 3.0}]
         scfg = SYSTEM_CONFIGURATION
         assert bp1.populate_elevation(w1, system_configuration=scfg) > 0
@@ -344,7 +355,7 @@ class TestCityBlueprintElevationParity:
         w2 = WorldState(chunk_size_tiles=SYSTEM_CONFIGURATION.grid.chunk_size_tiles, system_configuration=SYSTEM_CONFIGURATION)
         w2.place_tile(0, 0, {"terrain": "grass"})
         w2.place_tile(2, 1, {"terrain": "grass"})
-        bp2 = CityBlueprint()
+        bp2 = CityBlueprint.from_config(SYSTEM_CONFIGURATION)
         bp2.hills = list(bp1.hills)
         assert bp2.apply_elevation_to_world(w2, system_configuration=scfg) > 0
 

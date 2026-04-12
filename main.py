@@ -39,14 +39,20 @@ from core.persistence import (
     save_state,
     validate_blueprint_tile_invariants,
 )
+from core.application_services import configure_application_services, set_broadcast_async
 from core.config import load_config
-from core.bootstrap import apply_llm_routing_from_config, bind_application_broadcast
+from core.bootstrap import apply_llm_routing_from_config
+from core.token_usage import TokenUsageStore
 
 from core.run_log import init_run_log
 from core.heartbeat import start_heartbeat, stop_heartbeat
 
 # Load the single source of truth configuration early (strict CSV validation, fails hard if invalid)
 system_configuration = load_config()
+configure_application_services(
+    system_configuration=system_configuration,
+    token_usage_store=TokenUsageStore(),
+)
 apply_llm_routing_from_config(system_configuration)
 
 init_run_log(
@@ -100,7 +106,7 @@ state = AppState(system_configuration=system_configuration)
 # Bind broadcast to the shared state so callers use broadcast(message) without needing to pass state.
 broadcast = functools.partial(_broadcast_impl, state)
 
-bind_application_broadcast(broadcast)
+set_broadcast_async(broadcast)
 
 # Pass the system_configuration to BuildEngine for dependency injection (to be fully updated in modularize todo)
 engine = BuildEngine(
@@ -164,7 +170,9 @@ if saved:
     engine.districts = districts
     engine.generation = loaded_generation
     state.run_session.scenario = loaded_scenario
-    for msg in validate_blueprint_tile_invariants(state.world, load_blueprint()):
+    for msg in validate_blueprint_tile_invariants(
+        state.world, load_blueprint(system_configuration=system_configuration)
+    ):
         logging.warning("Blueprint invariant: %s", msg)
     logging.info(
         "Restored from disk: district #%s, %s districts, %s chat messages — world + scenario kept for restart",
@@ -250,7 +258,7 @@ async def _handle_start_inner(city_name, year):
     engine.district_index = 0
 
     # Delete old caches
-    clear_saves()
+    clear_saves(system_configuration=system_configuration)
 
     # Broadcast scenario to all clients (engine UI fields added in server.broadcast.attach_engine_ui_to_message)
     await broadcast(state.world.to_dict())
@@ -287,7 +295,7 @@ async def _handle_reset_inner():
 
     state.world.clear()
     state.world.current_period = ""
-    state.world.current_year = -44
+    state.world.current_year = system_configuration.world_reset_default_year_int
 
     state.chat_history.clear()
     engine.districts = []
@@ -295,7 +303,7 @@ async def _handle_reset_inner():
     state.agent_status_by_agent.clear()
     await engine.broadcast_all_agents_idle()
 
-    clear_saves()
+    clear_saves(system_configuration=system_configuration)
 
     # Back to selection screen
     state.run_session.scenario = None
@@ -410,7 +418,7 @@ async def handle_restart_server() -> dict:
         )
 
     async def _touch_reload_sentinel_after_response() -> None:
-        await asyncio.sleep(0.45)
+        await asyncio.sleep(system_configuration.server_reload_sentinel_pre_touch_sleep_seconds)
         try:
             await asyncio.to_thread(RELOAD_SENTINEL.touch)
             logging.info("reload_trigger.txt touched — uvicorn should restart (saves and caches kept)")
@@ -495,15 +503,15 @@ if __name__ == "__main__":
             "UI RESET does not reload code."
         )
     _uvicorn_kwargs = dict(
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
+        host=system_configuration.http_server_listen_host_string,
+        port=system_configuration.http_server_listen_port_int,
+        log_level=system_configuration.uvicorn_log_level_string,
         reload=_reload,
         reload_includes=["*.py", "reload_trigger.txt"] if _reload else None,
     )
     # Debounce bursts of watcher events so the dev server does not restart repeatedly on startup.
     if _reload:
-        _uvicorn_kwargs["reload_delay"] = 1.0
+        _uvicorn_kwargs["reload_delay"] = system_configuration.uvicorn_reload_delay_seconds
         _uvicorn_kwargs["reload_excludes"] = [
             "**/__pycache__/**",
             "**/.git/**",

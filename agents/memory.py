@@ -1,4 +1,4 @@
-"""Agent memory system — conversation history, style tracking, and structured knowledge.
+"""Agent memory system — conversation history and style tracking.
 
 Provides lightweight, token-efficient memory that agents accumulate across calls.
 All formatted output targets <100 tokens for prompt injection.
@@ -6,16 +6,12 @@ All formatted output targets <100 tokens for prompt injection.
 Classes:
     ConversationMemory — Rolling window of recent interactions per agent.
     StyleMemory — Tracks Urbanista's evolving design preferences for a city.
-    KnowledgeBase — Structured facts agents accumulate about the city.
 """
 
 from __future__ import annotations
 
-import logging
 from collections import Counter
 from typing import Any
-
-logger = logging.getLogger("eternal.memory")
 
 
 class ConversationMemory:
@@ -177,80 +173,3 @@ class StyleMemory:
         self.heights.clear()
         self.color_palette.clear()
         self.motifs.clear()
-
-
-class KnowledgeBase:
-    """Structured facts agents accumulate about the city.
-
-    Organizes facts by topic (e.g., "materials", "district:Forum Romanum",
-    "period:Republican") for targeted retrieval during prompt construction.
-
-    Facts are deduplicated per topic. Total storage is bounded.
-    """
-
-    MAX_FACTS_PER_TOPIC = 20
-    MAX_TOPICS = 50
-
-    def __init__(self):
-        self.facts: dict[str, list[str]] = {}
-
-    def add_fact(self, topic: str, fact: str) -> None:
-        """Add a fact under a topic. Deduplicates and caps per-topic storage.
-
-        Args:
-            topic: Category key (e.g., "materials", "district:Subura").
-            fact: The fact string to store.
-        """
-        if not topic or not fact:
-            return
-        # Cap total topics
-        if topic not in self.facts and len(self.facts) >= self.MAX_TOPICS:
-            return
-        if topic not in self.facts:
-            self.facts[topic] = []
-        bucket = self.facts[topic]
-        # Deduplicate
-        if fact in bucket:
-            return
-        bucket.append(fact)
-        # Cap per topic
-        if len(bucket) > self.MAX_FACTS_PER_TOPIC:
-            self.facts[topic] = bucket[-self.MAX_FACTS_PER_TOPIC:]
-
-    def query(self, topic: str) -> list[str]:
-        """Retrieve all facts for a topic.
-
-        Args:
-            topic: Category key to look up.
-
-        Returns:
-            List of fact strings (empty list if topic unknown).
-        """
-        return list(self.facts.get(topic, []))
-
-    def query_compact(self, topic: str, max_facts: int = 5) -> str:
-        """Compact string of facts for prompt injection.
-
-        Args:
-            topic: Category key.
-            max_facts: Maximum facts to include.
-
-        Returns:
-            Semicolon-separated fact string, or empty string if none.
-        """
-        facts = self.facts.get(topic, [])
-        if not facts:
-            return ""
-        selected = facts[-max_facts:]  # Most recent
-        return f"KB[{topic}]:" + ";".join(f[:80] for f in selected)
-
-    def topics(self) -> list[str]:
-        """List all known topic keys."""
-        return list(self.facts.keys())
-
-    def clear(self) -> None:
-        """Remove all stored facts."""
-        self.facts.clear()
-
-    def __len__(self) -> int:
-        return sum(len(v) for v in self.facts.values())

@@ -14,6 +14,7 @@ from typing import Any
 
 _LOG_BUFFER: deque[str] | None = None
 _RUN_START: float | None = None
+_emit_fallback_logger = logging.getLogger("eternal.run_log_emit")
 
 
 def _ts() -> str:
@@ -29,7 +30,7 @@ class RunLogHandler(logging.Handler):
             if _LOG_BUFFER is not None:
                 _LOG_BUFFER.append(msg)
         except Exception:
-            pass
+            _emit_fallback_logger.exception("RunLogHandler.emit failed; record not appended to buffer")
 
 
 # Singleton handler — attached once in init_run_log().

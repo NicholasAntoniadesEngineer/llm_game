@@ -71,9 +71,6 @@ DENSE_SHAPE_CODES: dict[str, str] = {
     "wc": "water_channel",
 }
 
-# Reverse map: full name -> code
-_SHAPE_CODE_REVERSE: dict[str, str] = {v: k for k, v in DENSE_SHAPE_CODES.items()}
-
 # ── Dense tile keys ────────────────────────────────────────────────────
 # Maps short keys in dense tile format to full verbose keys.
 # Dense tile: {"n":"Temple","bt":"temple","x":5,"y":10,"s":[...shapes...]}

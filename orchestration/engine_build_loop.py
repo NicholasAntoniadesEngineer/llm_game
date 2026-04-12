@@ -9,11 +9,19 @@ from typing import TYPE_CHECKING
 from core.errors import AgentGenerationError
 from core.fingerprint import district_survey_key
 from core.run_log import log_event, trace_event
+from orchestration.district_model import parse_district_dict
 
 logger = logging.getLogger("eternal.engine")
 
 if TYPE_CHECKING:
     from orchestration.engine_ports import BuildGenerationEnginePort
+
+
+async def _schedule_auto_retry_if_pending(engine: "BuildGenerationEnginePort", failure_label: str) -> None:
+    if getattr(engine, "_auto_retry_pending", False):
+        engine._auto_retry_pending = False
+        logger.info("Auto-retry: re-entering run() after %s", failure_label)
+        await engine.schedule_run()
 
 
 async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
@@ -26,12 +34,14 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
         districts_total=len(engine.districts),
     )
     engine.update_trace_snapshot(phase="_build_generation", step="start", generation=engine.generation)
-    engine.tasks.clear_survey_prefetch_handles()
-    engine.tasks.start_survey_tasks_from_index(engine.district_index, engine.district_index + 1)
-    if len(engine.districts) > engine.district_index + 1:
-        logger.info("Survey priority: district %s/%s first", engine.district_index + 1, len(engine.districts))
-
+    await engine.tasks.clear_survey_prefetch_handles()
     engine.tasks.start_survey_tasks_from_index(engine.district_index, len(engine.districts))
+    if engine.districts:
+        logger.info(
+            "Survey prefetch: districts %s..%s",
+            engine.district_index + 1,
+            len(engine.districts),
+        )
     district_plans: dict[int, list] = {}
 
     async def _get_plan(di: int) -> list | None:
@@ -57,10 +67,15 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
             if not engine.running:
                 return False
 
-            district = engine.districts[di]
+            district = parse_district_dict(
+                engine.districts[di],
+                system_configuration=engine.system_configuration,
+            ).as_engine_dict()
             district_name = district["name"]
             engine.world.current_period = district.get("period", "")
-            engine.world.current_year = district.get("year", -44)
+            engine.world.current_year = int(
+                district.get("year", engine.system_configuration.world_reset_default_year_int)
+            )
 
             survey_sid = district_survey_key(district)
             scenery = engine._district_scenery_summaries.get(survey_sid, "")
@@ -81,7 +96,13 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
                     "y2": region.get("y2", 0),
                 },
             })
-            await engine.broadcast({"type": "timeline", "period": district.get("period", ""), "year": district.get("year", -44)})
+            await engine.broadcast({
+                "type": "timeline",
+                "period": district.get("period", ""),
+                "year": district.get(
+                    "year", engine.system_configuration.world_reset_default_year_int
+                ),
+            })
 
             engine.update_trace_snapshot(
                 phase="build_wave",
@@ -101,10 +122,7 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
                 )
                 plan = await _get_plan(di)
                 if plan is None:
-                    if getattr(engine, "_auto_retry_pending", False):
-                        engine._auto_retry_pending = False
-                        logger.info("Auto-retry: re-entering run() after survey failure")
-                        await engine.schedule_run()
+                    await _schedule_auto_retry_if_pending(engine, "survey failure")
                     return False
                 district_plans[di] = plan
 
@@ -136,10 +154,7 @@ async def run_build_generation(engine: "BuildGenerationEnginePort") -> bool:
             )
             district_ok = await engine._build_district(district, wave_plan)
             if not district_ok:
-                if getattr(engine, "_auto_retry_pending", False):
-                    engine._auto_retry_pending = False
-                    logger.info("Auto-retry: re-entering run() after district build failure")
-                    await engine.schedule_run()
+                await _schedule_auto_retry_if_pending(engine, "district build failure")
                 return False
 
             await engine._save_state_thread(flush_mode="incremental")

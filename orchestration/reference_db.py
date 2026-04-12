@@ -7,22 +7,30 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from core.config import Config
+
 logger = logging.getLogger("eternal.reference_db")
 
 _CACHE: list[dict[str, Any]] | None = None
 _LOOKUP_CACHE: dict[tuple[str, str, int], dict[str, Any] | None] = {}
+_CACHE_CONFIG_ID: str | None = None
 
 
-def _data_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "data" / "architectural_reference.json"
+def _data_path(*, system_configuration: Config) -> Path:
+    rel = str(system_configuration.architectural_reference_file_relative).strip()
+    root = Path(__file__).resolve().parent.parent
+    return root / rel
 
 
-def load_architectural_entries() -> list[dict[str, Any]]:
-    global _CACHE, _LOOKUP_CACHE
-    if _CACHE is not None:
+def load_architectural_entries(*, system_configuration: Config) -> list[dict[str, Any]]:
+    global _CACHE, _LOOKUP_CACHE, _CACHE_CONFIG_ID
+    config_id = str(system_configuration.architectural_reference_file_relative).strip()
+    if _CACHE is not None and _CACHE_CONFIG_ID == config_id:
         return _CACHE
+    _CACHE = None
+    _CACHE_CONFIG_ID = config_id
     _LOOKUP_CACHE.clear()
-    path = _data_path()
+    path = _data_path(system_configuration=system_configuration)
     if not path.is_file():
         logger.warning("No architectural_reference.json at %s", path)
         _CACHE = []
@@ -41,6 +49,8 @@ def lookup_architectural_reference(
     building_type: str,
     city: str,
     year: int,
+    *,
+    system_configuration: Config,
 ) -> dict[str, Any] | None:
     """
     Return the best-matching reference entry for Urbanista/Historicus prompts.
@@ -60,7 +70,7 @@ def lookup_architectural_reference(
     best: dict[str, Any] | None = None
     best_score = -1
 
-    for e in load_architectural_entries():
+    for e in load_architectural_entries(system_configuration=system_configuration):
         if not isinstance(e, dict):
             continue
         m = e.get("match")

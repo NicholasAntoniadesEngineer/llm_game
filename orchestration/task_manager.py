@@ -2,11 +2,15 @@
 
 import asyncio
 import logging
-from typing import Any, Callable, Awaitable, TYPE_CHECKING
+import time
+from typing import Any, Awaitable, Callable, Coroutine, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.config import Config
+
 from core.errors import ConfigLoadError
+
+from orchestration.engine_ports import TaskManagerPersistenceReadsPort
 
 from core.persistence import save_state
 from core.run_log import trace_event
@@ -33,9 +37,7 @@ class TaskManager:
         districts_ref: list,
         survey_work_item_fn: Callable,
         set_status_fn: Callable[..., Awaitable],
-        district_index_fn: Callable[[], int],
-        generation_fn: Callable[[], int],
-        scenario_fn: Callable[[], Any] | None = None,
+        persistence_reads: TaskManagerPersistenceReadsPort,
         system_configuration: "Config" = None,
     ):
         if system_configuration is None:
@@ -48,9 +50,7 @@ class TaskManager:
         self._districts_ref = districts_ref          # mutable list reference
         self._survey_work_item_fn = survey_work_item_fn
         self._set_status_fn = set_status_fn
-        self._district_index_fn = district_index_fn  # callable returning current index
-        self._generation_fn = generation_fn
-        self._scenario_fn = scenario_fn
+        self._persistence_reads = persistence_reads
 
         # Authoritative running flag
         self.running: bool = False
@@ -70,6 +70,24 @@ class TaskManager:
         self._structures_since_save: int = 0
         self._agent_thinking_started: dict[str, float] = {}
 
+    @property
+    def urbanista_concurrency_semaphore(self) -> asyncio.Semaphore:
+        """Public surface for Urbanista concurrency cap (used by batch path and generators)."""
+        return self._urbanista_semaphore
+
+    def get_structures_since_save(self) -> int:
+        """Structures placed since last throttled save (for incremental flush decisions)."""
+        return self._structures_since_save
+
+    def touch_agent_thinking_started_timestamp(self, agent_key: str) -> float:
+        """Record start time when agent enters thinking; return timestamp used for payload."""
+        if agent_key not in self._agent_thinking_started:
+            self._agent_thinking_started[agent_key] = time.time()
+        return self._agent_thinking_started[agent_key]
+
+    def clear_agent_thinking_timestamp(self, agent_key: str) -> None:
+        self._agent_thinking_started.pop(agent_key, None)
+
     # ------------------------------------------------------------------
     # Token telemetry
     # ------------------------------------------------------------------
@@ -80,14 +98,14 @@ class TaskManager:
 
         async def _loop() -> None:
             try:
-                from core.token_usage import STORE as TOKEN_USAGE_STORE
                 from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
+                from core.token_usage import get_token_usage_store
                 prev_totals: dict[str, int] = {}
                 interval_s = self.system_configuration.token.token_telemetry_interval_seconds
                 logger.info("Token telemetry enabled: interval_s=%s", interval_s)
                 while self.running:
                     await asyncio.sleep(interval_s)
-                    payload = TOKEN_USAGE_STORE.to_payload()
+                    payload = get_token_usage_store().to_payload()
                     # Flatten totals by agent_key for delta computation.
                     current_totals: dict[str, int] = {}
                     for agent_key, row in payload.items():
@@ -108,7 +126,9 @@ class TaskManager:
                                     "type": "token_usage",
                                     "by_ui_agent": token_aggregate_for_ui(),
                                     "by_llm_key": payload,
-                                    "summary": get_token_summary(),
+                                    "summary": get_token_summary(
+                                        system_configuration=self.system_configuration
+                                    ),
                                 }
                             )
                         except Exception:
@@ -150,12 +170,14 @@ class TaskManager:
     # ------------------------------------------------------------------
 
     def reset_pipeline_for_new_run(self) -> None:
-        """Clear in-flight survey/refine handles when starting a new scenario (sync; cancel tasks from async)."""
+        """Clear in-flight survey/refine handles when starting a new scenario (sync cancel; join from async)."""
         self.run_phase = EngineRunPhase.idle
-        for idx, task in self._survey_task_by_index.items():
-            if task.done() and not task.cancelled():
+        for _idx, survey_task in list(self._survey_task_by_index.items()):
+            if not survey_task.done():
+                survey_task.cancel()
+            elif not survey_task.cancelled():
                 try:
-                    task.exception()
+                    survey_task.exception()
                 except Exception:
                     pass
         self._survey_task_by_index.clear()
@@ -187,7 +209,9 @@ class TaskManager:
             if self._run_task is task:
                 self._run_task = None
 
-    async def schedule_run(self, run_coro_factory: Callable[[], asyncio.coroutines]) -> asyncio.Task:
+    async def schedule_run(
+        self, run_coro_factory: Callable[[], Coroutine[Any, Any, None]]
+    ) -> asyncio.Task:
         """Start ``run()`` as a tracked task; joins any prior run task first (idempotent).
 
         *run_coro_factory* is a zero-arg callable that returns the coroutine to schedule
@@ -296,9 +320,26 @@ class TaskManager:
             return await self._survey_work_item_fn(index)
         return await task
 
-    def clear_survey_prefetch_handles(self) -> None:
-        """Drop survey task handles before rescheduling (same as prior ``_survey_task_by_index.clear()``)."""
+    async def clear_survey_prefetch_handles(self) -> int:
+        """Cancel and await prior prefetch surveys before rescheduling; returns count that were in-flight."""
+        snapshot = list(self._survey_task_by_index.items())
         self._survey_task_by_index.clear()
+        cancelled_started = 0
+        for district_index, survey_task in snapshot:
+            if not survey_task.done():
+                survey_task.cancel()
+                cancelled_started += 1
+            try:
+                await survey_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "Survey prefetch clear district_index=%s ended with: %s",
+                    district_index,
+                    exc,
+                )
+        return cancelled_started
 
     def map_refine_task_idle(self) -> bool:
         t = self._map_refine_task
@@ -319,11 +360,11 @@ class TaskManager:
             trace_event(
                 "persist",
                 "save_state (throttled checkpoint)",
-                district_index=self._district_index_fn(),
-                generation=self._generation_fn(),
+                district_index=self._persistence_reads.district_index,
+                generation=self._persistence_reads.generation,
                 structures_since_reset=self.system_configuration.performance.save_state_every_n_structures_count,
             )
-            scen = self._scenario_fn() if self._scenario_fn else None
+            scen = self._persistence_reads.scenario
             if not isinstance(scen, dict):
                 logger.debug("persist_progress_after_structure: skip save (no scenario dict)")
                 self._structures_since_save = 0
@@ -332,9 +373,9 @@ class TaskManager:
                 save_state,
                 self.world,
                 self.chat_history,
-                self._district_index_fn(),
+                self._persistence_reads.district_index,
                 self._districts_ref,
-                self._generation_fn(),
+                self._persistence_reads.generation,
                 scenario=scen,
                 system_configuration=self.system_configuration,
                 flush_mode="incremental",

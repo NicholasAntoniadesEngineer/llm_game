@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 
 @dataclass(frozen=True)
@@ -94,7 +97,11 @@ class TokenUsageStore:
         return out
 
 
-STORE = TokenUsageStore()
+def get_token_usage_store() -> TokenUsageStore:
+    """Token accounting store from the configured application services."""
+    from core.application_services import get_application_services
+
+    return get_application_services().token_usage_store
 
 
 def _agent_keys_by_ui_group() -> dict[str, list[str]]:
@@ -118,37 +125,39 @@ def _agent_keys_by_ui_group() -> dict[str, list[str]]:
 
 def aggregate_for_ui() -> dict[str, dict[str, int]]:
     """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
-    detail = STORE.to_payload()
+    store = get_token_usage_store()
+    detail = store.to_payload()
     groups = _agent_keys_by_ui_group()
     out: dict[str, dict[str, int]] = {}
     for ui, keys in groups.items():
-        pt = ct = tt = 0
-        for k in keys:
-            row = detail.get(k)
+        prompt_total = completion_total = grand_total = 0
+        for routing_key in keys:
+            row = detail.get(routing_key)
             if not row:
                 continue
-            t = row.get("total") or {}
-            pt += int(t.get("prompt_tokens", 0))
-            ct += int(t.get("completion_tokens", 0))
-            tt += int(t.get("total_tokens", 0))
-        out[ui] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}
+            token_row = row.get("total") or {}
+            prompt_total += int(token_row.get("prompt_tokens", 0))
+            completion_total += int(token_row.get("completion_tokens", 0))
+            grand_total += int(token_row.get("total_tokens", 0))
+        out[ui] = {
+            "prompt_tokens": prompt_total,
+            "completion_tokens": completion_total,
+            "total_tokens": grand_total,
+        }
     return out
 
 
-def estimate_tokens_from_text(text: str) -> int:
-    """Very rough heuristic (~4 chars/token for English-ish text)."""
+def estimate_tokens_from_text(text: str, *, system_configuration: "Config") -> int:
+    """Rough token count from character length (divisor from system_config.csv)."""
     if not text:
         return 0
-    return max(1, int(len(text) / 4))
+    divisor = float(system_configuration.token.estimated_chars_per_token_for_heuristic)
+    if divisor <= 0:
+        divisor = 4.0
+    return max(1, int(len(text) / divisor))
 
 
-# ── Cost estimates per 1M tokens (input/output) ──
-# Conservative defaults; callers can override.
-_COST_PER_1M_INPUT = 0.25   # Haiku-class
-_COST_PER_1M_OUTPUT = 1.25
-
-
-def get_token_summary() -> dict:
+def get_token_summary(*, system_configuration: "Config") -> dict:
     """Return a comprehensive per-agent breakdown for the UI dashboard.
 
     Includes:
@@ -157,7 +166,8 @@ def get_token_summary() -> dict:
     - Average tokens per building (urbanista calls)
     - Estimated cost
     """
-    detail = STORE.to_payload()
+    store = get_token_usage_store()
+    detail = store.to_payload()
 
     # Per-agent detail with call counts
     agents_detail: dict[str, dict] = {}
@@ -167,7 +177,7 @@ def get_token_summary() -> dict:
             "prompt_tokens": int(totals.get("prompt_tokens", 0)),
             "completion_tokens": int(totals.get("completion_tokens", 0)),
             "total_tokens": int(totals.get("total_tokens", 0)),
-            "call_count": STORE.call_count(agent_key),
+            "call_count": store.call_count(agent_key),
             "model": row.get("last", {}).get("model", ""),
         }
 
@@ -175,38 +185,40 @@ def get_token_summary() -> dict:
     groups = _agent_keys_by_ui_group()
     by_group: dict[str, dict] = {}
     for ui_name, keys in groups.items():
-        pt = ct = tt = calls = 0
-        for k in keys:
-            row = detail.get(k)
+        prompt_segment = completion_segment = total_segment = call_segment = 0
+        for routing_key in keys:
+            row = detail.get(routing_key)
             if not row:
                 continue
-            t = row.get("total") or {}
-            pt += int(t.get("prompt_tokens", 0))
-            ct += int(t.get("completion_tokens", 0))
-            tt += int(t.get("total_tokens", 0))
-            calls += STORE.call_count(k)
+            token_bucket = row.get("total") or {}
+            prompt_segment += int(token_bucket.get("prompt_tokens", 0))
+            completion_segment += int(token_bucket.get("completion_tokens", 0))
+            total_segment += int(token_bucket.get("total_tokens", 0))
+            call_segment += store.call_count(routing_key)
         by_group[ui_name] = {
-            "prompt_tokens": pt,
-            "completion_tokens": ct,
-            "total_tokens": tt,
-            "call_count": calls,
+            "prompt_tokens": prompt_segment,
+            "completion_tokens": completion_segment,
+            "total_tokens": total_segment,
+            "call_count": call_segment,
         }
 
     # Average tokens per building (urbanista calls)
     from agents.llm_routing import KEY_URBANISTA
 
-    urbanista_calls = STORE.call_count(KEY_URBANISTA)
+    urbanista_calls = store.call_count(KEY_URBANISTA)
     urbanista_total = int(
         (detail.get(KEY_URBANISTA, {}).get("total", {}).get("total_tokens", 0))
     )
     avg_tokens_per_building = round(urbanista_total / urbanista_calls) if urbanista_calls > 0 else 0
 
-    # Estimated cost
-    total_prompt = sum(g["prompt_tokens"] for g in by_group.values())
-    total_completion = sum(g["completion_tokens"] for g in by_group.values())
+    # Estimated cost (rates from system_config.csv via Config)
+    total_prompt = sum(group_bucket["prompt_tokens"] for group_bucket in by_group.values())
+    total_completion = sum(group_bucket["completion_tokens"] for group_bucket in by_group.values())
+    cost_in = float(system_configuration.token.cost_per_million_input_tokens)
+    cost_out = float(system_configuration.token.cost_per_million_output_tokens)
     estimated_cost = (
-        (total_prompt / 1_000_000) * _COST_PER_1M_INPUT
-        + (total_completion / 1_000_000) * _COST_PER_1M_OUTPUT
+        (total_prompt / 1_000_000) * cost_in
+        + (total_completion / 1_000_000) * cost_out
     )
 
     return {
@@ -217,4 +229,3 @@ def get_token_summary() -> dict:
         "total_tokens": total_prompt + total_completion,
         "estimated_cost_usd": round(estimated_cost, 4),
     }
-

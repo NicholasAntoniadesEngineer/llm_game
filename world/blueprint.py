@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List
 
 from core.config import Config
-from core.terrain_system import terrain_analyzer
+from core.errors import ConfigLoadError
+from core.terrain_analysis import TerrainAnalysis
+from orchestration.district_inference import infer_district_character_from_description
 from world.roads import compute_elevation, smooth_elevation_max_gradient
 
 if TYPE_CHECKING:
@@ -34,11 +36,11 @@ class CityBlueprint:
     roads: list[dict] = field(default_factory=list)    # {name, type:via|vicus|semita, points, width}
     gates: list[dict] = field(default_factory=list)    # {name, x, y}
 
-    # Materials & style
-    primary_stone: str = "travertine"
-    secondary_stone: str = "tufa"
-    brick_type: str = "brick"
-    roof_material: str = "terracotta"
+    # Materials & style (filled by ``from_config`` / ``from_dict``; empty only before init)
+    primary_stone: str = ""
+    secondary_stone: str = ""
+    brick_type: str = ""
+    roof_material: str = ""
 
     # Districts
     district_characters: dict[str, dict] = field(default_factory=dict)
@@ -47,6 +49,18 @@ class CityBlueprint:
     # Sightlines
     vista_corridors: list[dict] = field(default_factory=list)
     # {road_name, terminus_building, points}
+
+    _water_adjacency_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
+
+    @classmethod
+    def from_config(cls, system_configuration: Config) -> CityBlueprint:
+        """New blueprint with material defaults from ``system_config.csv`` only."""
+        return cls(
+            primary_stone=system_configuration.blueprint_default_primary_stone_string,
+            secondary_stone=system_configuration.blueprint_default_secondary_stone_string,
+            brick_type=system_configuration.blueprint_default_brick_type_string,
+            roof_material=system_configuration.blueprint_default_roof_material_string,
+        )
 
     # ── Topography ────────────────────────────────────────────────────
 
@@ -73,7 +87,7 @@ class CityBlueprint:
             return {}
 
         tile_keys = set(world.tiles.keys())
-        dirty = getattr(world, "_dirty_chunks", None) or set()
+        dirty = world.peek_dirty_chunks()
         incremental_threshold = system_configuration.blueprint_incremental_tile_threshold
         use_full = (not dirty) or (len(tile_keys) < incremental_threshold)
 
@@ -113,6 +127,69 @@ class CityBlueprint:
             self.elevation_map[k] = v
         return smoothed
 
+    def _apply_smoothed_elevation_to_world_tiles(
+        self,
+        world: WorldState,
+        smoothed: dict[tuple[int, int], float],
+        *,
+        system_configuration: Config,
+        update_full_terrain_analysis: bool,
+    ) -> int:
+        """Write smoothed elevations onto placed tiles; optionally recompute slope/type/stability."""
+        updated = 0
+        terrain_cfg = system_configuration.terrain
+        threshold_dict = terrain_cfg.terrain_classification_thresholds_dictionary
+        thresholds_for_analysis = {str(k): float(v) for k, v in threshold_dict.items()}
+        for (x, y), elev in smoothed.items():
+            tile = world.get_tile(x, y)
+            if not tile:
+                continue
+            tile.elevation = round(elev, 3)
+            if not update_full_terrain_analysis:
+                updated += 1
+                continue
+
+            neighbors = self._get_neighbor_elevations(x, y, world)
+            slope, aspect = TerrainAnalysis.calculate_slope(elev, neighbors)
+            roughness = TerrainAnalysis.calculate_roughness([elev] + neighbors)
+
+            moisture_val = tile.moisture
+            if moisture_val is None:
+                moisture_val = 0.5
+            temperature_val = tile.temperature
+            if temperature_val is None:
+                temperature_val = 20.0
+
+            terrain_type = TerrainAnalysis.classify_terrain(
+                elev,
+                slope,
+                neighbors,
+                classification_thresholds=thresholds_for_analysis,
+                moisture=moisture_val,
+                temperature=temperature_val,
+                roughness=roughness,
+            )
+
+            soil_type = tile.soil_type or "loam"
+            stability = TerrainAnalysis.assess_stability(
+                terrain_type,
+                slope,
+                soil_type,
+                moisture_val,
+                classification_thresholds=thresholds_for_analysis,
+                terrain_type_modifiers=terrain_cfg.terrain_stability_terrain_type_modifiers_dictionary,
+                soil_type_modifiers=terrain_cfg.terrain_stability_soil_type_modifiers_dictionary,
+            )
+
+            tile.terrain_type = terrain_type.value
+            tile.slope = slope
+            tile.aspect = aspect
+            tile.roughness = roughness
+            tile.stability = stability
+
+            updated += 1
+        return updated
+
     def populate_elevation(self, world: WorldState, *, system_configuration: Config) -> int:
         """Set tile elevation from hills (Gaussian), then bound slope between neighbors.
 
@@ -124,43 +201,12 @@ class CityBlueprint:
         if not smoothed:
             return 0
 
-        updated = 0
-        for (x, y), elev in smoothed.items():
-            tile = world.get_tile(x, y)
-            if not tile:
-                continue
-            tile.elevation = round(elev, 3)
-
-            neighbors = self._get_neighbor_elevations(x, y, world)
-            slope, aspect = terrain_analyzer.calculate_slope(elev, neighbors)
-            roughness = terrain_analyzer.calculate_roughness([elev] + neighbors)
-
-            moisture_val = tile.moisture
-            if moisture_val is None:
-                moisture_val = 0.5
-            temperature_val = tile.temperature
-            if temperature_val is None:
-                temperature_val = 20.0
-
-            terrain_type = terrain_analyzer.classify_terrain(
-                elev,
-                slope,
-                neighbors,
-                moisture=moisture_val,
-                temperature=temperature_val,
-                roughness=roughness,
-            )
-
-            soil_type = tile.soil_type or "loam"
-            stability = terrain_analyzer.assess_stability(terrain_type, slope, soil_type, moisture_val)
-
-            tile.terrain_type = terrain_type.value
-            tile.slope = slope
-            tile.aspect = aspect
-            tile.roughness = roughness
-            tile.stability = stability
-
-            updated += 1
+        updated = self._apply_smoothed_elevation_to_world_tiles(
+            world,
+            smoothed,
+            system_configuration=system_configuration,
+            update_full_terrain_analysis=True,
+        )
 
         logger.info(
             "Elevation populated (max_gradient=%s, iterations=%s): %d tiles, %d hills",
@@ -172,18 +218,29 @@ class CityBlueprint:
         return updated
 
     def _get_neighbor_elevations(self, x: int, y: int, world: WorldState) -> List[float]:
-        """Get elevations of neighboring tiles for terrain analysis."""
-        neighbors = []
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                neighbor_tile = world.get_tile(x + dx, y + dy)
-                if neighbor_tile:
-                    neighbors.append(neighbor_tile.elevation)
-                else:
-                    nx, ny = x + dx, y + dy
-                    neighbors.append(float(self.elevation_at(nx, ny)))
+        """Eight neighbor elevations in fixed order: NW, N, NE, W, E, SW, S, SE.
+
+        Order must match ``TerrainAnalysis.calculate_slope`` (cardinals at indices 1,3,4,6).
+        """
+        neighbor_delta_order = (
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        )
+        neighbors: List[float] = []
+        for delta_x, delta_y in neighbor_delta_order:
+            neighbor_tile = world.get_tile(x + delta_x, y + delta_y)
+            if neighbor_tile:
+                neighbors.append(neighbor_tile.elevation)
+            else:
+                neighbor_x = x + delta_x
+                neighbor_y = y + delta_y
+                neighbors.append(float(self.elevation_at(neighbor_x, neighbor_y)))
         return neighbors
 
     def apply_elevation_to_world(self, world: WorldState, *, system_configuration: Config) -> int:
@@ -197,14 +254,12 @@ class CityBlueprint:
         if not smoothed:
             return 0
 
-        updated = 0
-        for (x, y), elev in smoothed.items():
-            tile = world.get_tile(x, y)
-            if not tile:
-                continue
-            tile.elevation = round(elev, 3)
-            updated += 1
-        return updated
+        return self._apply_smoothed_elevation_to_world_tiles(
+            world,
+            smoothed,
+            system_configuration=system_configuration,
+            update_full_terrain_analysis=False,
+        )
 
     # ── Roads ─────────────────────────────────────────────────────────
 
@@ -244,7 +299,20 @@ class CityBlueprint:
                     # Truncate name to 20 chars for token efficiency
                     short_name = name[:20] if len(name) > 20 else name
                     h = f"h{tile.elevation:.0f}" if tile.elevation > 0.1 else ""
-                    color = tile.color if tile.color and tile.color != "#c2b280" else ""
+                    default_empty_hex = world.system_configuration.terrain_type_display_colors_extra_dictionary.get(
+                        "empty", ""
+                    )
+                    skip_color = (
+                        str(default_empty_hex).strip().lower()
+                        if isinstance(default_empty_hex, str) and default_empty_hex.strip()
+                        else ""
+                    )
+                    color = (
+                        tile.color
+                        if tile.color
+                        and (not skip_color or str(tile.color).strip().lower() != skip_color)
+                        else ""
+                    )
                     detail = f"{btype}"
                     if color:
                         detail += f",{color}"
@@ -333,7 +401,7 @@ class CityBlueprint:
         terrain_type = self._classify_terrain_at(x, y, world)
 
         # Get climate context
-        climate = self._determine_climate_context(x, y)
+        climate = self._determine_climate_context(x, y, system_configuration=world.system_configuration)
 
         # Base foundation specification
         foundation = {
@@ -394,20 +462,23 @@ class CityBlueprint:
         return foundation
 
     def _calculate_local_slope(self, x: int, y: int) -> float:
-        """Calculate the local terrain slope at a position."""
-        elevations = []
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                elev = self.elevation_map.get((x + dx, y + dy), 0.0)
-                elevations.append(elev)
-
-        if len(elevations) < 3:
-            return 0.0
-
-        # Calculate standard deviation as slope measure
-        mean = sum(elevations) / len(elevations)
-        variance = sum((e - mean) ** 2 for e in elevations) / len(elevations)
-        return math.sqrt(variance)  # Standard deviation as slope measure
+        """Gradient slope magnitude at (x,y) consistent with ``TerrainAnalysis.calculate_slope``."""
+        neighbor_delta_order = (
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        )
+        center = float(self.elevation_map.get((x, y), 0.0))
+        ring: List[float] = []
+        for delta_x, delta_y in neighbor_delta_order:
+            ring.append(float(self.elevation_map.get((x + delta_x, y + delta_y), 0.0)))
+        slope_mag, _aspect = TerrainAnalysis.calculate_slope(center, ring)
+        return float(slope_mag)
 
     def _classify_terrain_at(self, x: int, y: int, world: WorldState) -> str:
         """Classify the terrain type at a specific location."""
@@ -443,21 +514,31 @@ class CityBlueprint:
 
         return "grass"  # Default terrain
 
-    def _determine_climate_context(self, x: int, y: int) -> str:
-        """Determine the climate context for a location."""
-        # Simple climate determination based on position and elevation
+    def _determine_climate_context(self, x: int, y: int, *, system_configuration: Config) -> str:
+        """Climate label from elevation and configurable grid zones (system_config.csv)."""
         elevation = self.elevation_map.get((x, y), 0.0)
+        rules = system_configuration.blueprint_climate_determination_dictionary
+        elev_mountain = float(rules.get("elevation_mountain_min", 3.0))
+        elev_temperate = float(rules.get("elevation_temperate_min", 1.5))
+        default_label = str(rules.get("default_label", "temperate"))
 
-        if elevation > 3.0:
+        if elevation > elev_mountain:
             return "mountain"
-        elif elevation > 1.5:
+        if elevation > elev_temperate:
             return "temperate"
-        elif x > 50:  # East side = potentially different climate
-            return "desert"
-        elif y < 25:  # North side = cooler
-            return "temperate"
-        else:
-            return "temperate"  # Default
+
+        zones = rules.get("grid_zones")
+        if isinstance(zones, list):
+            for zone in zones:
+                if not isinstance(zone, dict):
+                    continue
+                x_min = int(zone.get("x_min", -10**9))
+                x_max = int(zone.get("x_max", 10**9))
+                y_min = int(zone.get("y_min", -10**9))
+                y_max = int(zone.get("y_max", 10**9))
+                if x_min <= x <= x_max and y_min <= y <= y_max:
+                    return str(zone.get("label", default_label))
+        return default_label
 
     def apply_terrain_modifications(
         self, building_spec: dict[str, Any], x: int, y: int, world: WorldState
@@ -471,8 +552,8 @@ class CityBlueprint:
             x, y, world
         )
 
-        # Add foundation component if not present
-        has_foundation = any(comp.get("stack_role") == "foundation" for comp in modified_spec.get("components", []))
+        components_list = modified_spec.setdefault("components", [])
+        has_foundation = any(comp.get("stack_role") == "foundation" for comp in components_list)
         if not has_foundation and foundation["height"] > 0.1:
             foundation_component = {
                 "type": "podium",
@@ -481,7 +562,7 @@ class CityBlueprint:
                 "stack_role": "foundation",
                 "adaptations": foundation["adaptations"]
             }
-            modified_spec["components"].insert(0, foundation_component)
+            components_list.insert(0, foundation_component)
 
         # Apply terrain-specific building modifications
         terrain_type = foundation["terrain_type"]
@@ -547,6 +628,31 @@ class CityBlueprint:
             return ""
         return "GEO:" + ";".join(parts)
 
+    def reset_water_adjacency_cache(self) -> None:
+        """Call when ``water`` waypoints change so ``is_water_region`` recomputes."""
+        self._water_adjacency_tile_cache = None
+
+    def _water_adjacency_tile_set(self) -> set[tuple[int, int]]:
+        """Tiles within ``water_proximity_radius_tiles`` of any water polyline vertex (cached)."""
+        if self._water_adjacency_tile_cache is not None:
+            return self._water_adjacency_tile_cache
+        water_proximity_radius_tiles = 2
+        adjacent: set[tuple[int, int]] = set()
+        for w in self.water:
+            pts = w.get("points", [])
+            for pt in pts:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    px, py = int(pt[0]), int(pt[1])
+                elif isinstance(pt, dict):
+                    px, py = int(pt.get("x", 0)), int(pt.get("y", 0))
+                else:
+                    continue
+                for dx in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
+                    for dy in range(-water_proximity_radius_tiles, water_proximity_radius_tiles + 1):
+                        adjacent.add((px + dx, py + dy))
+        self._water_adjacency_tile_cache = adjacent
+        return adjacent
+
     def is_water_region(self, x1: int, y1: int, x2: int, y2: int, threshold: float = 0.5) -> bool:
         """Check if a region is mostly water based on water feature proximity.
 
@@ -558,25 +664,12 @@ class CityBlueprint:
 
         total_tiles = max(1, (x2 - x1 + 1) * (y2 - y1 + 1))
         water_tiles = 0
-        water_radius = 2  # tiles within 2 of a water polyline count as "water"
+        adj = self._water_adjacency_tile_set()
 
         for x in range(x1, x2 + 1):
             for y in range(y1, y2 + 1):
-                for w in self.water:
-                    pts = w.get("points", [])
-                    for pt in pts:
-                        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                            px, py = pt[0], pt[1]
-                        elif isinstance(pt, dict):
-                            px, py = pt.get("x", 0), pt.get("y", 0)
-                        else:
-                            continue
-                        if abs(x - px) <= water_radius and abs(y - py) <= water_radius:
-                            water_tiles += 1
-                            break
-                    else:
-                        continue
-                    break  # Already counted this tile
+                if (x, y) in adj:
+                    water_tiles += 1
 
         return (water_tiles / total_tiles) > threshold
 
@@ -625,36 +718,52 @@ class CityBlueprint:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> CityBlueprint:
-        """Deserialize from persistence."""
-        bp = cls()
+    def from_dict(cls, d: dict, *, system_configuration: Config) -> CityBlueprint:
+        """Deserialize from persistence; missing material keys use CSV defaults."""
+        bp = cls.from_config(system_configuration)
         # Restore elevation_map with tuple keys
         raw_elev = d.get("elevation_map", {})
         for key, v in raw_elev.items():
-            parts = key.split(",")
+            parts = str(key).split(",")
             if len(parts) == 2:
                 try:
                     bp.elevation_map[(int(parts[0]), int(parts[1]))] = float(v)
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as elev_err:
+                    logger.error(
+                        "blueprint elevation_map invalid key=%r value=%r: %s",
+                        key,
+                        v,
+                        elev_err,
+                    )
+                    raise ConfigLoadError(
+                        f"Invalid elevation_map entry key={key!r} value={v!r}: {elev_err}"
+                    ) from elev_err
         bp.hills = d.get("hills", [])
         bp.water = d.get("water", [])
+        bp.reset_water_adjacency_cache()
         bp.roads = d.get("roads", [])
         bp.gates = d.get("gates", [])
-        bp.primary_stone = d.get("primary_stone", "travertine")
-        bp.secondary_stone = d.get("secondary_stone", "tufa")
-        bp.brick_type = d.get("brick_type", "brick")
-        bp.roof_material = d.get("roof_material", "terracotta")
+        def _mat(key: str, fallback: str) -> str:
+            raw = d.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+            return fallback
+
+        bp.primary_stone = _mat("primary_stone", bp.primary_stone)
+        bp.secondary_stone = _mat("secondary_stone", bp.secondary_stone)
+        bp.brick_type = _mat("brick_type", bp.brick_type)
+        bp.roof_material = _mat("roof_material", bp.roof_material)
         bp.district_characters = d.get("district_characters", {})
         bp.vista_corridors = d.get("vista_corridors", [])
         return bp
 
     @classmethod
-    def from_known_city(cls, city_data: dict) -> CityBlueprint:
+    def from_known_city(cls, city_data: dict, *, system_configuration: Config) -> CityBlueprint:
         """Create a blueprint from known_cities.json entry."""
-        bp = cls()
+        bp = cls.from_config(system_configuration)
         bp.hills = city_data.get("hills", [])
         bp.water = city_data.get("water", [])
+        bp.reset_water_adjacency_cache()
         bp.roads = city_data.get("roads", [])
 
         mats = city_data.get("default_materials", {})
@@ -673,43 +782,20 @@ class CityBlueprint:
         return bp
 
     @classmethod
-    def from_districts(cls, districts: list[dict]) -> CityBlueprint:
+    def from_districts(cls, districts: list[dict], *, system_configuration: Config) -> CityBlueprint:
         """Create a minimal blueprint from discovered districts (no known city data).
 
         Extracts elevation, terrain notes, and district character from the planner output.
         """
-        bp = cls()
+        bp = cls.from_config(system_configuration)
         for d in districts:
             name = d.get("name", "")
             elev = d.get("elevation", 0.0)
             desc = d.get("description", "")
-
-            # Infer basic district character from description
-            char: dict = {}
-            desc_lower = desc.lower()
-            if any(w in desc_lower for w in ("monumental", "sacred", "temple", "imperial")):
-                char["style"] = "monumental"
-                char["wealth"] = 9
-            elif any(w in desc_lower for w in ("market", "commerce", "trade", "mercantile")):
-                char["style"] = "commercial"
-                char["wealth"] = 6
-            elif any(w in desc_lower for w in ("residential", "insula", "domus", "housing")):
-                char["style"] = "residential"
-                char["wealth"] = 4
-            elif any(w in desc_lower for w in ("military", "barracks", "fortress", "wall")):
-                char["style"] = "military"
-                char["wealth"] = 5
-            elif any(w in desc_lower for w in ("garden", "park", "grove")):
-                char["style"] = "garden"
-                char["wealth"] = 7
-
-            if elev > 0.4:
-                char["height_range"] = [2, 4]
-            elif elev > 0.2:
-                char["height_range"] = [1, 3]
-            else:
-                char["height_range"] = [1, 2]
-
+            char = infer_district_character_from_description(
+                str(desc),
+                elevation=float(elev) if elev is not None else 0.0,
+            )
             if char:
                 bp.district_characters[name] = char
 

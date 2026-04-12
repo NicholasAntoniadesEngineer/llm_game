@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +13,8 @@ from world.state import WorldState
 
 if TYPE_CHECKING:
     from core.config import Config
-from core.errors import SaveIndexError
+from core.application_services import get_application_services
+from core.errors import ConfigLoadError, SaveIndexError
 from core.fingerprint import (
     CACHE_WRAP_VERSION,
     SAVE_FORMAT_VERSION,
@@ -23,22 +25,46 @@ from agents import llm_routing as llm_agents
 
 logger = logging.getLogger("eternal.persistence")
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SAVES_DIR = _PROJECT_ROOT / "data" / "saves"
-CHUNKS_DIR = SAVES_DIR / "chunks"
-INDEX_FILE = SAVES_DIR / "index.json"
-DISTRICTS_CACHE = SAVES_DIR / "districts_cache.json"
-SURVEYS_CACHE = SAVES_DIR / "surveys_cache.json"
-BLUEPRINT_FILE = SAVES_DIR / "blueprint.json"
+_REPOSITORY_ROOT_PATH = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class _SaveLayoutPaths:
+    saves_dir: Path
+    chunks_dir: Path
+    index_file: Path
+    districts_cache_file: Path
+    surveys_cache_file: Path
+    blueprint_file: Path
+
+
+def _save_layout_paths(system_configuration: "Config") -> _SaveLayoutPaths:
+    rel = str(system_configuration.saves_directory_relative).strip()
+    if not rel or ".." in rel:
+        raise ConfigLoadError("saves_directory_relative must be a non-empty safe relative path")
+    base = _REPOSITORY_ROOT_PATH / rel
+    return _SaveLayoutPaths(
+        saves_dir=base,
+        chunks_dir=base / "chunks",
+        index_file=base / "index.json",
+        districts_cache_file=base / "districts_cache.json",
+        surveys_cache_file=base / "surveys_cache.json",
+        blueprint_file=base / "blueprint.json",
+    )
 
 
 def _llm_settings_file_path(system_configuration: "Config") -> Path:
-    return _PROJECT_ROOT / system_configuration.llm_settings_file_relative
+    rel = str(system_configuration.llm_settings_file_relative).strip()
+    if not rel or ".." in rel:
+        raise ConfigLoadError("llm_settings_file_relative must be a safe relative path")
+    return _REPOSITORY_ROOT_PATH / rel
 
 
-def _ensure_dirs():
-    SAVES_DIR.mkdir(parents=True, exist_ok=True)
-    CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_dirs(system_configuration: "Config") -> _SaveLayoutPaths:
+    paths = _save_layout_paths(system_configuration)
+    paths.saves_dir.mkdir(parents=True, exist_ok=True)
+    paths.chunks_dir.mkdir(parents=True, exist_ok=True)
+    return paths
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -56,6 +82,35 @@ def _chunk_key(x: int, y: int, chunk_size_tiles: int) -> tuple[int, int]:
 
 def _chunk_filename(cx: int, cy: int) -> str:
     return f"chunk_{cx}_{cy}.json"
+
+
+def _ingest_tiles_json_into_world(world: WorldState, tiles_payload: Any, *, chunk_label: str) -> int:
+    """Parse chunk JSON array and place tiles. Raises SaveIndexError on corrupt data."""
+    if not isinstance(tiles_payload, list):
+        raise SaveIndexError(f"Chunk {chunk_label} root must be a JSON array")
+    placed = 0
+    for tile_data in tiles_payload:
+        if not isinstance(tile_data, dict):
+            raise SaveIndexError(f"Chunk {chunk_label} contains non-object tile entry")
+        try:
+            x = tile_data["x"]
+            y = tile_data["y"]
+        except KeyError as missing_key:
+            raise SaveIndexError(f"Chunk {chunk_label} tile missing key: {missing_key}") from missing_key
+        world.place_tile(int(x), int(y), tile_data)
+        placed += 1
+    return placed
+
+
+def _load_chunk_file_into_world(world: WorldState, chunk_path: Path) -> int:
+    raw_text = chunk_path.read_text(encoding="utf-8")
+    try:
+        tiles_payload = json.loads(raw_text)
+    except json.JSONDecodeError as json_err:
+        raise SaveIndexError(f"Chunk file is not valid JSON: {chunk_path}") from json_err
+    return _ingest_tiles_json_into_world(
+        world, tiles_payload, chunk_label=str(chunk_path.name)
+    )
 
 
 def _current_run_fingerprint(
@@ -83,11 +138,11 @@ def _tiles_payload_for_chunk(world: WorldState, ck: tuple[int, int]) -> list[dic
     return out
 
 
-def _delete_stale_chunk_files(active_keys: set[tuple[int, int]]) -> int:
+def _delete_stale_chunk_files(active_keys: set[tuple[int, int]], chunks_dir: Path) -> int:
     removed = 0
-    if not CHUNKS_DIR.exists():
+    if not chunks_dir.exists():
         return removed
-    for chunk_path in CHUNKS_DIR.glob("chunk_*.json"):
+    for chunk_path in chunks_dir.glob("chunk_*.json"):
         name = chunk_path.stem
         parts = name.split("_")
         if len(parts) != 3:
@@ -115,7 +170,7 @@ def save_state(
     scenario: dict[str, Any],
     system_configuration: "Config",
     flush_mode: str = "incremental",
-) -> None:
+) -> str:
     """Save world state: ``index.json`` + chunk JSON files + ``chat_history.json``.
 
     ``flush_mode``:
@@ -128,7 +183,7 @@ def save_state(
     if not isinstance(scenario, dict):
         raise TypeError("save_state requires scenario: dict[str, Any]")
 
-    _ensure_dirs()
+    paths = _ensure_dirs(system_configuration)
 
     scenario_effective: dict[str, Any] = scenario
 
@@ -157,7 +212,7 @@ def save_state(
     chunk_payloads: dict[tuple[int, int], list[dict]] = {}
     for ck in chunks_to_write:
         payload = _tiles_payload_for_chunk(world, ck)
-        path = CHUNKS_DIR / _chunk_filename(ck[0], ck[1])
+        path = paths.chunks_dir / _chunk_filename(ck[0], ck[1])
         if not payload:
             path.unlink(missing_ok=True)
         else:
@@ -165,21 +220,21 @@ def save_state(
         chunk_payloads[ck] = payload
 
     active_chunk_keys = set(world.chunk_keys_with_tiles())
-    pruned = _delete_stale_chunk_files(active_chunk_keys)
+    pruned = _delete_stale_chunk_files(active_chunk_keys, paths.chunks_dir)
     if pruned:
         logger.info("Pruned %d stale chunk file(s) not in active manifest", pruned)
 
     chunk_manifest = sorted([f"{cx}_{cy}" for cx, cy in active_chunk_keys])
     world._dirty_chunks.clear()
 
-    index_backup_path = SAVES_DIR / "index.json.bak"
-    if INDEX_FILE.is_file():
+    index_backup_path = paths.saves_dir / "index.json.bak"
+    if paths.index_file.is_file():
         try:
-            shutil.copy2(INDEX_FILE, index_backup_path)
+            shutil.copy2(paths.index_file, index_backup_path)
         except OSError:
             logger.warning("Could not copy index.json to backup before save", exc_info=True)
 
-    chat_history_path = SAVES_DIR / "chat_history.json"
+    chat_history_path = paths.saves_dir / "chat_history.json"
     _atomic_write(chat_history_path, json.dumps(chat_history))
 
     index = {
@@ -202,7 +257,7 @@ def save_state(
         "scenario": scenario_effective,
         "chunk_size": chunk_sz,
     }
-    _atomic_write(INDEX_FILE, json.dumps(index, indent=2))
+    _atomic_write(paths.index_file, json.dumps(index, indent=2))
 
     total_tiles = sum(1 for t in world.tiles.values() if t.terrain != "empty")
     scen_loc = ""
@@ -226,20 +281,21 @@ def save_state(
         scen_loc or "(none)",
         pruned,
     )
+    return str(paths.index_file)
 
 
 # ─── Load ───────────────────────────────────────────────────────────
 
 
-def _load_index_dict() -> dict[str, Any]:
+def _load_index_dict(paths: _SaveLayoutPaths) -> dict[str, Any]:
     """Parse ``index.json``; on JSON failure try ``index.json.bak``."""
-    if not INDEX_FILE.is_file():
+    if not paths.index_file.is_file():
         raise SaveIndexError("Missing index.json")
-    raw = INDEX_FILE.read_text(encoding="utf-8")
+    raw = paths.index_file.read_text(encoding="utf-8")
     try:
         out = json.loads(raw)
     except json.JSONDecodeError as primary_err:
-        index_backup_path = SAVES_DIR / "index.json.bak"
+        index_backup_path = paths.saves_dir / "index.json.bak"
         if index_backup_path.is_file():
             try:
                 out = json.loads(index_backup_path.read_text(encoding="utf-8"))
@@ -266,18 +322,19 @@ def load_state(
 
     Returns ``(chat_history, district_index, districts, generation, scenario)`` or None.
     """
-    if not INDEX_FILE.exists():
+    paths = _save_layout_paths(system_configuration)
+    if not paths.index_file.exists():
         return None
 
-    index = _load_index_dict()
+    index = _load_index_dict(paths)
 
     idx_chunk = index.get("chunk_size")
     if isinstance(idx_chunk, int) and idx_chunk >= 1:
         world.chunk_size_tiles = idx_chunk
 
-    world.turn = index["turn"]
-    world.current_period = index["current_period"]
-    world.current_year = index["current_year"]
+    world.turn = int(index.get("turn", 0))
+    world.current_period = str(index.get("current_period", ""))
+    world.current_year = int(index.get("current_year", 0))
 
     tile_count = 0
     save_ver = index.get("save_format_version", 1)
@@ -292,32 +349,34 @@ def load_state(
                 cx, cy = int(a), int(b)
             except ValueError:
                 continue
-            chunk_path = CHUNKS_DIR / _chunk_filename(cx, cy)
+            chunk_path = paths.chunks_dir / _chunk_filename(cx, cy)
             if not chunk_path.is_file():
                 logger.warning("Missing chunk file for manifest entry %s", entry)
                 continue
-            tiles = json.loads(chunk_path.read_text(encoding="utf-8"))
-            for tile_data in tiles:
-                x, y = tile_data["x"], tile_data["y"]
-                world.place_tile(x, y, tile_data)
-                tile_count += 1
+            tile_count += _load_chunk_file_into_world(world, chunk_path)
     else:
-        if CHUNKS_DIR.exists():
-            for chunk_file in CHUNKS_DIR.glob("chunk_*.json"):
-                tiles = json.loads(chunk_file.read_text(encoding="utf-8"))
-                for tile_data in tiles:
-                    x, y = tile_data["x"], tile_data["y"]
-                    world.place_tile(x, y, tile_data)
-                    tile_count += 1
+        if paths.chunks_dir.exists():
+            for chunk_file in paths.chunks_dir.glob("chunk_*.json"):
+                tile_count += _load_chunk_file_into_world(world, chunk_file)
 
     world.build_log.clear()
     world.rebuild_chunk_tile_index()
 
     chat_ref = index.get("chat_history_file")
     if isinstance(chat_ref, str) and chat_ref.strip():
-        chat_path = SAVES_DIR / chat_ref.strip()
+        chat_path = paths.saves_dir / chat_ref.strip()
         if chat_path.is_file():
-            chat_history = json.loads(chat_path.read_text(encoding="utf-8"))
+            try:
+                chat_history = json.loads(chat_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as chat_json_error:
+                logger.exception(
+                    "chat_history_file invalid JSON path=%s",
+                    chat_path,
+                    exc_info=chat_json_error,
+                )
+                raise SaveIndexError(
+                    f"chat_history_file is not valid JSON: {chat_path}"
+                ) from chat_json_error
         else:
             logger.warning("chat_history_file %s missing — using empty history", chat_path)
             chat_history = []
@@ -326,8 +385,10 @@ def load_state(
         chat_history = ch if isinstance(ch, list) else []
     else:
         chat_history = []
-    district_index = index["district_index"]
-    districts = index["districts"]
+    district_index = int(index.get("district_index", 0))
+    districts = index.get("districts")
+    if not isinstance(districts, list):
+        districts = []
     gen_raw = index.get("generation", 0)
     generation = int(gen_raw) if isinstance(gen_raw, (int, float)) else 0
 
@@ -361,11 +422,16 @@ def load_state(
     return chat_history, district_index, districts, generation, scen
 
 
-def clear_saves():
-    """Delete all save data (full reset)."""
-    if SAVES_DIR.exists():
-        shutil.rmtree(SAVES_DIR)
-    logger.info("All save data cleared")
+def clear_saves(*, system_configuration: "Config") -> int:
+    """Delete all save data (full reset). Returns 1 if a saves directory was removed."""
+    cfg = system_configuration
+    saves_dir = _save_layout_paths(cfg).saves_dir
+    if saves_dir.exists():
+        shutil.rmtree(saves_dir)
+        logger.info("All save data cleared")
+        return 1
+    logger.info("clear_saves: no saves directory at %s", saves_dir)
+    return 0
 
 
 # ─── District + Survey Caches ───────────────────────────────────────
@@ -376,8 +442,10 @@ def save_districts_cache(
     map_description: str = "",
     *,
     run_fingerprint: str,
+    system_configuration: "Config",
 ) -> None:
-    _ensure_dirs()
+    cfg = system_configuration
+    paths = _ensure_dirs(cfg)
     fp = run_fingerprint
     layout_fp = compute_districts_layout_fingerprint(districts)
     data = {
@@ -387,17 +455,20 @@ def save_districts_cache(
         "districts": districts,
         "map_description": map_description,
     }
-    _atomic_write(DISTRICTS_CACHE, json.dumps(data, indent=2))
+    _atomic_write(paths.districts_cache_file, json.dumps(data, indent=2))
     logger.info("Cached %s districts (fp=%s)", len(districts), fp[:12])
 
 
 def load_districts_cache(
     *,
     expected_run_fingerprint: str | None = None,
+    system_configuration: "Config",
 ) -> tuple[list[dict], str] | None:
-    if not DISTRICTS_CACHE.exists():
+    cfg = system_configuration
+    cache_path = _save_layout_paths(cfg).districts_cache_file
+    if not cache_path.exists():
         return None
-    data = json.loads(DISTRICTS_CACHE.read_text(encoding="utf-8"))
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and "districts" in data:
         fp = data.get("run_fingerprint")
         if expected_run_fingerprint is not None and fp != expected_run_fingerprint:
@@ -429,21 +500,29 @@ def save_surveys_cache(
     surveys: dict[str, list],
     *,
     run_fingerprint: str,
+    system_configuration: "Config",
 ) -> None:
-    _ensure_dirs()
+    cfg = system_configuration
+    paths = _ensure_dirs(cfg)
     fp = run_fingerprint
     wrapped = {
         "cache_wrap_version": CACHE_WRAP_VERSION,
         "run_fingerprint": fp,
         "plans": surveys,
     }
-    _atomic_write(SURVEYS_CACHE, json.dumps(wrapped, indent=2))
+    _atomic_write(paths.surveys_cache_file, json.dumps(wrapped, indent=2))
 
 
-def load_surveys_cache(*, expected_run_fingerprint: str | None = None) -> dict[str, list]:
-    if not SURVEYS_CACHE.exists():
+def load_surveys_cache(
+    *,
+    expected_run_fingerprint: str | None = None,
+    system_configuration: "Config",
+) -> dict[str, list]:
+    cfg = system_configuration
+    surveys_path = _save_layout_paths(cfg).surveys_cache_file
+    if not surveys_path.exists():
         return {}
-    data = json.loads(SURVEYS_CACHE.read_text(encoding="utf-8"))
+    data = json.loads(surveys_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Surveys cache is not a dict")
     if "plans" in data and "run_fingerprint" in data:
@@ -464,24 +543,32 @@ def load_surveys_cache(*, expected_run_fingerprint: str | None = None) -> dict[s
 # ─── Blueprint ─────────────────────────────────────────────────────
 
 
-def save_blueprint(blueprint_dict: dict):
+def save_blueprint(
+    blueprint_dict: dict,
+    *,
+    system_configuration: "Config",
+) -> None:
     """Save city blueprint data to disk."""
-    _ensure_dirs()
-    _atomic_write(BLUEPRINT_FILE, json.dumps(blueprint_dict, indent=2))
+    cfg = system_configuration
+    paths = _ensure_dirs(cfg)
+    _atomic_write(paths.blueprint_file, json.dumps(blueprint_dict, indent=2))
     logger.info("Blueprint saved")
 
 
-def load_blueprint() -> dict | None:
+def load_blueprint(*, system_configuration: "Config") -> dict | None:
     """Load city blueprint data from disk. Returns dict or None."""
-    if not BLUEPRINT_FILE.exists():
+    cfg = system_configuration
+    blueprint_path = _save_layout_paths(cfg).blueprint_file
+    if not blueprint_path.exists():
         return None
     try:
-        data = json.loads(BLUEPRINT_FILE.read_text(encoding="utf-8"))
+        data = json.loads(blueprint_path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             logger.info("Blueprint loaded from disk")
             return data
-    except Exception as exc:
-        logger.warning("Failed to load blueprint: %s", exc)
+    except json.JSONDecodeError as exc:
+        logger.exception("Blueprint JSON invalid: %s", blueprint_path)
+        raise ConfigLoadError(f"Blueprint file is not valid JSON: {blueprint_path}") from exc
     return None
 
 
@@ -518,7 +605,12 @@ def load_llm_settings(*, system_configuration: "Config") -> None:
     path = _llm_settings_file_path(system_configuration)
     if not path.exists():
         return
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as json_err:
+        logger.exception("llm_settings JSON parse failed path=%s", path)
+        raise ConfigLoadError(f"llm_settings.json is not valid JSON: {path}") from json_err
     if isinstance(data, dict) and data:
         llm_agents.set_runtime_overrides(data)
         logger.info("Loaded LLM settings (%s agents)", len(data))
@@ -530,7 +622,7 @@ def merge_llm_overrides_from_save(
     """Apply UI save per agent; blank API key keeps previously saved key."""
     out: dict[str, dict[str, Any]] = {k: dict(v) for k, v in current.items()}
     for agent_key, patch in incoming.items():
-        if agent_key not in llm_agents.AGENT_LLM or not isinstance(patch, dict):
+        if agent_key not in get_application_services().agent_llm_specs_dictionary or not isinstance(patch, dict):
             continue
         prev = out.get(agent_key, {})
         merged: dict[str, Any] = {}

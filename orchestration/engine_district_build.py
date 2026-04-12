@@ -14,7 +14,7 @@ from orchestration.build_pipeline import (
     run_master_plan_preplace_pipeline,
 )
 from orchestration.engine_terrain import generate_terrain_procedurally
-from orchestration.prompt_builder import build_terrain_prompt, build_building_prompt
+from orchestration.prompt_builder import build_building_prompt
 from orchestration.validation import (
     validate_urbanista_tiles,
     validate_urbanista_arch_result,
@@ -63,7 +63,7 @@ async def run_district_build(
         await engine._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
         return False
 
-    engine.tasks._structures_since_save = 0
+    engine.tasks.reset_structure_save_throttle_counter()
 
     logger.info(f"Master plan: {len(master_plan)} structures")
     await engine.broadcast({"type": "master_plan", "plan": master_plan})
@@ -240,20 +240,6 @@ async def run_district_build(
             engine.world.turn += 1
             await engine.tasks.persist_progress_after_structure()
             continue  # Skip Urbanista pipeline for terrain
-            # NOTE: build_terrain_prompt path below is now unreachable but kept
-            # as documentation of the old approach.
-            prompt = build_terrain_prompt(
-                name=name, btype=btype, tiles=tiles,
-                anchor_x=anchor_x, anchor_y=anchor_y,
-                tile_w=tile_w, tile_d=tile_d,
-                footprint_w=footprint_w, footprint_d=footprint_d,
-                avg_elevation=avg_elevation,
-                city_loc=city_loc, period=scenario.get("period", ""),
-                neighbor_desc=neighbor_desc,
-                physical_desc=physical_desc,
-                env_note=env_note,
-                district_palette=district_palette,
-            )
         else:
             try:
                 transition_hint = engine._compute_transition_hint(anchor_x, anchor_y, district)
@@ -685,9 +671,9 @@ async def run_district_build(
             return False
         await engine._set_status("urbanista", "idle")
 
-    if engine.tasks._structures_since_save > 0:
+    if engine.tasks.get_structures_since_save() > 0:
         await engine._save_state_thread(flush_mode="incremental")
-        engine.tasks._structures_since_save = 0
+        engine.tasks.reset_structure_save_throttle_counter()
 
     if skipped:
         logger.warning("District %s: %d/%d structures skipped due to errors", district_key, skipped, len(urban_jobs))

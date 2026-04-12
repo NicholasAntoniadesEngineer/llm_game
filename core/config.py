@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Set
 
-from core.errors import EternalCitiesError
+from core.errors import ConfigLoadError, EternalCitiesError
 from core.run_log import log_event
 
 _config_logger = logging.getLogger("eternal.config")
@@ -27,11 +27,6 @@ def _cached_llm_defaults_raw_dict(path_str: str, mtime_ns: int) -> Dict[str, Any
     """Reads and parses LLM defaults JSON; cache key includes mtime so edits invalidate without restart."""
     path_obj = Path(path_str)
     return json.loads(path_obj.read_text(encoding="utf-8"))
-
-
-class ConfigLoadError(EternalCitiesError):
-    """Raised for any failure in config loading or validation. Must fail hard per rules."""
-    pass
 
 
 @dataclass(frozen=True)
@@ -64,6 +59,11 @@ class TerrainConfig:
     material_roughness_low_default: float
     material_roughness_medium_default: float
     material_roughness_high_default: float
+    terrain_classification_thresholds_dictionary: Dict[str, Any]
+    terrain_stability_terrain_type_modifiers_dictionary: Dict[str, float]
+    terrain_stability_soil_type_modifiers_dictionary: Dict[str, float]
+    road_surface_colors_by_type_dictionary: Dict[str, str]
+    building_material_hex_colors_dictionary: Dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,7 @@ class TokenConfig:
     cost_per_million_input_tokens: float
     cost_per_million_output_tokens: float
     token_telemetry_interval_seconds: int
+    estimated_chars_per_token_for_heuristic: float
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,24 @@ class Config:
     building_type_display_icons_dictionary: Dict[str, str]
     api_pause_auto_retry_delay_seconds: float
     api_pause_retriable_reasons_set: Set[str]
+    cities_json_relative: str
+    known_cities_json_relative: str
+    architectural_reference_file_relative: str
+    openai_compatible_temperature: float
+    skeleton_cli_kill_subprocess_on_timeout: int
+    blueprint_climate_determination_dictionary: Dict[str, Any]
+    known_cartography_map_dictionary: Dict[str, Any]
+    http_server_listen_host_string: str
+    http_server_listen_port_int: int
+    uvicorn_log_level_string: str
+    uvicorn_reload_delay_seconds: float
+    world_reset_default_year_int: int
+    server_reload_sentinel_pre_touch_sleep_seconds: float
+    blueprint_default_primary_stone_string: str
+    blueprint_default_secondary_stone_string: str
+    blueprint_default_brick_type_string: str
+    blueprint_default_roof_material_string: str
+    master_plan_fail_on_intra_plan_tile_overlap_flag: int
 
     @classmethod
     def load_from_system_config(cls, csv_path_relative: str = "data/system_config.csv") -> "Config":
@@ -190,11 +209,19 @@ class Config:
         if not csv_path_obj.is_file():
             try:
                 log_event(
-                    event_type="config_load_failure",
-                    details={"error": f"system_config.csv not found at relative path: {csv_path_relative}"}
+                    "config",
+                    "system_config.csv missing",
+                    csv_path_relative=csv_path_relative,
                 )
-            except Exception:
-                pass  # Bootstrap case
+            except Exception as log_failure:
+                _config_logger.error(
+                    "config_log_event_failed_while_reporting_missing_csv path=%s",
+                    csv_path_relative,
+                    exc_info=log_failure,
+                )
+                raise ConfigLoadError(
+                    "Run log failed while reporting missing system_config.csv; must not continue on catch."
+                ) from log_failure
             raise ConfigLoadError(
                 f"Explicit configuration required: {csv_path_relative} missing. "
                 "Add all parameters from previous config/constants/engine/generators and restart. "
@@ -212,6 +239,8 @@ class Config:
                         key_raw = row.get("key", "").strip()
                         if not key_raw:
                             continue
+                        if key_raw.startswith("#"):
+                            continue
                         key = key_raw.lower().replace(" ", "_").replace("-", "_")
                         value_str = row.get("value", "").strip()
                         param_type_str = row.get("type", "str").strip().lower()
@@ -225,15 +254,20 @@ class Config:
                         params[key] = parsed
                     except Exception as row_err:
                         log_event(
-                            event_type="config_row_parse_error",
-                            details={"row": row_index, "key": key_raw, "error": str(row_err)}
+                            "config",
+                            f"CSV row parse error row={row_index} key={key_raw}",
+                            row_index=row_index,
+                            key_raw=key_raw,
+                            error=str(row_err),
                         )
                         raise ConfigLoadError(f"CSV row {row_index} ({key_raw}) invalid: {row_err}") from row_err
         except Exception as read_err:
             if not isinstance(read_err, ConfigLoadError):
                 log_event(
-                    event_type="config_file_read_failure",
-                    details={"path": str(csv_path_obj), "error": str(read_err)}
+                    "config",
+                    "Failed to read or parse system_config.csv",
+                    path=str(csv_path_obj),
+                    error=str(read_err),
                 )
                 raise ConfigLoadError(f"Failed to read/parse system_config.csv: {read_err}") from read_err
             raise
@@ -276,12 +310,37 @@ class Config:
             "terrain_type_display_colors", "terrain_display_icons", "building_type_display_icons",
             "api_pause_auto_retry_delay_seconds", "api_pause_retriable_reasons",
             "society_file_extension",
+            "cities_json_relative",
+            "known_cities_json_relative",
+            "architectural_reference_file_relative",
+            "openai_compatible_temperature",
+            "skeleton_cli_kill_subprocess_on_timeout",
+            "terrain_classification_thresholds",
+            "terrain_stability_terrain_type_modifiers",
+            "terrain_stability_soil_type_modifiers",
+            "road_surface_colors_by_type",
+            "blueprint_climate_determination_dictionary",
+            "known_cartography_map_dictionary",
+            "building_material_hex_colors_dictionary",
+            "http_server_listen_host",
+            "http_server_listen_port",
+            "uvicorn_log_level",
+            "uvicorn_reload_delay_seconds",
+            "world_reset_default_year",
+            "server_reload_sentinel_pre_touch_sleep_seconds",
+            "token_estimate_chars_per_token",
+            "blueprint_default_primary_stone",
+            "blueprint_default_secondary_stone",
+            "blueprint_default_brick_type",
+            "blueprint_default_roof_material",
+            "master_plan_fail_on_intra_plan_tile_overlap",
         }
         missing_params = required - set(params.keys())
         if missing_params:
             log_event(
-                event_type="config_missing_parameters",
-                details={"missing": sorted(missing_params)}
+                "config",
+                "Missing required parameters in system_config.csv",
+                missing=sorted(missing_params),
             )
             raise ConfigLoadError(
                 f"Missing required parameters in system_config.csv: {sorted(missing_params)}. "
@@ -292,6 +351,18 @@ class Config:
             raise ConfigLoadError(
                 "world_build_log_trim_keep_entries must be <= world_build_log_max_entries"
             )
+
+        overlap_flag = int(params["master_plan_fail_on_intra_plan_tile_overlap"])
+        if overlap_flag not in (0, 1):
+            raise ConfigLoadError("master_plan_fail_on_intra_plan_tile_overlap must be 0 or 1")
+        for stone_key in (
+            "blueprint_default_primary_stone",
+            "blueprint_default_secondary_stone",
+            "blueprint_default_brick_type",
+            "blueprint_default_roof_material",
+        ):
+            if not str(params[stone_key]).strip():
+                raise ConfigLoadError(f"{stone_key} must be a non-empty string")
 
         # Build typed sub-configs using descriptive names (2-3 words where applicable)
         try:
@@ -319,6 +390,30 @@ class Config:
                 survey_buildings_per_chunk_count=params["survey_buildings_per_chunk"],
                 maximum_generations_cap=params["max_generations"],
             )
+            road_colors_raw = params["road_surface_colors_by_type"]
+            if not isinstance(road_colors_raw, dict) or not road_colors_raw:
+                raise ConfigLoadError("road_surface_colors_by_type must be a non-empty dict")
+            road_colors_normalized: Dict[str, str] = {
+                str(k).strip().lower(): str(v).strip() for k, v in road_colors_raw.items()
+            }
+            terrain_mods = params["terrain_stability_terrain_type_modifiers"]
+            soil_mods = params["terrain_stability_soil_type_modifiers"]
+            if not isinstance(terrain_mods, dict) or not terrain_mods:
+                raise ConfigLoadError("terrain_stability_terrain_type_modifiers must be a non-empty dict")
+            if not isinstance(soil_mods, dict) or not soil_mods:
+                raise ConfigLoadError("terrain_stability_soil_type_modifiers must be a non-empty dict")
+            terrain_mods_f: Dict[str, float] = {
+                str(k): float(v) for k, v in terrain_mods.items()
+            }
+            soil_mods_f: Dict[str, float] = {
+                str(k): float(v) for k, v in soil_mods.items()
+            }
+            material_colors_raw = params["building_material_hex_colors_dictionary"]
+            if not isinstance(material_colors_raw, dict) or not material_colors_raw:
+                raise ConfigLoadError("building_material_hex_colors_dictionary must be a non-empty dict")
+            material_hex: Dict[str, str] = {
+                str(k).strip().lower(): str(v).strip() for k, v in material_colors_raw.items()
+            }
             terrain_config_instance = TerrainConfig(
                 maximum_gradient_value=params["terrain_max_gradient"],
                 gradient_iterations_count=params["terrain_gradient_iterations"],
@@ -331,6 +426,11 @@ class Config:
                 material_roughness_low_default=params["material_roughness_low_default"],
                 material_roughness_medium_default=params["material_roughness_medium_default"],
                 material_roughness_high_default=params["material_roughness_high_default"],
+                terrain_classification_thresholds_dictionary=params["terrain_classification_thresholds"],
+                terrain_stability_terrain_type_modifiers_dictionary=terrain_mods_f,
+                terrain_stability_soil_type_modifiers_dictionary=soil_mods_f,
+                road_surface_colors_by_type_dictionary=road_colors_normalized,
+                building_material_hex_colors_dictionary=material_hex,
             )
             performance_config_instance = PerformanceConfig(
                 urbanista_maximum_concurrent_calls=params["urbanista_max_concurrent"],
@@ -365,6 +465,7 @@ class Config:
                 cost_per_million_input_tokens=params["cost_per_1m_input"],
                 cost_per_million_output_tokens=params["cost_per_1m_output"],
                 token_telemetry_interval_seconds=params["token_telemetry_interval_s"],
+                estimated_chars_per_token_for_heuristic=float(params["token_estimate_chars_per_token"]),
             )
             timing_config_instance = TimingConfig(
                 step_delay_seconds=params["step_delay"],
@@ -431,6 +532,38 @@ class Config:
                 },
                 api_pause_auto_retry_delay_seconds=float(params["api_pause_auto_retry_delay_seconds"]),
                 api_pause_retriable_reasons_set=set(params["api_pause_retriable_reasons"]),
+                cities_json_relative=str(params["cities_json_relative"]).strip(),
+                known_cities_json_relative=str(params["known_cities_json_relative"]).strip(),
+                architectural_reference_file_relative=str(
+                    params["architectural_reference_file_relative"]
+                ).strip(),
+                openai_compatible_temperature=float(params["openai_compatible_temperature"]),
+                skeleton_cli_kill_subprocess_on_timeout=int(
+                    params["skeleton_cli_kill_subprocess_on_timeout"]
+                ),
+                blueprint_climate_determination_dictionary=params[
+                    "blueprint_climate_determination_dictionary"
+                ],
+                known_cartography_map_dictionary=params["known_cartography_map_dictionary"],
+                http_server_listen_host_string=str(params["http_server_listen_host"]).strip(),
+                http_server_listen_port_int=int(params["http_server_listen_port"]),
+                uvicorn_log_level_string=str(params["uvicorn_log_level"]).strip(),
+                uvicorn_reload_delay_seconds=float(params["uvicorn_reload_delay_seconds"]),
+                world_reset_default_year_int=int(params["world_reset_default_year"]),
+                server_reload_sentinel_pre_touch_sleep_seconds=float(
+                    params["server_reload_sentinel_pre_touch_sleep_seconds"]
+                ),
+                blueprint_default_primary_stone_string=str(
+                    params["blueprint_default_primary_stone"]
+                ).strip(),
+                blueprint_default_secondary_stone_string=str(
+                    params["blueprint_default_secondary_stone"]
+                ).strip(),
+                blueprint_default_brick_type_string=str(params["blueprint_default_brick_type"]).strip(),
+                blueprint_default_roof_material_string=str(
+                    params["blueprint_default_roof_material"]
+                ).strip(),
+                master_plan_fail_on_intra_plan_tile_overlap_flag=overlap_flag,
             )
             _config_logger.info(
                 "config_loaded_successfully source=system_config.csv params_count=%s",
@@ -465,14 +598,13 @@ class Config:
             return value_str
         except (ValueError, json.JSONDecodeError, TypeError) as parse_error:
             log_event(
-                event_type="csv_value_parse_failed",
-                details={
-                    "key": key,
-                    "row": row_index,
-                    "value": value_str,
-                    "type": param_type,
-                    "error": str(parse_error),
-                },
+                "config",
+                f"CSV value parse failed for key={key}",
+                key=key,
+                row_index=row_index,
+                value_str=value_str,
+                param_type=param_type,
+                error=str(parse_error),
             )
             raise ConfigLoadError(
                 f"Invalid CSV value for parameter '{key}' (row {row_index}, type {param_type}): {value_str} - {parse_error}"
@@ -488,7 +620,7 @@ class Config:
     def create_scenario(self, selected_city_name: str, selected_year: int) -> Dict[str, Any]:
         """Creates scenario using config values only. No globals, descriptive params, full error handling."""
         try:
-            cities_path = Path(self.data_directory_relative) / "cities.json"
+            cities_path = Path(self.data_directory_relative) / self.cities_json_relative
             if not cities_path.is_file():
                 raise ConfigLoadError(f"cities.json not found at relative path {cities_path}")
             cities_list = json.loads(cities_path.read_text(encoding="utf-8"))
@@ -516,12 +648,20 @@ class Config:
                 "ruler": "Research who ruled and what the city looked like at this exact time",
                 "climate": matching_city.get("climate"),
             }
-            log_event("scenario_created_from_config", {"city": scenario_dict["location"], "year": clamped_year})
+            log_event(
+                "scenario",
+                "Scenario created from config",
+                city=scenario_dict["location"],
+                year=clamped_year,
+            )
             return scenario_dict
         except Exception as scenario_error:
             log_event(
-                event_type="scenario_creation_failed",
-                details={"city_name": selected_city_name, "year": selected_year, "error": str(scenario_error)},
+                "scenario",
+                "Scenario creation failed",
+                city_name=selected_city_name,
+                year=selected_year,
+                error=str(scenario_error),
             )
             raise ConfigLoadError(f"Scenario creation failed: {scenario_error}") from scenario_error
 
@@ -544,7 +684,12 @@ class Config:
                     return city_entry
             return None
         except Exception as lookup_error:
-            log_event("get_city_record_failed", {"city": city_name, "error": str(lookup_error)})
+            log_event(
+                "config",
+                "get_city_record_by_name failed",
+                city_name=city_name,
+                error=str(lookup_error),
+            )
             raise ConfigLoadError(f"get_city_record_by_name failed: {lookup_error}") from lookup_error
 
     def load_llm_defaults(self) -> Dict[str, Any]:
@@ -563,21 +708,21 @@ class Config:
             if not isinstance(agents, dict) or len(agents) == 0:
                 raise ConfigLoadError(f"Invalid agents section in {path}")
             # Full original validation logic (from _load_llm_defaults and _validate_http_timeout_seconds) is integrated here with try/except around each check, logging via log_event, and raising ConfigLoadError on any failure. The implementation ensures no continuation on error and complete compliance.
-            log_event("llm_defaults_loaded_successfully", {"path": str(path)})
+            log_event("llm", "LLM defaults loaded successfully", path=str(path))
             return raw_dict
         except Exception as llm_error:
-            log_event("llm_defaults_load_failed", {"path": str(path), "error": str(llm_error)})
+            log_event("llm", "LLM defaults load failed", path=str(path), error=str(llm_error))
             raise ConfigLoadError(f"LLM defaults validation failed (must not continue on catch): {llm_error}") from llm_error
 
     def get_cities_list(self) -> list:
         """Loads the full cities list from relative JSON. Used by API. No hardcodes or globals."""
         try:
-            cities_path = Path(self.data_directory_relative) / "cities.json"
+            cities_path = Path(self.data_directory_relative) / self.cities_json_relative
             if not cities_path.is_file():
                 raise ConfigLoadError(f"cities.json not found at relative {cities_path}")
             return json.loads(cities_path.read_text(encoding="utf-8"))
         except Exception as e:
-            log_event("cities_list_load_failed", {"error": str(e)})
+            log_event("config", "cities list load failed", error=str(e))
             raise ConfigLoadError(f"Failed to load cities list from config: {e}") from e
 
 

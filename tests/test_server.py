@@ -7,12 +7,11 @@ from unittest import mock
 
 import pytest
 
+from orchestration.bus import MessageBus
 from server.state import AppState
 from server.broadcast import broadcast
 from server.app import build_app, _build_llm_settings_payload
 from world.state import WorldState
-from orchestration.bus import MessageBus, BusMessage
-
 from tests.conftest import SYSTEM_CONFIGURATION
 
 
@@ -97,68 +96,6 @@ class TestBroadcast:
 
 
 # ---------------------------------------------------------------------------
-# MessageBus
-# ---------------------------------------------------------------------------
-
-
-class TestMessageBus:
-    def test_publish_and_history(self):
-        bus = MessageBus()
-        loop = asyncio.new_event_loop()
-        msg = BusMessage(sender="test", msg_type="fact_check", content="hello")
-        loop.run_until_complete(bus.publish(msg))
-        loop.close()
-        assert len(bus.history(10)) == 1
-        assert bus.history(10)[0].content == "hello"
-
-    def test_history_text(self):
-        bus = MessageBus()
-        loop = asyncio.new_event_loop()
-        msg = BusMessage(sender="agent1", msg_type="directive", content="build temple")
-        loop.run_until_complete(bus.publish(msg))
-        loop.close()
-        text = bus.history_text()
-        assert "agent1" in text
-        assert "build temple" in text
-
-    def test_history_text_empty(self):
-        bus = MessageBus()
-        assert "No previous messages" in bus.history_text()
-
-    def test_subscribe_and_receive(self):
-        bus = MessageBus()
-        loop = asyncio.new_event_loop()
-        q = bus.subscribe()
-        msg = BusMessage(sender="a", msg_type="proposal", content="test")
-        loop.run_until_complete(bus.publish(msg))
-        received = loop.run_until_complete(q.get())
-        loop.close()
-        assert received.content == "test"
-
-    def test_unsubscribe(self):
-        bus = MessageBus()
-        q = bus.subscribe()
-        bus.unsubscribe(q)
-        assert q not in bus._subscribers
-
-
-class TestBusMessage:
-    def test_to_dict(self):
-        msg = BusMessage(sender="agent", msg_type="directive", content="build")
-        d = msg.to_dict()
-        assert d["sender"] == "agent"
-        assert d["msg_type"] == "directive"
-        assert d["content"] == "build"
-        assert "id" in d
-        assert "timestamp" in d
-
-    def test_auto_id(self):
-        m1 = BusMessage(sender="a", msg_type="t", content="c")
-        m2 = BusMessage(sender="a", msg_type="t", content="c")
-        assert m1.id != m2.id
-
-
-# ---------------------------------------------------------------------------
 # FastAPI endpoints (TestClient)
 # ---------------------------------------------------------------------------
 
@@ -239,8 +176,28 @@ class TestFastAPIEndpoints:
         app, state = app_and_state
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post("/api/llm-settings", json={"overrides": {}})
+        assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_post_llm_settings_invalid_overrides_type(self, app_and_state):
+        app, state = app_and_state
+
+        async def _noop_llm_settings(_overrides):
+            return None
+
+        state.llm_settings_callback = _noop_llm_settings
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/api/llm-settings", json={"overrides": "not-a-dict"})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_get_health(self, app_and_state):
+        app, _state = app_and_state
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/health")
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        body = resp.json()
+        assert body.get("status") == "ok"
 
     @pytest.mark.asyncio
     async def test_get_logs(self, app_and_state):
@@ -307,7 +264,8 @@ class TestBuildLlmSettingsPayload:
     def test_api_key_masked(self):
         """openai_api_key should be replaced with has_openai_api_key."""
         from agents import llm_routing as llm_agents
-        orig = llm_agents._RUNTIME_OVERRIDES.copy()
+
+        orig = llm_agents.get_runtime_overrides()
         llm_agents.set_runtime_overrides({
             llm_agents.KEY_URBANISTA: {"openai_api_key": "sk-secret"},
         })
@@ -317,4 +275,4 @@ class TestBuildLlmSettingsPayload:
             assert "openai_api_key" not in agent
             assert agent.get("has_openai_api_key") is True
         finally:
-            llm_agents._RUNTIME_OVERRIDES = orig
+            llm_agents.set_runtime_overrides(orig)

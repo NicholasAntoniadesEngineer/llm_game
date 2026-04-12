@@ -42,7 +42,7 @@ async def execute_batch_urbanista(
     batch_prompt = "\n".join(batch_prompt_parts)
 
     try:
-        async with engine.generators._urbanista_semaphore:
+        async with engine.tasks.urbanista_concurrency_semaphore:
             results = await engine.urbanista.generate_batch(batch_prompt, len(jobs))
     except AgentGenerationError as err:
         logger.warning(
@@ -69,7 +69,7 @@ async def execute_batch_urbanista(
             out.append((indices[i], results[i]))
         for i in range(len(results), len(jobs)):
             try:
-                async with engine.generators._urbanista_semaphore:
+                async with engine.tasks.urbanista_concurrency_semaphore:
                     r = await engine.urbanista.generate(urban_jobs[indices[i]]["prompt"])
                 out.append((indices[i], r))
             except BaseException as err:

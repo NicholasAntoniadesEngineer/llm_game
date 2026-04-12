@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.config import Config
 
+from core.errors import AgentGenerationError
+
 logger = logging.getLogger("eternal.agents.provider")
 
 
@@ -80,8 +82,6 @@ class ClaudeCliProvider:
 
             # Fast-fail on connection errors -- don't make the caller wait for slow classification
             if "connectionrefused" in result_lower or "unable to connect" in result_lower:
-                from core.errors import AgentGenerationError
-
                 preview_n = self._system_configuration.llm.claude_cli_connection_error_preview_chars
                 raise AgentGenerationError(
                     "network",
@@ -106,28 +106,26 @@ class ClaudeCliProvider:
                 data.get("stop_reason", "?"),
                 data.get("num_turns", "?"),
             )
-            raise RuntimeError(str(data.get("result") or f"Claude CLI error (subtype={subtype})"))
+            raise AgentGenerationError(
+                "bad_model_output",
+                str(data.get("result") or f"Claude CLI error (subtype={subtype})"),
+            )
         return result_text, usage
 
-    async def complete(
+    async def _run_subprocess(
         self,
         *,
         role: str,
         system_prompt: str,
         user_text: str,
         model: str,
-    ) -> str:
-        logger.info(
-            "[%s] Claude CLI start | model=%s | %s | system=%s user=%s chars",
-            role,
-            model,
-            self.binary,
-            len(system_prompt),
-            len(user_text),
-        )
-        self.last_usage = None
-        cli_flags = self._get_cli_flags()
+        cli_flags: list[str],
+    ) -> tuple[bytes, bytes, int | None, int]:
+        """Start Claude CLI, wait with scaling timeout; return raw streams, returncode, elapsed_ms."""
         import time as _time
+
+        from core.errors import AgentGenerationError
+
         _t0 = _time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             self.binary,
@@ -145,7 +143,10 @@ class ClaudeCliProvider:
         )
         logger.info(
             "[%s] Claude CLI pid=%s | flags=%s | model=%s | waiting for response...",
-            role, proc.pid, " ".join(cli_flags), model,
+            role,
+            proc.pid,
+            " ".join(cli_flags),
+            model,
         )
         llm_cfg = self._system_configuration.llm
         _base_timeout = (
@@ -166,14 +167,24 @@ class ClaudeCliProvider:
             elapsed = int((_time.monotonic() - _t0) * 1000)
             logger.error(
                 "[%s] Claude CLI pid=%s TIMED OUT after %sms (limit=%ss) -- killing",
-                role, proc.pid, elapsed, _cli_timeout_s,
+                role,
+                proc.pid,
+                elapsed,
+                _cli_timeout_s,
             )
             try:
                 proc.kill()
                 await proc.wait()
-            except Exception:
-                pass
-            from core.errors import AgentGenerationError
+            except Exception as kill_err:
+                logger.exception(
+                    "[%s] Claude CLI pid=%s kill/wait failed after timeout",
+                    role,
+                    proc.pid,
+                )
+                raise AgentGenerationError(
+                    "network",
+                    f"Claude CLI timed out and subprocess cleanup failed: {kill_err}",
+                ) from kill_err
             raise AgentGenerationError(
                 "network",
                 f"Claude CLI timed out after {_cli_timeout_s}s. The API may be unreachable or very slow.",
@@ -182,31 +193,41 @@ class ClaudeCliProvider:
             elapsed = int((_time.monotonic() - _t0) * 1000)
             logger.error(
                 "[%s] Claude CLI pid=%s FAILED after %sms: %s -- killing process",
-                role, proc.pid, elapsed, comm_exc,
+                role,
+                proc.pid,
+                elapsed,
+                comm_exc,
             )
             try:
                 proc.kill()
                 await proc.wait()
-            except Exception:
-                pass
+            except Exception as kill_err:
+                logger.exception(
+                    "[%s] Claude CLI pid=%s kill/wait failed after communicate error",
+                    role,
+                    proc.pid,
+                )
+                raise AgentGenerationError(
+                    "network",
+                    f"Claude CLI communicate failed and subprocess cleanup failed: {kill_err}",
+                ) from kill_err
             raise
         elapsed_ms = int((_time.monotonic() - _t0) * 1000)
-        stdout_text = stdout.decode(errors="replace").strip()
-        stderr_text = stderr.decode(errors="replace")
-        logger.info(
-            "[%s] Claude CLI pid=%s finished | exit=%s | %sms | stdout=%s stderr=%s chars",
-            role, proc.pid, proc.returncode, elapsed_ms, len(stdout_text), len(stderr_text),
-        )
-        if stderr_text.strip():
-            logger.info(
-                "[%s] Claude CLI stderr preview: %s",
-                role, stderr_text.strip()[:500],
-            )
+        return stdout, stderr, proc.returncode, elapsed_ms
 
+    def _normalize_cli_output(
+        self,
+        *,
+        role: str,
+        stdout_text: str,
+        raw_stdout_for_fallback: str,
+    ) -> str:
+        """Parse JSON-mode CLI stdout into assistant text; set ``last_usage`` when present."""
         out_text = ""
         try:
-            out_text, usage = self._parse_cli_json_payload(stdout_text) if stdout_text else ("", None)
-            # Map Claude Code CLI usage fields to our standard prompt/completion tokens.
+            out_text, usage = (
+                self._parse_cli_json_payload(stdout_text) if stdout_text else ("", None)
+            )
             if isinstance(usage, dict):
                 input_tokens = usage.get("input_tokens")
                 cache_create = usage.get("cache_creation_input_tokens")
@@ -225,17 +246,65 @@ class ClaudeCliProvider:
                         "total_tokens": max(0, prompt_tokens + completion_tokens),
                     }
         except Exception as parse_exc:
-            # If parsing fails, fall back to raw stdout (text mode-like) for downstream JSON parsing.
             logger.warning(
                 "[%s] Claude CLI JSON parse failed; falling back to raw stdout: %s",
                 role,
                 str(parse_exc)[:200],
             )
-            out_text = stdout_text
+            out_text = raw_stdout_for_fallback
+        return out_text
 
-        if proc.returncode != 0:
-            from core.errors import AgentGenerationError, classify_agent_failure
+    async def complete(
+        self,
+        *,
+        role: str,
+        system_prompt: str,
+        user_text: str,
+        model: str,
+    ) -> str:
+        from core.errors import AgentGenerationError, classify_agent_failure
 
+        logger.info(
+            "[%s] Claude CLI start | model=%s | %s | system=%s user=%s chars",
+            role,
+            model,
+            self.binary,
+            len(system_prompt),
+            len(user_text),
+        )
+        self.last_usage = None
+        cli_flags = self._get_cli_flags()
+        stdout, stderr, return_code, elapsed_ms = await self._run_subprocess(
+            role=role,
+            system_prompt=system_prompt,
+            user_text=user_text,
+            model=model,
+            cli_flags=cli_flags,
+        )
+        stdout_text = stdout.decode(errors="replace").strip()
+        stderr_text = stderr.decode(errors="replace")
+        logger.info(
+            "[%s] Claude CLI finished | exit=%s | %sms | stdout=%s stderr=%s chars",
+            role,
+            return_code,
+            elapsed_ms,
+            len(stdout_text),
+            len(stderr_text),
+        )
+        if stderr_text.strip():
+            logger.info(
+                "[%s] Claude CLI stderr preview: %s",
+                role,
+                stderr_text.strip()[:500],
+            )
+
+        out_text = self._normalize_cli_output(
+            role=role,
+            stdout_text=stdout_text,
+            raw_stdout_for_fallback=stdout_text,
+        )
+
+        if return_code != 0:
             pause_reason, pause_detail = classify_agent_failure(
                 stderr_text,
                 None,
@@ -243,12 +312,11 @@ class ClaudeCliProvider:
             )
             detail = pause_detail
             if out_text:
-                # Often the CLI writes the actual error message to stdout in JSON mode.
                 detail = (out_text[:400] + "\u2026") if len(out_text) > 400 else out_text
             logger.error(
                 "[%s] Claude CLI exit=%s model=%s | detail=%s | stderr (first 2000 chars):\n%s",
                 role,
-                proc.returncode,
+                return_code,
                 model,
                 detail,
                 (stderr_text[:2000] + "\n...") if len(stderr_text) > 2000 else stderr_text,
@@ -256,8 +324,6 @@ class ClaudeCliProvider:
             raise AgentGenerationError(pause_reason, detail)
 
         if not out_text:
-            from core.errors import AgentGenerationError
-
             stderr_preview = (stderr_text[:1200] + "\n...") if len(stderr_text) > 1200 else stderr_text
             logger.error(
                 "[%s] Claude CLI returned empty stdout (exit 0). Model=%s. stderr:\n%s",

@@ -20,6 +20,7 @@ from tests.conftest import SYSTEM_CONFIGURATION
 
 from core.errors import (
     AgentGenerationError,
+    ConfigLoadError,
     EternalCitiesError,
     SaveIndexError,
     UrbanistaValidationError,
@@ -242,6 +243,12 @@ class TestConfig:
     def test_world_grid_width_is_int(self):
         assert isinstance(SYSTEM_CONFIGURATION.grid.world_grid_width, int)
 
+    def test_load_config_missing_csv_raises(self):
+        from core.config import load_config
+
+        with pytest.raises(ConfigLoadError, match="Explicit configuration required"):
+            load_config("data/nonexistent_system_config_file_999.csv")
+
 
 # ---------------------------------------------------------------------------
 # core.token_usage
@@ -373,16 +380,17 @@ class TestTokenUsageCallCount:
 
 class TestGetTokenSummary:
     def test_empty_summary(self):
-        from core.token_usage import get_token_summary, STORE
-        # Save and restore state
-        old_last = STORE._last_by_agent.copy()
-        old_totals = STORE._totals_by_agent.copy()
-        old_counts = STORE._call_counts.copy()
-        STORE._last_by_agent.clear()
-        STORE._totals_by_agent.clear()
-        STORE._call_counts.clear()
+        from core.token_usage import get_token_summary, get_token_usage_store
+
+        store = get_token_usage_store()
+        old_last = store._last_by_agent.copy()
+        old_totals = store._totals_by_agent.copy()
+        old_counts = store._call_counts.copy()
+        store._last_by_agent.clear()
+        store._totals_by_agent.clear()
+        store._call_counts.clear()
         try:
-            summary = get_token_summary()
+            summary = get_token_summary(system_configuration=SYSTEM_CONFIGURATION)
             assert "agents" in summary
             assert "by_group" in summary
             assert "avg_tokens_per_building" in summary
@@ -390,20 +398,22 @@ class TestGetTokenSummary:
             assert summary["avg_tokens_per_building"] == 0
             assert summary["urbanista_calls"] == 0
         finally:
-            STORE._last_by_agent = old_last
-            STORE._totals_by_agent = old_totals
-            STORE._call_counts = old_counts
+            store._last_by_agent = old_last
+            store._totals_by_agent = old_totals
+            store._call_counts = old_counts
 
     def test_summary_with_data(self):
-        from core.token_usage import get_token_summary, STORE
-        old_last = STORE._last_by_agent.copy()
-        old_totals = STORE._totals_by_agent.copy()
-        old_counts = STORE._call_counts.copy()
-        STORE._last_by_agent.clear()
-        STORE._totals_by_agent.clear()
-        STORE._call_counts.clear()
+        from core.token_usage import get_token_summary, get_token_usage_store
+
+        store = get_token_usage_store()
+        old_last = store._last_by_agent.copy()
+        old_totals = store._totals_by_agent.copy()
+        old_counts = store._call_counts.copy()
+        store._last_by_agent.clear()
+        store._totals_by_agent.clear()
+        store._call_counts.clear()
         try:
-            STORE.record(
+            store.record(
                 agent_key="urbanista",
                 provider="cli",
                 model="haiku",
@@ -412,7 +422,7 @@ class TestGetTokenSummary:
                 total_tokens=1500,
                 exact=True,
             )
-            summary = get_token_summary()
+            summary = get_token_summary(system_configuration=SYSTEM_CONFIGURATION)
             assert summary["urbanista_calls"] == 1
             assert summary["avg_tokens_per_building"] == 1500
             assert summary["total_tokens"] == 1500
@@ -420,26 +430,27 @@ class TestGetTokenSummary:
             assert "urbanista" in summary["by_group"]
             assert summary["by_group"]["urbanista"]["call_count"] == 1
         finally:
-            STORE._last_by_agent = old_last
-            STORE._totals_by_agent = old_totals
-            STORE._call_counts = old_counts
+            store._last_by_agent = old_last
+            store._totals_by_agent = old_totals
+            store._call_counts = old_counts
 
 
 class TestEstimateTokens:
     def test_empty_string(self):
-        assert estimate_tokens_from_text("") == 0
+        assert estimate_tokens_from_text("", system_configuration=SYSTEM_CONFIGURATION) == 0
 
     def test_short_text(self):
-        result = estimate_tokens_from_text("hello")
+        result = estimate_tokens_from_text("hello", system_configuration=SYSTEM_CONFIGURATION)
         assert result >= 1
 
     def test_longer_text(self):
         text = "a" * 400
-        result = estimate_tokens_from_text(text)
-        assert result == 100  # 400 / 4
+        result = estimate_tokens_from_text(text, system_configuration=SYSTEM_CONFIGURATION)
+        divisor = float(SYSTEM_CONFIGURATION.token.estimated_chars_per_token_for_heuristic)
+        assert result == max(1, int(400 / divisor))
 
     def test_minimum_is_one(self):
-        result = estimate_tokens_from_text("a")
+        result = estimate_tokens_from_text("a", system_configuration=SYSTEM_CONFIGURATION)
         assert result >= 1
 
 
@@ -515,9 +526,6 @@ from core import persistence
 from core.fingerprint import compute_run_fingerprint
 from world.state import WorldState
 
-from tests.conftest import SYSTEM_CONFIGURATION
-
-
 class TestPersistenceChunkKey:
     def test_chunk_key_origin(self):
         assert persistence._chunk_key(0, 0, SYSTEM_CONFIGURATION.grid.chunk_size_tiles) == (0, 0)
@@ -544,24 +552,24 @@ class TestPersistenceChunkFilename:
 
 class TestPersistenceSaveLoad:
     def setup_method(self):
-        self._orig_saves = persistence.SAVES_DIR
-        self._orig_chunks = persistence.CHUNKS_DIR
-        self._orig_index = persistence.INDEX_FILE
-        self._orig_districts = persistence.DISTRICTS_CACHE
-        self._orig_surveys = persistence.SURVEYS_CACHE
         self._tmpdir = Path(tempfile.mkdtemp())
-        persistence.SAVES_DIR = self._tmpdir / "saves"
-        persistence.CHUNKS_DIR = persistence.SAVES_DIR / "chunks"
-        persistence.INDEX_FILE = persistence.SAVES_DIR / "index.json"
-        persistence.DISTRICTS_CACHE = persistence.SAVES_DIR / "districts_cache.json"
-        persistence.SURVEYS_CACHE = persistence.SAVES_DIR / "surveys_cache.json"
+        saves_root = self._tmpdir / "saves"
+
+        def _test_layout(_system_configuration):
+            return persistence._SaveLayoutPaths(
+                saves_dir=saves_root,
+                chunks_dir=saves_root / "chunks",
+                index_file=saves_root / "index.json",
+                districts_cache_file=saves_root / "districts_cache.json",
+                surveys_cache_file=saves_root / "surveys_cache.json",
+                blueprint_file=saves_root / "blueprint.json",
+            )
+
+        self._layout_patcher = mock.patch.object(persistence, "_save_layout_paths", _test_layout)
+        self._layout_patcher.start()
 
     def teardown_method(self):
-        persistence.SAVES_DIR = self._orig_saves
-        persistence.CHUNKS_DIR = self._orig_chunks
-        persistence.INDEX_FILE = self._orig_index
-        persistence.DISTRICTS_CACHE = self._orig_districts
-        persistence.SURVEYS_CACHE = self._orig_surveys
+        self._layout_patcher.stop()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_save_and_load_round_trip(self):
@@ -625,21 +633,29 @@ class TestPersistenceSaveLoad:
         assert result is None
 
     def test_clear_saves(self):
-        persistence._ensure_dirs()
-        assert persistence.SAVES_DIR.exists()
-        persistence.clear_saves()
-        assert not persistence.SAVES_DIR.exists()
+        persistence._ensure_dirs(SYSTEM_CONFIGURATION)
+        paths = persistence._save_layout_paths(SYSTEM_CONFIGURATION)
+        assert paths.saves_dir.exists()
+        persistence.clear_saves(system_configuration=SYSTEM_CONFIGURATION)
+        assert not paths.saves_dir.exists()
 
     def test_clear_saves_nonexistent(self):
-        # Should not raise
-        persistence.clear_saves()
+        persistence.clear_saves(system_configuration=SYSTEM_CONFIGURATION)
 
     def test_districts_cache_round_trip(self):
         districts = [{"name": "Forum", "region": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}}]
         scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
         fp = compute_run_fingerprint(scen, SYSTEM_CONFIGURATION.grid.chunk_size_tiles, SYSTEM_CONFIGURATION.grid.world_grid_width, SYSTEM_CONFIGURATION.grid.world_grid_height)
-        persistence.save_districts_cache(districts, "A description", run_fingerprint=fp)
-        result = persistence.load_districts_cache(expected_run_fingerprint=fp)
+        persistence.save_districts_cache(
+            districts,
+            "A description",
+            run_fingerprint=fp,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        result = persistence.load_districts_cache(
+            expected_run_fingerprint=fp,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
         assert result is not None
         loaded_districts, map_desc = result
         assert len(loaded_districts) == 1
@@ -647,38 +663,49 @@ class TestPersistenceSaveLoad:
         assert map_desc == "A description"
 
     def test_districts_cache_missing_returns_none(self):
-        result = persistence.load_districts_cache()
+        result = persistence.load_districts_cache(system_configuration=SYSTEM_CONFIGURATION)
         assert result is None
 
     def test_districts_cache_malformed_skipped(self):
-        persistence._ensure_dirs()
-        # Write malformed district entry
+        persistence._ensure_dirs(SYSTEM_CONFIGURATION)
+        paths = persistence._save_layout_paths(SYSTEM_CONFIGURATION)
         data = {"districts": [{"bad": "data"}], "map_description": ""}
-        persistence.DISTRICTS_CACHE.write_text(json.dumps(data))
-        assert persistence.load_districts_cache() is None
+        paths.districts_cache_file.write_text(json.dumps(data))
+        assert (
+            persistence.load_districts_cache(system_configuration=SYSTEM_CONFIGURATION) is None
+        )
 
     def test_surveys_cache_round_trip(self):
         surveys = {"Forum": [{"name": "Temple", "tiles": [{"x": 0, "y": 0}]}]}
         scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
         fp = compute_run_fingerprint(scen, SYSTEM_CONFIGURATION.grid.chunk_size_tiles, SYSTEM_CONFIGURATION.grid.world_grid_width, SYSTEM_CONFIGURATION.grid.world_grid_height)
-        persistence.save_surveys_cache(surveys, run_fingerprint=fp)
-        result = persistence.load_surveys_cache(expected_run_fingerprint=fp)
+        persistence.save_surveys_cache(
+            surveys,
+            run_fingerprint=fp,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
+        result = persistence.load_surveys_cache(
+            expected_run_fingerprint=fp,
+            system_configuration=SYSTEM_CONFIGURATION,
+        )
         assert "Forum" in result
         assert len(result["Forum"]) == 1
 
     def test_surveys_cache_missing_returns_empty(self):
-        result = persistence.load_surveys_cache()
+        result = persistence.load_surveys_cache(system_configuration=SYSTEM_CONFIGURATION)
         assert result == {}
 
     def test_surveys_cache_not_dict_raises(self):
-        persistence._ensure_dirs()
-        persistence.SURVEYS_CACHE.write_text(json.dumps([1, 2, 3]))
+        persistence._ensure_dirs(SYSTEM_CONFIGURATION)
+        paths = persistence._save_layout_paths(SYSTEM_CONFIGURATION)
+        paths.surveys_cache_file.write_text(json.dumps([1, 2, 3]))
         with pytest.raises(ValueError, match="not a dict"):
-            persistence.load_surveys_cache()
+            persistence.load_surveys_cache(system_configuration=SYSTEM_CONFIGURATION)
 
     def test_surveys_cache_entry_not_list_raises(self):
-        persistence._ensure_dirs()
-        persistence.SURVEYS_CACHE.write_text(
+        persistence._ensure_dirs(SYSTEM_CONFIGURATION)
+        paths = persistence._save_layout_paths(SYSTEM_CONFIGURATION)
+        paths.surveys_cache_file.write_text(
             json.dumps(
                 {
                     "cache_wrap_version": 1,
@@ -688,7 +715,10 @@ class TestPersistenceSaveLoad:
             )
         )
         with pytest.raises(ValueError, match="not a list"):
-            persistence.load_surveys_cache(expected_run_fingerprint="0" * 32)
+            persistence.load_surveys_cache(
+                expected_run_fingerprint="0" * 32,
+                system_configuration=SYSTEM_CONFIGURATION,
+            )
 
     def test_atomic_write(self):
         path = self._tmpdir / "test.txt"

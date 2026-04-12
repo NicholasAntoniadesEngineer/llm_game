@@ -5,6 +5,8 @@ from unittest import mock
 
 import pytest
 
+from core.errors import AgentGenerationError
+
 # ---------------------------------------------------------------------------
 # agents.llm_routing
 # ---------------------------------------------------------------------------
@@ -18,16 +20,17 @@ from tests.conftest import SYSTEM_CONFIGURATION
 class TestLlmRouting:
     def setup_method(self):
         # Reset runtime overrides before each test
-        llm_agents._RUNTIME_OVERRIDES.clear()
+        llm_agents.set_runtime_overrides(None)
 
     def test_all_agent_keys_exist(self):
+        specs = llm_agents.get_agent_llm_specs_dictionary()
         for key in (
             llm_agents.KEY_CARTOGRAPHUS_SKELETON,
             llm_agents.KEY_CARTOGRAPHUS_REFINE,
             llm_agents.KEY_CARTOGRAPHUS_SURVEY,
             llm_agents.KEY_URBANISTA,
         ):
-            assert key in llm_agents.AGENT_LLM
+            assert key in specs
 
     def test_get_agent_llm_spec_returns_dict(self):
         spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
@@ -106,8 +109,9 @@ class TestLlmRouting:
         assert llm_agents.get_runtime_overrides()[llm_agents.KEY_URBANISTA]["model"] == "sonnet"
 
     def test_labels_match_agent_keys(self):
-        for key in llm_agents.AGENT_LLM:
-            assert key in llm_agents.AGENT_LLM_LABELS
+        labels = llm_agents.get_agent_llm_labels_dictionary()
+        for key in llm_agents.iter_registered_agent_llm_keys():
+            assert key in labels
 
     def test_xai_model_suggestions_in_config(self):
         suggestions = SYSTEM_CONFIGURATION.load_llm_defaults()["xai"]["model_suggestions"]
@@ -207,7 +211,6 @@ class TestProviderFactory:
 # ---------------------------------------------------------------------------
 
 from agents.base import _try_decode_json_object, _safe_preview_for_logs, BaseAgent
-from core.errors import AgentGenerationError
 
 
 class TestTryDecodeJsonObject:
@@ -429,7 +432,7 @@ class TestClaudeCliParsePayload:
             "subtype": "something",
             "result": "",
         })
-        with pytest.raises(RuntimeError):
+        with pytest.raises(AgentGenerationError):
             cli._parse_cli_json_payload(payload)
 
     def test_max_turns_with_result_succeeds(self, cli):

@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -76,7 +76,7 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
                 district_count = msg["total_districts"]
                 break
 
-        token_summary = get_token_summary()
+        token_summary = get_token_summary(system_configuration=system_configuration)
         total_tokens = token_summary.get("total_tokens", 0)
 
         return {
@@ -123,11 +123,23 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
     @app.post("/api/llm-settings")
     async def api_post_llm_settings(request: Request):
         """Save AI routing from the Configure AI panel."""
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception as json_error:
+            raise HTTPException(status_code=400, detail="Request body must be valid JSON.") from json_error
         overrides = body.get("overrides", {})
-        logger.info(f"POST /api/llm-settings overrides_keys={list(overrides.keys()) if isinstance(overrides, dict) else 'invalid'}")
-        if isinstance(overrides, dict) and state.llm_settings_callback:
-            await state.llm_settings_callback(overrides)
+        logger.info(
+            "POST /api/llm-settings overrides_keys=%s",
+            list(overrides.keys()) if isinstance(overrides, dict) else "invalid",
+        )
+        if not isinstance(overrides, dict):
+            raise HTTPException(status_code=400, detail="Field 'overrides' must be a JSON object.")
+        if not state.llm_settings_callback:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM settings persistence is not configured for this process.",
+            )
+        await state.llm_settings_callback(overrides)
         return {"ok": True}
 
     @app.get("/api/logs")
@@ -222,15 +234,15 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
                 for cached in state.agent_status_by_agent.values():
                     await websocket.send_json(cached)
 
-            from core.token_usage import STORE as token_usage_store
             from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
+            from core.token_usage import get_token_usage_store
 
             tu = token_aggregate_for_ui()
             if any((v.get("total_tokens") or 0) > 0 for v in tu.values()):
                 _tu_payload = {
                     "type": "token_usage",
                     "by_ui_agent": tu,
-                    "by_llm_key": token_usage_store.to_payload(),
+                    "by_llm_key": get_token_usage_store().to_payload(),
                 }
                 await websocket.send_json(attach_engine_ui_to_message(state, _tu_payload))
 
@@ -278,88 +290,117 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
         state.ws_connections.append(websocket)
         logger.info(f"[ws#{conn_id}] replay done, registered for broadcast total={len(state.ws_connections)}")
 
+        async def _ws_handle_tile_info(payload: dict) -> None:
+            tile = state.world.get_tile(payload.get("x", 0), payload.get("y", 0))
+            if tile:
+                await websocket.send_json({"type": "tile_detail", "tile": tile.to_dict()})
+
+        async def _ws_handle_start(payload: dict) -> None:
+            city_name = payload.get("city", "Rome")
+            year = payload.get("year", 0)
+            logger.info(f"[ws#{conn_id}] start requested city={city_name} year={year}")
+            if state.start_callback:
+                await state.start_callback(city_name, year)
+
+        async def _ws_handle_reset(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] reset requested")
+            if state.reset_callback:
+                await state.reset_callback()
+
+        async def _ws_handle_resume(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] resume requested")
+            if state.resume_callback:
+                await state.resume_callback()
+
+        async def _ws_handle_pause(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] pause requested")
+            if state.pause_callback:
+                await state.pause_callback()
+
+        async def _ws_handle_get_llm_settings(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] send llm_settings")
+            await websocket.send_json(_build_llm_settings_payload(system_configuration))
+
+        async def _ws_handle_save_llm_settings(payload: dict) -> None:
+            overrides = payload.get("overrides")
+            logger.info(
+                f"[ws#{conn_id}] save_llm_settings overrides_keys="
+                f"{list(overrides.keys()) if isinstance(overrides, dict) else 'invalid'}"
+            )
+            if isinstance(overrides, dict) and state.llm_settings_callback:
+                await state.llm_settings_callback(overrides)
+                await websocket.send_json({"type": "llm_settings_saved", "ok": True})
+
+        async def _ws_handle_restart_server(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] restart_server (same as POST /api/restart-server)")
+            if state.restart_server_callback:
+                try:
+                    result = await state.restart_server_callback()
+                    await websocket.send_json({"type": "restart_server_result", **result})
+                except Exception as restart_err:
+                    logger.exception(f"[ws#{conn_id}] restart_server failed")
+                    await websocket.send_json(
+                        {"type": "restart_server_result", "ok": False, "error": str(restart_err)}
+                    )
+            else:
+                await websocket.send_json(
+                    {"type": "restart_server_result", "ok": False, "error": "not configured"}
+                )
+
+        async def _ws_handle_reset_timeline(_payload: dict) -> None:
+            logger.info(f"[ws#{conn_id}] reset_timeline (same as POST /api/reset-timeline)")
+            if state.reset_timeline_callback:
+                try:
+                    result = await state.reset_timeline_callback()
+                    await websocket.send_json({"type": "reset_timeline_result", **result})
+                except Exception as timeline_err:
+                    logger.exception(f"[ws#{conn_id}] reset_timeline failed")
+                    await websocket.send_json(
+                        {"type": "reset_timeline_result", "ok": False, "error": str(timeline_err)}
+                    )
+            else:
+                await websocket.send_json(
+                    {"type": "reset_timeline_result", "ok": False, "error": "not configured"}
+                )
+
+        async def _ws_handle_ping(_payload: dict) -> None:
+            engine_running = False
+            if state.engine_is_running is not None:
+                try:
+                    engine_running = bool(state.engine_is_running())
+                except Exception:
+                    engine_running = False
+            await websocket.send_json(
+                {
+                    "type": "pong",
+                    "server_time": time.time(),
+                    "engine_running": engine_running,
+                    "scenario_active": bool(state.run_session.scenario),
+                }
+            )
+
+        _ws_incoming_handlers = {
+            "tile_info": _ws_handle_tile_info,
+            "start": _ws_handle_start,
+            "reset": _ws_handle_reset,
+            "resume": _ws_handle_resume,
+            "pause": _ws_handle_pause,
+            "get_llm_settings": _ws_handle_get_llm_settings,
+            "save_llm_settings": _ws_handle_save_llm_settings,
+            "restart_server": _ws_handle_restart_server,
+            "reset_timeline": _ws_handle_reset_timeline,
+            "ping": _ws_handle_ping,
+        }
+
         try:
             while True:
                 data = await websocket.receive_json()
                 msg_type = data.get("type")
                 if msg_type != "ping":
                     logger.info(f"[ws#{conn_id}] recv type={msg_type}")
-                if msg_type == "tile_info":
-                    tile = state.world.get_tile(data.get("x", 0), data.get("y", 0))
-                    if tile:
-                        await websocket.send_json({"type": "tile_detail", "tile": tile.to_dict()})
-                elif msg_type == "start":
-                    city_name = data.get("city", "Rome")
-                    year = data.get("year", 0)
-                    logger.info(f"[ws#{conn_id}] start requested city={city_name} year={year}")
-                    if state.start_callback:
-                        await state.start_callback(city_name, year)
-                elif msg_type == "reset":
-                    logger.info(f"[ws#{conn_id}] reset requested")
-                    if state.reset_callback:
-                        await state.reset_callback()
-                elif msg_type == "resume":
-                    logger.info(f"[ws#{conn_id}] resume requested")
-                    if state.resume_callback:
-                        await state.resume_callback()
-                elif msg_type == "pause":
-                    logger.info(f"[ws#{conn_id}] pause requested")
-                    if state.pause_callback:
-                        await state.pause_callback()
-                elif msg_type == "get_llm_settings":
-                    logger.info(f"[ws#{conn_id}] send llm_settings")
-                    await websocket.send_json(_build_llm_settings_payload(system_configuration))
-                elif msg_type == "save_llm_settings":
-                    overrides = data.get("overrides")
-                    logger.info(f"[ws#{conn_id}] save_llm_settings overrides_keys={list(overrides.keys()) if isinstance(overrides, dict) else 'invalid'}")
-                    if isinstance(overrides, dict) and state.llm_settings_callback:
-                        await state.llm_settings_callback(overrides)
-                        await websocket.send_json({"type": "llm_settings_saved", "ok": True})
-                elif msg_type == "restart_server":
-                    logger.info(f"[ws#{conn_id}] restart_server (same as POST /api/restart-server)")
-                    if state.restart_server_callback:
-                        try:
-                            result = await state.restart_server_callback()
-                            await websocket.send_json({"type": "restart_server_result", **result})
-                        except Exception as e:
-                            logger.exception(f"[ws#{conn_id}] restart_server failed")
-                            await websocket.send_json(
-                                {"type": "restart_server_result", "ok": False, "error": str(e)}
-                            )
-                    else:
-                        await websocket.send_json(
-                            {"type": "restart_server_result", "ok": False, "error": "not configured"}
-                        )
-                elif msg_type == "reset_timeline":
-                    logger.info(f"[ws#{conn_id}] reset_timeline (same as POST /api/reset-timeline)")
-                    if state.reset_timeline_callback:
-                        try:
-                            result = await state.reset_timeline_callback()
-                            await websocket.send_json({"type": "reset_timeline_result", **result})
-                        except Exception as e:
-                            logger.exception(f"[ws#{conn_id}] reset_timeline failed")
-                            await websocket.send_json(
-                                {"type": "reset_timeline_result", "ok": False, "error": str(e)}
-                            )
-                    else:
-                        await websocket.send_json(
-                            {"type": "reset_timeline_result", "ok": False, "error": "not configured"}
-                        )
-                elif msg_type == "ping":
-                    engine_running = False
-                    if state.engine_is_running is not None:
-                        try:
-                            engine_running = bool(state.engine_is_running())
-                        except Exception:
-                            engine_running = False
-                    await websocket.send_json(
-                        {
-                            "type": "pong",
-                            "server_time": time.time(),
-                            "engine_running": engine_running,
-                            "scenario_active": bool(state.run_session.scenario),
-                        }
-                    )
+                handler = _ws_incoming_handlers.get(msg_type) if isinstance(msg_type, str) else None
+                if handler is not None:
+                    await handler(data if isinstance(data, dict) else {})
                 else:
                     logger.info(f"[ws#{conn_id}] ignored unknown message type={msg_type}")
         except WebSocketDisconnect:
@@ -379,10 +420,10 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
 def _build_llm_settings_payload(system_configuration: Config) -> dict:
     """Same shape as WebSocket message type llm_settings (for UI)."""
     from agents import llm_routing as llm_agents
-    from core.token_usage import STORE as TOKEN_USAGE_STORE
+    from core.token_usage import get_token_usage_store
 
     agents_payload = {}
-    for key in llm_agents.AGENT_LLM:
+    for key in llm_agents.iter_registered_agent_llm_keys():
         spec = llm_agents.get_agent_llm_spec(key)
         row = {}
         for k, v in spec.items():
@@ -400,8 +441,8 @@ def _build_llm_settings_payload(system_configuration: Config) -> dict:
     return {
         "type": "llm_settings",
         "agents": agents_payload,
-        "labels": llm_agents.AGENT_LLM_LABELS,
-        "token_usage": TOKEN_USAGE_STORE.to_payload(),
+        "labels": llm_agents.get_agent_llm_labels_dictionary(),
+        "token_usage": get_token_usage_store().to_payload(),
         "xai_model_suggestions": xai_model_suggestions,
         "openai_compatible_model_suggestions": openai_model_suggestions,
         "model_id_suggestions": combined_suggestions,

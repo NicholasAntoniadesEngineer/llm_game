@@ -9,14 +9,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 
-try:
-    import jsonschema
-    from jsonschema import ValidationError, SchemaError
-    HAS_JSONSCHEMA = True
-except ImportError:
-    HAS_JSONSCHEMA = False
-    ValidationError = Exception
-    SchemaError = Exception
+import jsonschema
+from jsonschema import SchemaError, ValidationError
 
 from core.errors import EternalCitiesError
 
@@ -155,7 +149,7 @@ class SocietyValidator:
 
     def __init__(self):
         self.schema = SOCIETY_SCHEMA
-        self._compiled_schema = None
+        self._validator = jsonschema.Draft7Validator(self.schema)
 
     def validate_file(self, file_path: Path, *, system_configuration: "Config") -> Tuple[bool, List[str]]:
         """Validate a single society file.
@@ -234,23 +228,14 @@ class SocietyValidator:
 
     def _validate_against_schema(self, data: Dict[str, Any]) -> List[str]:
         """Validate data against JSON schema."""
-        if not HAS_JSONSCHEMA:
-            logger.warning("jsonschema is not installed; skipping society JSON schema validation")
-            return []
-        if self._compiled_schema is None:
-            try:
-                jsonschema.validate(data, self.schema)
-                return []
-            except (ValidationError, SchemaError) as e:
-                msg = getattr(e, "message", str(e))
-                return [f"Schema validation error: {msg}"]
-
-        # Use compiled schema for better performance
         try:
-            self._compiled_schema.validate(data)
+            self._validator.validate(data)
             return []
         except ValidationError as e:
             return [f"Schema validation error at {e.absolute_path}: {e.message}"]
+        except SchemaError as e:
+            msg = getattr(e, "message", str(e))
+            return [f"Schema definition error: {msg}"]
 
     def _validate_business_rules(self, data: Dict[str, Any], file_path: Path) -> List[str]:
         """Validate business rules beyond basic schema."""
@@ -292,41 +277,6 @@ class SocietyValidator:
                 ref_d = component_data["ref_d"]
                 if ref_w <= 0 or ref_d <= 0:
                     errors.append(f"Building component '{component_name}' has invalid dimensions: {ref_w}x{ref_d}")
-
-        return errors
-
-    def _basic_validation(self, data: Dict[str, Any]) -> List[str]:
-        """Basic validation when jsonschema is not available."""
-        errors = []
-
-        # Check required fields
-        required_fields = ["name", "period", "characteristics"]
-        for field in required_fields:
-            if field not in data:
-                errors.append(f"Missing required field: {field}")
-
-        # Validate period
-        if "period" in data:
-            if data["period"] not in HISTORICAL_PERIODS:
-                errors.append(f"Invalid period '{data['period']}'. Must be one of: {list(HISTORICAL_PERIODS.keys())}")
-
-        # Validate characteristics
-        if "characteristics" in data:
-            if not isinstance(data["characteristics"], list):
-                errors.append("characteristics must be an array")
-            elif len(data["characteristics"]) == 0:
-                errors.append("characteristics array cannot be empty")
-            elif len(data["characteristics"]) > 20:
-                errors.append("characteristics array cannot have more than 20 items")
-
-        # Validate color palette
-        if "color_palette" in data:
-            if not isinstance(data["color_palette"], list):
-                errors.append("color_palette must be an array")
-            else:
-                for i, color in enumerate(data["color_palette"]):
-                    if not isinstance(color, str) or not color.startswith('#') or len(color) != 7:
-                        errors.append(f"color_palette[{i}] must be a valid hex color (e.g., #FF0000)")
 
         return errors
 

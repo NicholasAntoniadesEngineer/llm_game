@@ -10,11 +10,6 @@ from world.state import WorldState
 from orchestration.bus import MessageBus
 from core.run_session import RunSession
 
-# Module-level bound broadcast function — set by main.py after AppState + functools.partial are wired.
-# Used by agents/base.py (late import) to push token_usage without needing the AppState instance.
-# (To be refactored to avoid global per rules in later todo.)
-broadcast_fn = None
-
 
 class AppState:
     def __init__(self, system_configuration: "Config"):

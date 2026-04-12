@@ -19,14 +19,12 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-# Keys and defaults now from injected Config (updated in eliminate-globals todo). Local for compatibility during transition.
+from core.application_services import get_application_services
+
 KEY_CARTOGRAPHUS_SKELETON = "cartographus_skeleton"
 KEY_CARTOGRAPHUS_REFINE = "cartographus_refine"
 KEY_CARTOGRAPHUS_SURVEY = "cartographus_survey"
 KEY_URBANISTA = "urbanista"
-# AGENT_LLM and LABELS will be populated from config.load_llm_defaults() in updated callers.
-AGENT_LLM = {}
-AGENT_LLM_LABELS = {}
 
 
 class AgentLlmSpec(TypedDict, total=False):
@@ -39,43 +37,60 @@ class AgentLlmSpec(TypedDict, total=False):
     openai_api_key: str | None
 
 
-# Patches loaded from data/llm_settings.json or set at runtime (UI). Merged over AGENT_LLM.
-_RUNTIME_OVERRIDES: dict[str, dict[str, Any]] = {}
+def iter_registered_agent_llm_keys() -> tuple[str, ...]:
+    """Stable ordering of agent keys after bootstrap."""
+    return tuple(sorted(get_application_services().agent_llm_specs_dictionary.keys()))
+
+
+def get_agent_llm_specs_dictionary() -> dict[str, dict[str, Any]]:
+    """Shallow copy of base routing specs (not merged with runtime overrides)."""
+    return {k: dict(v) for k, v in get_application_services().agent_llm_specs_dictionary.items()}
+
+
+def get_agent_llm_labels_dictionary() -> dict[str, str]:
+    """Copy of display labels keyed by llm_agent_key."""
+    return dict(get_application_services().agent_llm_labels_dictionary)
 
 
 def set_runtime_overrides(overrides: dict[str, dict[str, Any]] | None) -> None:
-    """Replace runtime overrides (only keys in AGENT_LLM are kept)."""
-    global _RUNTIME_OVERRIDES
-    _RUNTIME_OVERRIDES = {}
+    """Replace runtime overrides (only keys in registered agent specs are kept)."""
+    services = get_application_services()
+    services.runtime_llm_overrides_dictionary.clear()
+    base = services.agent_llm_specs_dictionary
     if not overrides:
         return
-    for k, v in overrides.items():
-        if k not in AGENT_LLM or not isinstance(v, dict):
+    for agent_key, patch in overrides.items():
+        if agent_key not in base or not isinstance(patch, dict):
             continue
-        cleaned = {a: b for a, b in v.items() if b is not None}
+        cleaned = {attribute_key: value for attribute_key, value in patch.items() if value is not None}
         if cleaned:
-            _RUNTIME_OVERRIDES[k] = cleaned
+            services.runtime_llm_overrides_dictionary[agent_key] = cleaned
 
 
 def get_runtime_overrides() -> dict[str, dict[str, Any]]:
     """Copy of persisted/runtime-only fields (may include API keys)."""
-    return {k: dict(v) for k, v in _RUNTIME_OVERRIDES.items()}
+    return {
+        agent_key: dict(patch)
+        for agent_key, patch in get_application_services().runtime_llm_overrides_dictionary.items()
+    }
 
 
 def get_agent_llm_spec(agent_key: str) -> dict[str, Any]:
-    """Base AGENT_LLM merged with runtime overrides (from file or UI)."""
-    if agent_key not in AGENT_LLM:
+    """Base agent specs merged with runtime overrides (from file or UI)."""
+    services = get_application_services()
+    base_specs = services.agent_llm_specs_dictionary
+    if agent_key not in base_specs:
         raise KeyError(
-            f"Unknown llm_agent_key={agent_key!r}. Add it to llm_agents.AGENT_LLM. "
-            f"Valid keys: {sorted(AGENT_LLM.keys())}"
+            f"Unknown llm_agent_key={agent_key!r}. Add it to llm_defaults.json agents section. "
+            f"Valid keys: {sorted(base_specs.keys())}"
         )
-    merged: dict[str, Any] = dict(AGENT_LLM[agent_key])
-    patch = _RUNTIME_OVERRIDES.get(agent_key)
+    merged: dict[str, Any] = dict(base_specs[agent_key])
+    patch = services.runtime_llm_overrides_dictionary.get(agent_key)
     if patch:
-        for k, v in patch.items():
-            if v is None:
+        for attribute_key, value in patch.items():
+            if value is None:
                 continue
-            if k == "openai_api_key" and isinstance(v, str) and not v.strip():
+            if attribute_key == "openai_api_key" and isinstance(value, str) and not value.strip():
                 continue
-            merged[k] = v
+            merged[attribute_key] = value
     return merged

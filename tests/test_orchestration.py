@@ -4,8 +4,9 @@ prompt building, and collision detection.
 Original 18 tests preserved; additional tests appended below.
 """
 
-import unittest
+import asyncio
 import json
+import unittest
 
 from agents import llm_routing as llm_agents
 from agents.providers import build_provider_from_spec
@@ -13,6 +14,7 @@ from agents.providers.claude_cli import ClaudeCliProvider
 from agents.providers.openai_compatible import OpenAICompatibleProvider
 
 from tests.conftest import SYSTEM_CONFIGURATION
+from orchestration.bus import BusMessage, MessageBus
 from orchestration import reference_db
 from orchestration.placement import (
     check_functional_placement,
@@ -28,7 +30,7 @@ from orchestration.validation import (
     validate_urbanista_tiles,
     sanitize_urbanista_output,
     check_component_collisions,
-    _aabb_overlap_volume,
+    aabb_overlap_volume,
 )
 from orchestration.schema import (
     RENDERER_COMPONENT_TYPES,
@@ -50,29 +52,41 @@ from world.state import WorldState
 class ReferenceDbTests(unittest.TestCase):
     def setUp(self):
         reference_db._CACHE = None
+        reference_db._CACHE_CONFIG_ID = None
+        reference_db._LOOKUP_CACHE.clear()
 
     def test_temple_rome_republican(self):
-        r = reference_db.lookup_architectural_reference("temple", "Rome", -44)
+        r = reference_db.lookup_architectural_reference(
+            "temple", "Rome", -44, system_configuration=SYSTEM_CONFIGURATION
+        )
         self.assertIsNotNone(r)
         self.assertIn("roman_republic", r["id"])
 
     def test_temple_athens(self):
-        r = reference_db.lookup_architectural_reference("temple", "Athens", -400)
+        r = reference_db.lookup_architectural_reference(
+            "temple", "Athens", -400, system_configuration=SYSTEM_CONFIGURATION
+        )
         self.assertIsNotNone(r)
         self.assertIn("greek", r["id"])
 
     def test_thermae_rome(self):
-        r = reference_db.lookup_architectural_reference("thermae", "Rome", 100)
+        r = reference_db.lookup_architectural_reference(
+            "thermae", "Rome", 100, system_configuration=SYSTEM_CONFIGURATION
+        )
         self.assertIsNotNone(r)
         self.assertIn("thermae", r["id"])
 
     def test_tenochtitlan_temple(self):
-        r = reference_db.lookup_architectural_reference("temple", "Tenochtitlan", 1500)
+        r = reference_db.lookup_architectural_reference(
+            "temple", "Tenochtitlan", 1500, system_configuration=SYSTEM_CONFIGURATION
+        )
         self.assertIsNotNone(r)
         self.assertIn("mesoamerican", r["id"])
 
     def test_format_non_empty(self):
-        r = reference_db.lookup_architectural_reference("aqueduct", "Rome", -50)
+        r = reference_db.lookup_architectural_reference(
+            "aqueduct", "Rome", -50, system_configuration=SYSTEM_CONFIGURATION
+        )
         self.assertIsNotNone(r)
         t = reference_db.format_reference_for_prompt(r)
         self.assertIn("proportion", t.lower())
@@ -380,17 +394,23 @@ class TestOccupancySummary:
 class TestReferenceDbAdditional:
     def setup_method(self):
         reference_db._CACHE = None
+        reference_db._CACHE_CONFIG_ID = None
         reference_db._LOOKUP_CACHE.clear()
 
     def test_lookup_caches_result(self):
-        r1 = reference_db.lookup_architectural_reference("temple", "Rome", -44)
-        r2 = reference_db.lookup_architectural_reference("temple", "Rome", -44)
+        r1 = reference_db.lookup_architectural_reference(
+            "temple", "Rome", -44, system_configuration=SYSTEM_CONFIGURATION
+        )
+        r2 = reference_db.lookup_architectural_reference(
+            "temple", "Rome", -44, system_configuration=SYSTEM_CONFIGURATION
+        )
         assert r1 is r2  # exact same object from cache
 
     def test_lookup_none_for_unknown_type(self):
-        r = reference_db.lookup_architectural_reference("spaceship", "Mars", 3000)
-        # May or may not return None depending on generic entries
-        # Just verify no exception
+        r = reference_db.lookup_architectural_reference(
+            "spaceship", "Mars", 3000, system_configuration=SYSTEM_CONFIGURATION
+        )
+        assert r is None or isinstance(r, dict)
 
     def test_format_reference_none_returns_empty(self):
         assert reference_db.format_reference_for_prompt(None) == ""
@@ -399,8 +419,12 @@ class TestReferenceDbAdditional:
         assert reference_db.format_reference_for_prompt({}) == ""
 
     def test_load_entries_idempotent(self):
-        entries1 = reference_db.load_architectural_entries()
-        entries2 = reference_db.load_architectural_entries()
+        entries1 = reference_db.load_architectural_entries(
+            system_configuration=SYSTEM_CONFIGURATION
+        )
+        entries2 = reference_db.load_architectural_entries(
+            system_configuration=SYSTEM_CONFIGURATION
+        )
         assert entries1 is entries2  # cached
 
 
@@ -775,16 +799,16 @@ class TestAabbOverlap:
     def test_no_overlap(self):
         a = {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1, "min_z": 0, "max_z": 1}
         b = {"min_x": 5, "max_x": 6, "min_y": 5, "max_y": 6, "min_z": 5, "max_z": 6}
-        assert _aabb_overlap_volume(a, b) == 0.0
+        assert aabb_overlap_volume(a, b) == 0.0
 
     def test_full_overlap(self):
         a = {"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1, "min_z": 0, "max_z": 1}
-        assert _aabb_overlap_volume(a, a) == pytest.approx(1.0)
+        assert aabb_overlap_volume(a, a) == pytest.approx(1.0)
 
     def test_partial_overlap(self):
         a = {"min_x": 0, "max_x": 2, "min_y": 0, "max_y": 2, "min_z": 0, "max_z": 2}
         b = {"min_x": 1, "max_x": 3, "min_y": 1, "max_y": 3, "min_z": 1, "max_z": 3}
-        assert _aabb_overlap_volume(a, b) == pytest.approx(1.0)
+        assert aabb_overlap_volume(a, b) == pytest.approx(1.0)
 
 
 class TestComponentCollisions:
@@ -1249,14 +1273,14 @@ class TestRoadConnectivity:
         mp = [{"name": "A", "building_type": "temple", "tiles": [{"x": 5, "y": 5}]}]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         assert len(result) == 1  # unchanged
 
     def test_single_road_tile_returns_unchanged(self):
         mp = [{"name": "R1", "building_type": "road", "tiles": [{"x": 5, "y": 5}]}]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         # May add boundary road but original structure unchanged
         assert result[0]["name"] == "R1"
 
@@ -1267,7 +1291,7 @@ class TestRoadConnectivity:
         ]
         region = {"x1": 5, "y1": 5, "x2": 7, "y2": 5}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         # Roads are already connected and on boundary — no changes
         assert result[0]["name"] == "R1"
 
@@ -1281,7 +1305,7 @@ class TestRoadConnectivity:
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         # Should have added a connecting road structure
         road_names = [s["name"] for s in result if s["building_type"] == "road"]
         assert len(road_names) >= 3  # R1, R2, Connecting road (and maybe boundary)
@@ -1298,7 +1322,7 @@ class TestRoadConnectivity:
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         # Bridge tiles should NOT include (2, 5) where temple is
         for s in result:
             if s["name"] == "Connecting road":
@@ -1313,7 +1337,7 @@ class TestRoadConnectivity:
         ]
         region = {"x1": 0, "y1": 0, "x2": 10, "y2": 10}
         gen = _generators_for_road_connectivity_tests()
-        result = gen._ensure_road_connectivity(mp, region)
+        result = gen._apply_road_connectivity(mp, region)
         # Should have added a "District edge road" structure
         names = [s["name"] for s in result]
         assert "District edge road" in names
@@ -1321,26 +1345,36 @@ class TestRoadConnectivity:
 
 class TestHeightGradientHint:
     def test_near_center_suggests_tall(self):
-        hint = _height_gradient_hint(10, 10, 10.0, 10.0, 50.0)
+        hint = _height_gradient_hint(
+            10, 10, 10.0, 10.0, 50.0, world_scale_meters_per_tile=10.0
+        )
         assert "tall" in hint.lower()
         assert "0m" in hint
 
     def test_mid_distance_suggests_moderate(self):
         # 25 tiles from center, radius 50
-        hint = _height_gradient_hint(35, 10, 10.0, 10.0, 50.0)
+        hint = _height_gradient_hint(
+            35, 10, 10.0, 10.0, 50.0, world_scale_meters_per_tile=10.0
+        )
         assert "moderate" in hint.lower()
 
     def test_far_from_center_suggests_low(self):
         # 40 tiles from center, radius 50
-        hint = _height_gradient_hint(50, 10, 10.0, 10.0, 50.0)
+        hint = _height_gradient_hint(
+            50, 10, 10.0, 10.0, 50.0, world_scale_meters_per_tile=10.0
+        )
         assert "low" in hint.lower()
 
     def test_zero_radius_returns_empty(self):
-        hint = _height_gradient_hint(10, 10, 10.0, 10.0, 0.0)
+        hint = _height_gradient_hint(
+            10, 10, 10.0, 10.0, 0.0, world_scale_meters_per_tile=10.0
+        )
         assert hint == ""
 
     def test_token_budget(self):
-        hint = _height_gradient_hint(20, 20, 10.0, 10.0, 50.0)
+        hint = _height_gradient_hint(
+            20, 20, 10.0, 10.0, 50.0, world_scale_meters_per_tile=10.0
+        )
         # Should be under 30 tokens (rough estimate: words + numbers)
         assert len(hint.split()) <= 15
 
@@ -1423,6 +1457,68 @@ def test_apply_tile_placements_places_and_skips_bad_coords():
     assert batch.skipped_invalid_coordinates == 2
     assert len(batch.placed_tile_dicts) == 1
     assert (1, 2) in world.tiles
+
+
+# ---------------------------------------------------------------------------
+# MessageBus (orchestration/bus)
+# ---------------------------------------------------------------------------
+
+
+class TestMessageBus:
+    def test_publish_and_history(self):
+        bus = MessageBus()
+        loop = asyncio.new_event_loop()
+        msg = BusMessage(sender="test", msg_type="fact_check", content="hello")
+        loop.run_until_complete(bus.publish(msg))
+        loop.close()
+        assert len(bus.history(10)) == 1
+        assert bus.history(10)[0].content == "hello"
+
+    def test_history_text(self):
+        bus = MessageBus()
+        loop = asyncio.new_event_loop()
+        msg = BusMessage(sender="agent1", msg_type="directive", content="build temple")
+        loop.run_until_complete(bus.publish(msg))
+        loop.close()
+        text = bus.history_text()
+        assert "agent1" in text
+        assert "build temple" in text
+
+    def test_history_text_empty(self):
+        bus = MessageBus()
+        assert "No previous messages" in bus.history_text()
+
+    def test_subscribe_and_receive(self):
+        bus = MessageBus()
+        loop = asyncio.new_event_loop()
+        queue = bus.subscribe()
+        msg = BusMessage(sender="a", msg_type="proposal", content="test")
+        loop.run_until_complete(bus.publish(msg))
+        received = loop.run_until_complete(queue.get())
+        loop.close()
+        assert received.content == "test"
+
+    def test_unsubscribe(self):
+        bus = MessageBus()
+        queue = bus.subscribe()
+        bus.unsubscribe(queue)
+        assert queue not in bus._subscribers
+
+
+class TestBusMessage:
+    def test_to_dict(self):
+        msg = BusMessage(sender="agent", msg_type="directive", content="build")
+        payload = msg.to_dict()
+        assert payload["sender"] == "agent"
+        assert payload["msg_type"] == "directive"
+        assert payload["content"] == "build"
+        assert "id" in payload
+        assert "timestamp" in payload
+
+    def test_auto_id(self):
+        first = BusMessage(sender="a", msg_type="t", content="c")
+        second = BusMessage(sender="a", msg_type="t", content="c")
+        assert first.id != second.id
 
 
 if __name__ == "__main__":

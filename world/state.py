@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import TYPE_CHECKING
 
 from world.tiles import Tile
@@ -26,7 +27,9 @@ class WorldState:
         self.current_period: str = ""
         self.current_year: int = 0
         self.turn: int = 0
-        self.build_log: list[dict] = []
+        self.build_log: deque[dict] = deque(
+            maxlen=int(system_configuration.world_build_log_trim_keep_entries)
+        )
         self._dirty_chunks: set[tuple[int, int]] = set()
         self._tiles_by_chunk: dict[tuple[int, int], set[tuple[int, int]]] = {}
 
@@ -50,14 +53,17 @@ class WorldState:
         cs = self.chunk_size_tiles
         return (x // cs, y // cs)
 
-    def rebuild_chunk_tile_index(self) -> None:
-        """Rebuild ``_tiles_by_chunk`` from ``tiles`` (e.g. after load)."""
+    def rebuild_chunk_tile_index(self) -> int:
+        """Rebuild ``_tiles_by_chunk`` from ``tiles`` (e.g. after load). Returns indexed non-empty count."""
         self._tiles_by_chunk.clear()
+        indexed_non_empty_tile_count = 0
         for (tx, ty), tile in self.tiles.items():
             if tile.terrain == "empty":
                 continue
             ck = self._chunk_coord_for_tile(tx, ty)
             self._tiles_by_chunk.setdefault(ck, set()).add((tx, ty))
+            indexed_non_empty_tile_count += 1
+        return indexed_non_empty_tile_count
 
     def chunk_tile_coords(self, ck: tuple[int, int]) -> set[tuple[int, int]]:
         """Tile coordinates in chunk ``ck`` that are tracked as non-empty."""
@@ -66,6 +72,10 @@ class WorldState:
     def chunk_keys_with_tiles(self) -> set[tuple[int, int]]:
         """All chunk coordinates that currently contain at least one non-empty tile."""
         return {ck for ck, coords in self._tiles_by_chunk.items() if coords}
+
+    def peek_dirty_chunks(self) -> set[tuple[int, int]]:
+        """Snapshot of chunk coordinates marked dirty since last elevation pass (copy for readers)."""
+        return set(self._dirty_chunks)
 
     def _sync_chunk_index_for_tile(self, x: int, y: int, tile: Tile) -> None:
         ck = self._chunk_coord_for_tile(x, y)
@@ -89,8 +99,8 @@ class WorldState:
             return 0
         return self.max_y - self.min_y + 1
 
-    def clear(self):
-        """Remove all tiles and reset bounds."""
+    def clear(self) -> int:
+        """Remove all tiles and reset bounds. Returns 1 when world is cleared."""
         self.tiles.clear()
         self.min_x = 0
         self.max_x = 0
@@ -100,6 +110,7 @@ class WorldState:
         self.build_log.clear()
         self._dirty_chunks.clear()
         self._tiles_by_chunk.clear()
+        return 1
 
     def place_tile(self, x: int, y: int, data: dict) -> bool:
         """Place or update a tile. World expands to fit — never rejects."""
@@ -115,11 +126,7 @@ class WorldState:
             tile = Tile(x=x, y=y)
             self.tiles[(x, y)] = tile
 
-        for key, value in data.items():
-            if key in ("x", "y"):
-                continue
-            if hasattr(tile, key) and value is not None:
-                setattr(tile, key, value)
+        tile.apply_placement_payload(data)
 
         if "color" not in data or data.get("color") is None:
             terrain = data.get("terrain", tile.terrain)
@@ -149,10 +156,6 @@ class WorldState:
         self._sync_chunk_index_for_tile(x, y, tile)
 
         self.build_log.append({"turn": self.turn, "x": x, "y": y, **data})
-        log_max = self.system_configuration.world_build_log_max_entries
-        log_keep = self.system_configuration.world_build_log_trim_keep_entries
-        if len(self.build_log) > log_max:
-            self.build_log = self.build_log[-log_keep:]
         return True
 
     def get_tile(self, x: int, y: int) -> Tile | None:
@@ -161,10 +164,21 @@ class WorldState:
     def get_region_summary(self, x1: int, y1: int, x2: int, y2: int, max_tiles: int = 40) -> str:
         """Text summary of occupied tiles in a region for agent context."""
         entries: list[str] = []
-        for (tx, ty), tile in self.tiles.items():
-            if x1 <= tx <= x2 and y1 <= ty <= y2 and tile.terrain != "empty":
-                name = tile.building_name or tile.terrain
-                entries.append(f"  ({tx},{ty}): {name}")
+        x_lo, x_hi = (x1, x2) if x1 <= x2 else (x2, x1)
+        y_lo, y_hi = (y1, y2) if y1 <= y2 else (y2, y1)
+        cs = self.chunk_size_tiles
+        cx0, cx1 = x_lo // cs, x_hi // cs
+        cy0, cy1 = y_lo // cs, y_hi // cs
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                for (tx, ty) in self.chunk_tile_coords((cx, cy)):
+                    if not (x_lo <= tx <= x_hi and y_lo <= ty <= y_hi):
+                        continue
+                    tile = self.tiles.get((tx, ty))
+                    if not tile or tile.terrain == "empty":
+                        continue
+                    name = tile.building_name or tile.terrain
+                    entries.append(f"  ({tx},{ty}): {name}")
 
         if not entries:
             return "  (empty region)"

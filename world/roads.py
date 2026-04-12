@@ -41,22 +41,39 @@ def bresenham_line(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
 
 
 def _widen_line(points: list[tuple[int, int]], width: int) -> list[tuple[int, int]]:
-    """Expand a line of points to the given width by adding adjacent tiles.
+    """Expand a polyline to an integer tile corridor by offsetting perpendicular to each segment.
 
-    width=1: just the center line
-    width=2: center line + one tile to each side (perpendicular to line direction)
+    width=1: centerline only. width>1: for each consecutive pair, step ``half=floor(width/2)``
+    tiles along the unit perpendicular on both sides (cardinal-rounded offsets).
     """
     if width <= 1:
         return points
 
     expanded = set(points)
     half = width // 2
-    for x, y in points:
-        for dx in range(-half, half + 1):
-            for dy in range(-half, half + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                expanded.add((x + dx, y + dy))
+    if half < 1:
+        return list(expanded)
+
+    def _offsets_for_tangent(tdx: int, tdy: int) -> list[tuple[int, int]]:
+        length = math.hypot(float(tdx), float(tdy))
+        if length < 1e-9:
+            return []
+        px = -tdy / length
+        py = tdx / length
+        out: list[tuple[int, int]] = []
+        for k in range(1, half + 1):
+            for sign in (-1, 1):
+                out.append((int(round(sign * k * px)), int(round(sign * k * py))))
+        return out
+
+    for i in range(len(points) - 1):
+        x0, y0 = points[i]
+        x1, y1 = points[i + 1]
+        tdx, tdy = x1 - x0, y1 - y0
+        for ox, oy in _offsets_for_tangent(tdx, tdy):
+            for (sx, sy) in bresenham_line(x0, y0, x1, y1):
+                expanded.add((sx + ox, sy + oy))
+
     return list(expanded)
 
 
@@ -106,13 +123,9 @@ def rasterize_road(world: WorldState, road_dict: dict, blueprint: CityBlueprint 
     else:
         road_tiles = unique_points
 
-    # Road surface color by type
-    road_colors = {
-        "via": "#A0907C",      # Major paved road - light stone
-        "vicus": "#908070",    # Secondary street - darker
-        "semita": "#786858",   # Narrow path - earthy
-    }
-    color = road_colors.get(road_type, "#808080")
+    road_colors = world.system_configuration.terrain.road_surface_colors_by_type_dictionary
+    road_type_key = str(road_type).strip().lower()
+    color = road_colors.get(road_type_key) or road_colors.get("default", "#808080")
 
     count = 0
     for x, y in road_tiles:
@@ -201,16 +214,16 @@ def smooth_elevation_max_gradient(
     """
     if max_step <= 0 or not heights:
         return dict(heights)
-    h: dict[tuple[int, int], float] = {k: float(v) for k, v in heights.items()}
-    if len(h) < 2:
-        return h
+    height_by_coordinate: dict[tuple[int, int], float] = {k: float(v) for k, v in heights.items()}
+    if len(height_by_coordinate) < 2:
+        return height_by_coordinate
 
     edges: list[tuple[tuple[int, int], tuple[int, int]]] = []
     seen: set[tuple[tuple[int, int], tuple[int, int]]] = set()
-    for (x, y) in h:
+    for (x, y) in height_by_coordinate:
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = x + dx, y + dy
-            if (nx, ny) not in h:
+            if (nx, ny) not in height_by_coordinate:
                 continue
             a, b = (x, y), (nx, ny)
             if a < b:
@@ -224,18 +237,18 @@ def smooth_elevation_max_gradient(
 
     for _ in range(max(1, iterations)):
         for ua, ub in edges:
-            va = h[ua]
-            vb = h[ub]
+            va = height_by_coordinate[ua]
+            vb = height_by_coordinate[ub]
             if va > vb + max_step:
                 excess = (va - vb - max_step) / 2.0
-                h[ua] = va - excess
-                h[ub] = vb + excess
+                height_by_coordinate[ua] = va - excess
+                height_by_coordinate[ub] = vb + excess
             elif vb > va + max_step:
                 excess = (vb - va - max_step) / 2.0
-                h[ua] = va + excess
-                h[ub] = vb - excess
+                height_by_coordinate[ua] = va + excess
+                height_by_coordinate[ub] = vb - excess
 
-    return h
+    return height_by_coordinate
 
 
 def _compute_river_elevation(x: int, y: int, rivers: list[dict]) -> float:
@@ -250,8 +263,15 @@ def _compute_river_elevation(x: int, y: int, rivers: list[dict]) -> float:
         width = river.get("width", 2)
         depth = river.get("depth", 0.5)
 
-        min_dist = float('inf')
-        for px, py in path:
+        min_dist = float("inf")
+        for pt in path:
+            if isinstance(pt, dict):
+                px = int(pt.get("x", 0))
+                py = int(pt.get("y", 0))
+            elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                px, py = int(pt[0]), int(pt[1])
+            else:
+                continue
             dist = math.sqrt((x - px) ** 2 + (y - py) ** 2)
             min_dist = min(min_dist, dist)
 
@@ -293,10 +313,11 @@ def _compute_coastline_elevation(x: int, y: int, coastlines: list[dict]) -> floa
 
 
 def _compute_valley_elevation(x: int, y: int, valleys: list[dict]) -> float:
-    """Compute elevation modification from valleys (low areas between hills)."""
+    """Sum Gaussian depression contributions from all valleys (deepest combined effect)."""
     if not valleys:
         return 0.0
 
+    total_depth = 0.0
     for valley in valleys:
         cx = valley.get("cx", 0)
         cy = valley.get("cy", 0)
@@ -304,26 +325,22 @@ def _compute_valley_elevation(x: int, y: int, valleys: list[dict]) -> float:
         width = valley.get("width", 5)
         depth = valley.get("depth", 0.8)
 
-        # Valley as an elongated gaussian depression
         dx = x - cx
         dy = y - cy
 
-        # Rotate valley if it has an angle
         angle = valley.get("angle", 0) * math.pi / 180
         rotated_dx = dx * math.cos(angle) + dy * math.sin(angle)
         rotated_dy = -dx * math.sin(angle) + dy * math.cos(angle)
 
-        # Elongated gaussian: wider in length direction, narrower in width
-        sigma_length = length / 3
-        sigma_width = width / 3
+        sigma_length = max(length / 3, 1e-6)
+        sigma_width = max(width / 3, 1e-6)
 
         length_factor = math.exp(-(rotated_dx ** 2) / (2 * sigma_length ** 2))
         width_factor = math.exp(-(rotated_dy ** 2) / (2 * sigma_width ** 2))
 
-        valley_depth = -depth * length_factor * width_factor
-        return valley_depth
+        total_depth += -depth * length_factor * width_factor
 
-    return 0.0
+    return total_depth
 
 
 def _compute_plateau_elevation(x: int, y: int, plateaus: list[dict]) -> float:

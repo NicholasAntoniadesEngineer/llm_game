@@ -35,7 +35,6 @@ class BuildingSkippedError(EternalCitiesError):
 
 class ConfigLoadError(EternalCitiesError):
     """Configuration validation or loading failure. System must fail hard per rules. No continuation on catch."""
-    pass
 
 
 def classify_agent_failure(

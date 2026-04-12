@@ -99,3 +99,9 @@ def get_golden_example_for_culture(building_type, target_w, target_d, city="", y
     culture = _detect_culture(city)
     ref = _resolve_spec(building_type, culture)  # Raises KeyError if not found
     return _scale_spec(ref, target_w, target_d)
+
+
+def infer_culture_key_for_prompt(city_loc: str) -> str:
+    """Culture group key for prompts; defaults to roman when the city has no culture_city_map entry."""
+    culture = _detect_culture(city_loc)
+    return culture if culture else "roman"

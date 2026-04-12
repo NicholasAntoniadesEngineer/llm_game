@@ -1,9 +1,9 @@
-"""Base agent — LLM completion via pluggable provider (see llm_agents.py + agents/provider.py).
+"""Base agent — LLM completion via pluggable provider (llm_routing + agents/providers).
 
 Includes lightweight memory integration: each agent accumulates a rolling
-ConversationMemory and a KnowledgeBase. Memory context is prepended to
-instructions as compact strings (<100 tokens) before each LLM call, and
-interaction summaries are recorded after each response.
+ConversationMemory. Memory context is prepended to instructions as compact
+strings before each LLM call, and interaction summaries are recorded after
+each response.
 """
 
 import asyncio
@@ -11,16 +11,21 @@ import json
 import logging
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agents import llm_routing as llm_agents
 
 if TYPE_CHECKING:
     from core.config import Config
-from agents.memory import ConversationMemory, KnowledgeBase
+from agents.memory import ConversationMemory
 from agents.providers import LlmProvider, build_provider_from_spec
 from agents.ui_notifier import UiNotifier
-from core.token_usage import STORE as TOKEN_USAGE_STORE, aggregate_for_ui, estimate_tokens_from_text, get_token_summary
+from core.token_usage import (
+    aggregate_for_ui,
+    estimate_tokens_from_text,
+    get_token_summary,
+    get_token_usage_store,
+)
 from core.run_log import log_event
 from core.errors import AgentGenerationError, classify_agent_failure
 
@@ -37,12 +42,19 @@ def _safe_preview_for_logs(text: str, limit: int = 1200) -> str:
     return t
 
 
+def _strip_markdown_fences_for_json(text: str) -> str:
+    """Remove common markdown code fences before JSON parsing."""
+    if not text:
+        return ""
+    return re.sub(r"```(?:json)?\s*\n?", "", text).strip()
+
+
 def _try_decode_json_object(text: str) -> dict | None:
     """Extract the first JSON object from text that may contain prose, markdown fences, etc."""
     if not text or not text.strip():
         return None
     # Stage 1: Strip markdown code fences
-    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text).strip()
+    cleaned = _strip_markdown_fences_for_json(text)
     # Stage 2: Try direct parse
     try:
         obj = json.loads(cleaned)
@@ -80,7 +92,7 @@ def _try_decode_json_array(text: str) -> list | None:
     """Extract the first JSON array from text that may contain prose, markdown fences, etc."""
     if not text or not text.strip():
         return None
-    cleaned = re.sub(r'```(?:json)?\s*\n?', '', text).strip()
+    cleaned = _strip_markdown_fences_for_json(text)
     # Try direct parse
     try:
         obj = json.loads(cleaned)
@@ -130,7 +142,6 @@ class BaseAgent:
 
         # Memory subsystems — lightweight, token-efficient.
         self.memory = ConversationMemory(max_entries=10)
-        self.knowledge = KnowledgeBase()
         self._turn_counter = 0
 
     def _schedule_agent_activity(self, detail: str) -> None:
@@ -146,6 +157,66 @@ class BaseAgent:
 
     def _schedule_prompt_event(self, msg: dict) -> None:
         self._ui_notifier.schedule_message(msg)
+
+    async def _complete_with_token_tracking(
+        self,
+        *,
+        provider: LlmProvider,
+        provider_kind: str,
+        model: str,
+        user_text: str,
+    ) -> tuple[str, int, int, int, int, bool]:
+        """Call ``provider.complete``, record token usage, broadcast UI aggregate.
+
+        Returns:
+            ``(raw_text, elapsed_ms, prompt_tokens, completion_tokens, total_tokens, exact)``.
+        """
+        sys_tokens_est = estimate_tokens_from_text(
+            self.system_prompt, system_configuration=self.system_configuration
+        )
+        inst_tokens_est = estimate_tokens_from_text(
+            user_text, system_configuration=self.system_configuration
+        )
+        _t0 = time.monotonic()
+        raw = await provider.complete(
+            role=self.role,
+            system_prompt=self.system_prompt,
+            user_text=user_text,
+            model=model,
+        )
+        elapsed_ms = int((time.monotonic() - _t0) * 1000)
+        prompt_tokens_est = sys_tokens_est + inst_tokens_est
+        completion_tokens_est = estimate_tokens_from_text(
+            raw, system_configuration=self.system_configuration
+        )
+        exact = False
+        prompt_tokens = prompt_tokens_est
+        completion_tokens = completion_tokens_est
+        total_tokens = prompt_tokens + completion_tokens
+        usage = getattr(provider, "last_usage", None)
+        if isinstance(usage, dict):
+            pt = usage.get("prompt_tokens")
+            ct = usage.get("completion_tokens")
+            tt = usage.get("total_tokens")
+            if isinstance(pt, int) and isinstance(ct, int):
+                prompt_tokens = max(0, pt)
+                completion_tokens = max(0, ct)
+                total_tokens = max(
+                    0,
+                    int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens),
+                )
+                exact = True
+        get_token_usage_store().record(
+            agent_key=self.llm_agent_key,
+            provider=provider_kind,
+            model=str(model or ""),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            exact=exact,
+        )
+        await self._broadcast_token_usage()
+        return raw, elapsed_ms, prompt_tokens, completion_tokens, total_tokens, exact
 
     async def generate(self, instruction: str) -> dict:
         """Call LLM once and return parsed JSON. Raises AgentGenerationError on any failure.
@@ -187,17 +258,14 @@ class BaseAgent:
         )
 
         try:
-            spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
-            model = spec["model"]
-            provider_kind = str(spec.get("provider") or "xai")
-            provider = (
-                self._provider_override
-                if self._provider_override is not None
-                else build_provider_from_spec(spec, self.system_configuration)
-            )
+            provider, provider_kind, model = self._resolve_llm_provider()
 
-            sys_tokens_est = estimate_tokens_from_text(self.system_prompt)
-            inst_tokens_est = estimate_tokens_from_text(prompt)
+            sys_tokens_est = estimate_tokens_from_text(
+                self.system_prompt, system_configuration=self.system_configuration
+            )
+            inst_tokens_est = estimate_tokens_from_text(
+                prompt, system_configuration=self.system_configuration
+            )
             logger.info(
                 "LLM batch query → | role=%s agent_key=%s | batch_size=%d | "
                 "total_prompt ~%d tok",
@@ -210,42 +278,14 @@ class BaseAgent:
             self._schedule_agent_activity(
                 f"Batch request ({provider_kind}, {model}) ×{count} — waiting for API…",
             )
-            _t0 = time.monotonic()
-            raw = await provider.complete(
-                role=self.role,
-                system_prompt=self.system_prompt,
-                user_text=prompt,
-                model=model,
+            raw, _elapsed_ms, prompt_tokens, completion_tokens, total_tokens, exact = (
+                await self._complete_with_token_tracking(
+                    provider=provider,
+                    provider_kind=provider_kind,
+                    model=str(model),
+                    user_text=prompt,
+                )
             )
-            _elapsed_ms = int((time.monotonic() - _t0) * 1000)
-
-            # Token tracking
-            prompt_tokens_est = sys_tokens_est + inst_tokens_est
-            completion_tokens_est = estimate_tokens_from_text(raw)
-            prompt_tokens = prompt_tokens_est
-            completion_tokens = completion_tokens_est
-            total_tokens = prompt_tokens + completion_tokens
-            exact = False
-            usage = getattr(provider, "last_usage", None)
-            if isinstance(usage, dict):
-                pt = usage.get("prompt_tokens")
-                ct = usage.get("completion_tokens")
-                tt = usage.get("total_tokens")
-                if isinstance(pt, int) and isinstance(ct, int):
-                    prompt_tokens = max(0, pt)
-                    completion_tokens = max(0, ct)
-                    total_tokens = max(0, int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens))
-                    exact = True
-            TOKEN_USAGE_STORE.record(
-                agent_key=self.llm_agent_key,
-                provider=provider_kind,
-                model=str(model or ""),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                exact=exact,
-            )
-            await self._broadcast_token_usage()
 
             logger.info(
                 "LLM batch reply ← | role=%s | batch_size=%d | response_chars=%s | "
@@ -314,23 +354,32 @@ class BaseAgent:
             return "\n".join(parts) + "\n\n" + instruction
         return instruction
 
+    def _resolve_llm_provider(self) -> tuple[LlmProvider, str, str]:
+        """Return ``(provider, provider_kind, model)`` for this agent's routing spec."""
+        spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
+        model = str(spec["model"])
+        provider_kind = str(spec.get("provider") or "xai")
+        provider = (
+            self._provider_override
+            if self._provider_override is not None
+            else build_provider_from_spec(spec, self.system_configuration)
+        )
+        return provider, provider_kind, model
+
     async def _single_generate(self, instruction: str) -> dict:
         """Call LLM once. Raises AgentGenerationError if the process or JSON output is invalid."""
         prompt = instruction + "\n\nRespond with ONLY valid JSON. No markdown, no code fences, no extra text."
 
         try:
-            spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
-            model = spec["model"]
-            provider_kind = str(spec.get("provider") or "xai")
-            provider = (
-                self._provider_override
-                if self._provider_override is not None
-                else build_provider_from_spec(spec, self.system_configuration)
-            )
+            provider, provider_kind, model = self._resolve_llm_provider()
             inst_preview = _safe_preview_for_logs(instruction, 600)
             # Prompt size logging in estimated tokens (helps identify wastefully large prompts)
-            sys_tokens_est = estimate_tokens_from_text(self.system_prompt)
-            inst_tokens_est = estimate_tokens_from_text(prompt)
+            sys_tokens_est = estimate_tokens_from_text(
+                self.system_prompt, system_configuration=self.system_configuration
+            )
+            inst_tokens_est = estimate_tokens_from_text(
+                prompt, system_configuration=self.system_configuration
+            )
             total_prompt_tokens_est = sys_tokens_est + inst_tokens_est
             logger.info(
                 "LLM query → | role=%s agent_key=%s | provider=%s model=%s | "
@@ -362,41 +411,14 @@ class BaseAgent:
             self._schedule_agent_activity(
                 f"Waiting for {provider_kind} ({model}) — large prompts can take several minutes.",
             )
-            _t0 = time.monotonic()
-            raw = await provider.complete(
-                role=self.role,
-                system_prompt=self.system_prompt,
-                user_text=prompt,
-                model=model,
+            raw, _elapsed_ms, prompt_tokens, completion_tokens, total_tokens, exact = (
+                await self._complete_with_token_tracking(
+                    provider=provider,
+                    provider_kind=provider_kind,
+                    model=str(model),
+                    user_text=prompt,
+                )
             )
-            _elapsed_ms = int((time.monotonic() - _t0) * 1000)
-            # Token usage tracking (exact when backend provides it, else estimate).
-            prompt_tokens_est = estimate_tokens_from_text(self.system_prompt) + estimate_tokens_from_text(prompt)
-            completion_tokens_est = estimate_tokens_from_text(raw)
-            exact = False
-            prompt_tokens = prompt_tokens_est
-            completion_tokens = completion_tokens_est
-            total_tokens = prompt_tokens + completion_tokens
-            usage = getattr(provider, "last_usage", None)
-            if isinstance(usage, dict):
-                pt = usage.get("prompt_tokens")
-                ct = usage.get("completion_tokens")
-                tt = usage.get("total_tokens")
-                if isinstance(pt, int) and isinstance(ct, int):
-                    prompt_tokens = max(0, pt)
-                    completion_tokens = max(0, ct)
-                    total_tokens = max(0, int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens))
-                    exact = True
-            TOKEN_USAGE_STORE.record(
-                agent_key=self.llm_agent_key,
-                provider=provider_kind,
-                model=str(model or ""),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                exact=exact,
-            )
-            await self._broadcast_token_usage()
             tok_note = "exact" if exact else "estimated"
             logger.info(
                 "LLM reply ← | role=%s agent_key=%s | response_chars=%s | total_tokens=%s (%s) | %sms",
@@ -453,14 +475,9 @@ class BaseAgent:
             raise AgentGenerationError(pr, pd) from e
 
     def _parse_json(self, raw: str, *, model: str, provider_kind: str) -> dict:
-        """Parse model output as JSON. Raises AgentGenerationError if parsing fails."""
+        """Parse model output as a single JSON object. Raises AgentGenerationError if parsing fails."""
         raw_str = raw if isinstance(raw, str) else ""
         text = raw_str.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            text = "\n".join(lines).strip()
-
         if not text:
             logger.error(
                 "[%s] LLM output empty after normalization | agent_key=%s model=%s provider=%s | raw_len=%s\n--- raw (preview) ---\n%s\n--- end ---",
@@ -478,17 +495,13 @@ class BaseAgent:
                 "If you use an OpenAI-compatible API: verify the base URL, API key, and model id.",
             )
 
+        extracted = _try_decode_json_object(raw_str)
+        if isinstance(extracted, dict):
+            return extracted
+
         try:
-            return json.loads(text)
+            parsed: Any = json.loads(_strip_markdown_fences_for_json(text))
         except json.JSONDecodeError as first_err:
-            nested = _try_decode_json_object(text)
-            if isinstance(nested, dict):
-                logger.warning(
-                    "[%s] Parsed JSON after skipping leading/trailing non-JSON text (agent_key=%s)",
-                    self.role,
-                    self.llm_agent_key,
-                )
-                return nested
             logger.error(
                 "[%s] LLM output is not valid JSON | agent_key=%s model=%s provider=%s | json_err=%s | text_len=%s\n--- model output (preview) ---\n%s\n--- end preview ---",
                 self.role,
@@ -507,15 +520,36 @@ class BaseAgent:
                 "Then check AI Settings (model name and provider) and try again.",
             ) from first_err
 
+        if isinstance(parsed, dict):
+            return parsed
+
+        logger.error(
+            "[%s] LLM JSON was not an object (got %s) | agent_key=%s model=%s",
+            self.role,
+            type(parsed).__name__,
+            self.llm_agent_key,
+            model,
+        )
+        raise AgentGenerationError(
+            "bad_model_output",
+            "The model returned JSON that is not a single object (array or scalar). "
+            "The app expects one JSON object per response.",
+        )
+
     async def _broadcast_token_usage(self) -> None:
         try:
             await self._ui_notifier.send_message(
                 {
                     "type": "token_usage",
                     "by_ui_agent": aggregate_for_ui(),
-                    "by_llm_key": TOKEN_USAGE_STORE.to_payload(),
-                    "summary": get_token_summary(),
+                    "by_llm_key": get_token_usage_store().to_payload(),
+                    "summary": get_token_summary(system_configuration=self.system_configuration),
                 }
             )
-        except Exception:
-            pass
+        except Exception as token_broadcast_error:
+            logger.warning(
+                "token_usage broadcast failed (generation continues) role=%s agent_key=%s",
+                self.role,
+                self.llm_agent_key,
+                exc_info=token_broadcast_error,
+            )
