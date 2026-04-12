@@ -13,7 +13,7 @@ from world.state import WorldState
 
 if TYPE_CHECKING:
     from core.config import Config
-from core.application_services import get_application_services
+from core.application_services import ApplicationServices
 from core.errors import ConfigLoadError, SaveIndexError
 from core.fingerprint import (
     CACHE_WRAP_VERSION,
@@ -601,7 +601,11 @@ def save_llm_settings(overrides: dict, *, system_configuration: "Config") -> Non
     )
 
 
-def load_llm_settings(*, system_configuration: "Config") -> None:
+def load_llm_settings(
+    *,
+    system_configuration: "Config",
+    application_services: ApplicationServices,
+) -> None:
     path = _llm_settings_file_path(system_configuration)
     if not path.exists():
         return
@@ -612,17 +616,20 @@ def load_llm_settings(*, system_configuration: "Config") -> None:
         logger.exception("llm_settings JSON parse failed path=%s", path)
         raise ConfigLoadError(f"llm_settings.json is not valid JSON: {path}") from json_err
     if isinstance(data, dict) and data:
-        llm_agents.set_runtime_overrides(data)
+        llm_agents.set_runtime_overrides(data, application_services=application_services)
         logger.info("Loaded LLM settings (%s agents)", len(data))
 
 
 def merge_llm_overrides_from_save(
-    current: dict[str, dict[str, Any]], incoming: dict[str, dict[str, Any]]
+    current: dict[str, dict[str, Any]],
+    incoming: dict[str, dict[str, Any]],
+    *,
+    application_services: ApplicationServices,
 ) -> dict[str, dict[str, Any]]:
     """Apply UI save per agent; blank API key keeps previously saved key."""
     out: dict[str, dict[str, Any]] = {k: dict(v) for k, v in current.items()}
     for agent_key, patch in incoming.items():
-        if agent_key not in get_application_services().agent_llm_specs_dictionary or not isinstance(patch, dict):
+        if agent_key not in application_services.agent_llm_specs_dictionary or not isinstance(patch, dict):
             continue
         prev = out.get(agent_key, {})
         merged: dict[str, Any] = {}

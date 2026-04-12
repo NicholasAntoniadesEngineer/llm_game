@@ -6,6 +6,7 @@ import time
 from typing import Any, Awaitable, Callable, Coroutine, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from core.application_services import ApplicationServices
     from core.config import Config
 
 from core.errors import ConfigLoadError
@@ -35,20 +36,24 @@ class TaskManager:
         world,
         chat_history: list,
         districts_ref: list,
-        survey_work_item_fn: Callable,
+        survey_work_item_fn: Callable | None,
         set_status_fn: Callable[..., Awaitable],
         persistence_reads: TaskManagerPersistenceReadsPort,
         system_configuration: "Config" = None,
+        application_services: "ApplicationServices" = None,
     ):
         if system_configuration is None:
             raise ConfigLoadError("TaskManager requires system_configuration for config-driven operation.")
+        if application_services is None:
+            raise ConfigLoadError("TaskManager requires application_services for token telemetry and consistency.")
         self.system_configuration = system_configuration
+        self._application_services = application_services
         # Shared references
         self.broadcast = broadcast_fn
         self.world = world
         self.chat_history = chat_history
         self._districts_ref = districts_ref          # mutable list reference
-        self._survey_work_item_fn = survey_work_item_fn
+        self._survey_work_item_fn: Callable | None = survey_work_item_fn
         self._set_status_fn = set_status_fn
         self._persistence_reads = persistence_reads
 
@@ -69,6 +74,21 @@ class TaskManager:
         # Counters / caches
         self._structures_since_save: int = 0
         self._agent_thinking_started: dict[str, float] = {}
+
+    def attach_survey_work_item_fn(self, survey_work_item_fn: Callable) -> int:
+        """Wire survey runner after ``Generators`` exists (avoids half-built engine lambdas)."""
+        if survey_work_item_fn is None:
+            raise ConfigLoadError("attach_survey_work_item_fn requires a non-None callable.")
+        self._survey_work_item_fn = survey_work_item_fn
+        return 1
+
+    def _require_survey_work_item_fn(self) -> Callable:
+        fn = self._survey_work_item_fn
+        if fn is None:
+            raise ConfigLoadError(
+                "Survey work item callable was not attached; call attach_survey_work_item_fn from BuildEngine."
+            )
+        return fn
 
     @property
     def urbanista_concurrency_semaphore(self) -> asyncio.Semaphore:
@@ -99,13 +119,13 @@ class TaskManager:
         async def _loop() -> None:
             try:
                 from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
-                from core.token_usage import get_token_usage_store
                 prev_totals: dict[str, int] = {}
                 interval_s = self.system_configuration.token.token_telemetry_interval_seconds
+                token_store = self._application_services.token_usage_store
                 logger.info("Token telemetry enabled: interval_s=%s", interval_s)
                 while self.running:
                     await asyncio.sleep(interval_s)
-                    payload = get_token_usage_store().to_payload()
+                    payload = token_store.to_payload()
                     # Flatten totals by agent_key for delta computation.
                     current_totals: dict[str, int] = {}
                     for agent_key, row in payload.items():
@@ -124,15 +144,24 @@ class TaskManager:
                             await self.broadcast(
                                 {
                                     "type": "token_usage",
-                                    "by_ui_agent": token_aggregate_for_ui(),
+                                    "by_ui_agent": token_aggregate_for_ui(token_store),
                                     "by_llm_key": payload,
                                     "summary": get_token_summary(
-                                        system_configuration=self.system_configuration
+                                        system_configuration=self.system_configuration,
+                                        token_usage_store=token_store,
                                     ),
                                 }
                             )
-                        except Exception:
-                            logger.debug("Token telemetry: broadcast failed", exc_info=True)
+                        except Exception as telemetry_broadcast_error:
+                            if (
+                                int(self.system_configuration.token_telemetry_broadcast_failure_raises_flag)
+                                == 1
+                            ):
+                                raise
+                            logger.debug(
+                                "Token telemetry: broadcast failed",
+                                exc_info=telemetry_broadcast_error,
+                            )
                         deltas = {
                             k: (current_totals.get(k, 0) - prev_totals.get(k, 0))
                             for k in current_totals.keys()
@@ -308,7 +337,7 @@ class TaskManager:
             existing = self._survey_task_by_index.get(i)
             if existing is not None and not existing.done():
                 continue
-            survey_task = asyncio.create_task(self._survey_work_item_fn(i))
+            survey_task = asyncio.create_task(self._require_survey_work_item_fn()(i))
             survey_task.add_done_callback(
                 lambda t, idx=i: self.log_survey_prefetch_outcome(idx, t)
             )
@@ -317,7 +346,7 @@ class TaskManager:
     async def await_survey_for_district_index(self, index: int) -> list:
         task = self._survey_task_by_index.get(index)
         if task is None:
-            return await self._survey_work_item_fn(index)
+            return await self._require_survey_work_item_fn()(index)
         return await task
 
     async def clear_survey_prefetch_handles(self) -> int:

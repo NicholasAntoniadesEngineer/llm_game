@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from agents import llm_routing as llm_agents
-from core.application_services import get_application_services
+from core.application_services import ApplicationServices
 from core.config import Config
 from core.errors import ConfigLoadError
 
 
-def apply_llm_routing_from_config(system_configuration: Config) -> None:
-    """Populate ``ApplicationServices`` agent LLM specs and labels from llm_defaults.json."""
+def apply_llm_routing_from_config(
+    system_configuration: Config,
+    application_services: ApplicationServices,
+) -> None:
+    """Populate ``application_services`` agent LLM specs and labels from llm_defaults.json."""
     llm_raw = system_configuration.load_llm_defaults()
-    services = get_application_services()
+    services = application_services
     required_keys = (
         llm_agents.KEY_CARTOGRAPHUS_SKELETON,
         llm_agents.KEY_CARTOGRAPHUS_REFINE,

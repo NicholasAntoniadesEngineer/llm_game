@@ -57,6 +57,11 @@ class CulturalAdaptationSystem:
         if invalid_societies:
             from core.society_validator import society_validator
             summary = society_validator.get_validation_summary(validation_results)
+            if int(self._system_configuration.society_validation_strict_flag) == 1:
+                raise RuntimeError(
+                    "Society validation failed (society_validation_strict=1): "
+                    + summary
+                )
             logger.warning("Society validation issues found:\n%s", summary)
             logger.warning("Continuing with valid societies only")
 

@@ -33,6 +33,7 @@ from core.errors import SaveIndexError
 from core.persistence import (
     clear_saves,
     load_blueprint,
+    load_llm_settings,
     load_state,
     merge_llm_overrides_from_save,
     save_llm_settings,
@@ -49,11 +50,15 @@ from core.heartbeat import start_heartbeat, stop_heartbeat
 
 # Load the single source of truth configuration early (strict CSV validation, fails hard if invalid)
 system_configuration = load_config()
-configure_application_services(
+application_services = configure_application_services(
     system_configuration=system_configuration,
     token_usage_store=TokenUsageStore(),
 )
-apply_llm_routing_from_config(system_configuration)
+apply_llm_routing_from_config(system_configuration, application_services)
+load_llm_settings(
+    system_configuration=system_configuration,
+    application_services=application_services,
+)
 
 init_run_log(
     run_log_buffer_max_lines=system_configuration.run_log_buffer_max_lines,
@@ -100,15 +105,17 @@ BANNER = """
 ╚══════════════════════════════════════════════════╝
 """
 
-# Shared application state with injected system configuration (no globals)
-state = AppState(system_configuration=system_configuration)
+# Shared application state with injected config and unified application context
+state = AppState(
+    system_configuration=system_configuration,
+    application_services=application_services,
+)
 
 # Bind broadcast to the shared state so callers use broadcast(message) without needing to pass state.
 broadcast = functools.partial(_broadcast_impl, state)
 
-set_broadcast_async(broadcast)
+set_broadcast_async(application_services, broadcast)
 
-# Pass the system_configuration to BuildEngine for dependency injection (to be fully updated in modularize todo)
 engine = BuildEngine(
     state.world,
     state.bus,
@@ -116,6 +123,7 @@ engine = BuildEngine(
     state.chat_history,
     run_session=state.run_session,
     system_configuration=system_configuration,
+    application_services=application_services,
 )
 
 _heartbeat_thread = None
@@ -366,9 +374,13 @@ async def handle_llm_settings_save(overrides: dict):
     """Persist per-agent LLM routing from UI; merges empty API key fields with existing."""
     if not isinstance(overrides, dict):
         return
-    current = llm_agents.get_runtime_overrides()
-    merged = merge_llm_overrides_from_save(current, overrides)
-    llm_agents.set_runtime_overrides(merged)
+    current = llm_agents.get_runtime_overrides(application_services=state.application_services)
+    merged = merge_llm_overrides_from_save(
+        current,
+        overrides,
+        application_services=state.application_services,
+    )
+    llm_agents.set_runtime_overrides(merged, application_services=state.application_services)
     await asyncio.to_thread(
         save_llm_settings,
         merged,

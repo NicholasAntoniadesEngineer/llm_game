@@ -28,12 +28,14 @@ from prompts import load_prompt, format_building_types, format_material_palette
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from core.application_services import ApplicationServices
     from core.config import Config
 
 from orchestration.validation import validate_master_plan
 from core.fingerprint import compute_run_fingerprint, ensure_district_ids
 from core.persistence import save_state, load_districts_cache, save_blueprint, load_blueprint
 from core.run_session import RunSession
+from orchestration.discovery_coordinator import DiscoveryCoordinator
 from orchestration.generators import Generators
 from orchestration.engine_build_loop import run_build_generation
 from orchestration.engine_urbanista import execute_batch_urbanista
@@ -53,9 +55,11 @@ class BuildEngine:
         *,
         run_session: "RunSession",
         system_configuration: "Config",
+        application_services: "ApplicationServices",
     ):
-        """Updated to accept injected system_configuration. Removes globals from core.config. Uses descriptive parameter name. Later todos will replace globals uses with config values and refactor to thinner coordinator."""
+        """Injected ``Config`` and unified ``ApplicationServices`` (LLM routing, token store)."""
         self.system_configuration = system_configuration
+        self.application_services = application_services
         self._open_terrain_types_set = frozenset(system_configuration.terrain.open_terrain_types_set)
         self._batchable_types_set = frozenset(system_configuration.terrain.batchable_types_set)
         self._wave_one_building_types_set = frozenset(system_configuration.terrain.wave_one_building_types_set)
@@ -86,6 +90,7 @@ class BuildEngine:
             ),
             llm_agent_key=KEY_CARTOGRAPHUS_SKELETON,
             system_configuration=self.system_configuration,
+            application_services=self.application_services,
             ui_notifier=self._ui_notifier,
         )
         self.planner_refine = BaseAgent(
@@ -94,6 +99,7 @@ class BuildEngine:
             load_prompt("cartographus_plan_refine", SOURCE_POLICY=_source_policy),
             llm_agent_key=KEY_CARTOGRAPHUS_REFINE,
             system_configuration=self.system_configuration,
+            application_services=self.application_services,
             ui_notifier=self._ui_notifier,
         )
         self.surveyor = BaseAgent(
@@ -102,6 +108,7 @@ class BuildEngine:
             load_prompt("cartographus_survey", SOURCE_POLICY=_source_policy, BUILDING_TYPES=format_building_types()),
             llm_agent_key=KEY_CARTOGRAPHUS_SURVEY,
             system_configuration=self.system_configuration,
+            application_services=self.application_services,
             ui_notifier=self._ui_notifier,
         )
         self.urbanista = BaseAgent(
@@ -110,6 +117,7 @@ class BuildEngine:
             load_prompt("urbanista", BUILDING_TYPES=format_building_types(), KEY_COLORS=format_material_palette()),
             llm_agent_key=KEY_URBANISTA,
             system_configuration=self.system_configuration,
+            application_services=self.application_services,
             ui_notifier=self._ui_notifier,
         )
         self._source_policy = _source_policy
@@ -129,21 +137,22 @@ class BuildEngine:
         self.debate = DebateProtocol()
 
         # TaskManager owns running flag, task handles, semaphores, and save-throttling.
-        # Note: survey_work_item_fn uses a lambda so it resolves self.generators at call time
-        # (generators is created immediately after tasks).
         self.tasks = TaskManager(
             broadcast_fn=broadcast_fn,
             world=world,
             chat_history=chat_history_ref,
             districts_ref=self.districts,
-            survey_work_item_fn=lambda di: self.generators.survey_work_item(di),
+            survey_work_item_fn=None,
             set_status_fn=self._set_status,
             persistence_reads=self,
             system_configuration=self.system_configuration,
+            application_services=self.application_services,
         )
 
         # Generators — extracted discovery/survey/expansion methods.
         self.generators = Generators(self)
+        self._discovery_coordinator = DiscoveryCoordinator(self.generators)
+        self.tasks.attach_survey_work_item_fn(self._discovery_coordinator.survey_work_item)
 
     @property
     def scenario(self) -> dict[str, Any] | None:
@@ -511,7 +520,10 @@ class BuildEngine:
             await self._set_status(agent_name, "idle")
 
     def _apply_master_plan_validation(self, master_plan: list, context: str) -> list:
-        cleaned = validate_master_plan(master_plan)
+        cleaned = validate_master_plan(
+            master_plan,
+            system_configuration=self.system_configuration,
+        )
         if not cleaned and master_plan:
             raise AgentGenerationError(
                 "unknown",

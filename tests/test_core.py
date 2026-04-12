@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 
-from tests.conftest import SYSTEM_CONFIGURATION
+from tests.conftest import APPLICATION_SERVICES, SYSTEM_CONFIGURATION
 
 
 # ---------------------------------------------------------------------------
@@ -380,9 +380,9 @@ class TestTokenUsageCallCount:
 
 class TestGetTokenSummary:
     def test_empty_summary(self):
-        from core.token_usage import get_token_summary, get_token_usage_store
+        from core.token_usage import get_token_summary
 
-        store = get_token_usage_store()
+        store = APPLICATION_SERVICES.token_usage_store
         old_last = store._last_by_agent.copy()
         old_totals = store._totals_by_agent.copy()
         old_counts = store._call_counts.copy()
@@ -390,7 +390,10 @@ class TestGetTokenSummary:
         store._totals_by_agent.clear()
         store._call_counts.clear()
         try:
-            summary = get_token_summary(system_configuration=SYSTEM_CONFIGURATION)
+            summary = get_token_summary(
+                system_configuration=SYSTEM_CONFIGURATION,
+                token_usage_store=store,
+            )
             assert "agents" in summary
             assert "by_group" in summary
             assert "avg_tokens_per_building" in summary
@@ -403,9 +406,9 @@ class TestGetTokenSummary:
             store._call_counts = old_counts
 
     def test_summary_with_data(self):
-        from core.token_usage import get_token_summary, get_token_usage_store
+        from core.token_usage import get_token_summary
 
-        store = get_token_usage_store()
+        store = APPLICATION_SERVICES.token_usage_store
         old_last = store._last_by_agent.copy()
         old_totals = store._totals_by_agent.copy()
         old_counts = store._call_counts.copy()
@@ -422,7 +425,10 @@ class TestGetTokenSummary:
                 total_tokens=1500,
                 exact=True,
             )
-            summary = get_token_summary(system_configuration=SYSTEM_CONFIGURATION)
+            summary = get_token_summary(
+                system_configuration=SYSTEM_CONFIGURATION,
+                token_usage_store=store,
+            )
             assert summary["urbanista_calls"] == 1
             assert summary["avg_tokens_per_building"] == 1500
             assert summary["total_tokens"] == 1500
@@ -735,24 +741,40 @@ class TestMergeLlmOverrides:
     def test_merge_basic(self):
         current = {"urbanista": {"provider": "claude_cli", "model": "haiku"}}
         incoming = {"urbanista": {"model": "sonnet"}}
-        result = persistence.merge_llm_overrides_from_save(current, incoming)
+        result = persistence.merge_llm_overrides_from_save(
+            current,
+            incoming,
+            application_services=APPLICATION_SERVICES,
+        )
         assert result["urbanista"]["model"] == "sonnet"
         assert result["urbanista"]["provider"] == "claude_cli"
 
     def test_merge_blank_api_key_keeps_previous(self):
         current = {"urbanista": {"openai_api_key": "sk-secret"}}
         incoming = {"urbanista": {"openai_api_key": ""}}
-        result = persistence.merge_llm_overrides_from_save(current, incoming)
+        result = persistence.merge_llm_overrides_from_save(
+            current,
+            incoming,
+            application_services=APPLICATION_SERVICES,
+        )
         assert result["urbanista"]["openai_api_key"] == "sk-secret"
 
     def test_merge_none_value_skipped(self):
         current = {"urbanista": {"model": "haiku"}}
         incoming = {"urbanista": {"model": None}}
-        result = persistence.merge_llm_overrides_from_save(current, incoming)
+        result = persistence.merge_llm_overrides_from_save(
+            current,
+            incoming,
+            application_services=APPLICATION_SERVICES,
+        )
         assert result["urbanista"]["model"] == "haiku"
 
     def test_merge_unknown_agent_key_ignored(self):
         current = {}
         incoming = {"nonexistent_agent": {"model": "test"}}
-        result = persistence.merge_llm_overrides_from_save(current, incoming)
+        result = persistence.merge_llm_overrides_from_save(
+            current,
+            incoming,
+            application_services=APPLICATION_SERVICES,
+        )
         assert "nonexistent_agent" not in result

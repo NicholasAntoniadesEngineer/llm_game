@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from core.application_services import ApplicationServices
 from core.config import Config
 from server.state import AppState
 from server.broadcast import attach_engine_ui_to_message, broadcast
@@ -76,7 +77,10 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
                 district_count = msg["total_districts"]
                 break
 
-        token_summary = get_token_summary(system_configuration=system_configuration)
+        token_summary = get_token_summary(
+            system_configuration=system_configuration,
+            token_usage_store=state.application_services.token_usage_store,
+        )
         total_tokens = token_summary.get("total_tokens", 0)
 
         return {
@@ -118,7 +122,10 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
     async def api_get_llm_settings():
         """Load AI routing for the Configure AI panel (HTTP so it always works without WebSocket timing)."""
         logger.info("GET /api/llm-settings")
-        return _build_llm_settings_payload(system_configuration)
+        return _build_llm_settings_payload(
+            system_configuration,
+            state.application_services,
+        )
 
     @app.post("/api/llm-settings")
     async def api_post_llm_settings(request: Request):
@@ -235,14 +242,14 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
                     await websocket.send_json(cached)
 
             from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
-            from core.token_usage import get_token_usage_store
 
-            tu = token_aggregate_for_ui()
+            _tok_store = state.application_services.token_usage_store
+            tu = token_aggregate_for_ui(_tok_store)
             if any((v.get("total_tokens") or 0) > 0 for v in tu.values()):
                 _tu_payload = {
                     "type": "token_usage",
                     "by_ui_agent": tu,
-                    "by_llm_key": get_token_usage_store().to_payload(),
+                    "by_llm_key": _tok_store.to_payload(),
                 }
                 await websocket.send_json(attach_engine_ui_to_message(state, _tu_payload))
 
@@ -319,7 +326,12 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
 
         async def _ws_handle_get_llm_settings(_payload: dict) -> None:
             logger.info(f"[ws#{conn_id}] send llm_settings")
-            await websocket.send_json(_build_llm_settings_payload(system_configuration))
+            await websocket.send_json(
+                _build_llm_settings_payload(
+                    system_configuration,
+                    state.application_services,
+                )
+            )
 
         async def _ws_handle_save_llm_settings(payload: dict) -> None:
             overrides = payload.get("overrides")
@@ -417,14 +429,21 @@ def build_app(state: AppState, system_configuration: "Config", lifespan=None):
     return app
 
 
-def _build_llm_settings_payload(system_configuration: Config) -> dict:
+def _build_llm_settings_payload(
+    system_configuration: Config,
+    application_services: ApplicationServices,
+) -> dict:
     """Same shape as WebSocket message type llm_settings (for UI)."""
     from agents import llm_routing as llm_agents
-    from core.token_usage import get_token_usage_store
 
     agents_payload = {}
-    for key in llm_agents.iter_registered_agent_llm_keys():
-        spec = llm_agents.get_agent_llm_spec(key)
+    for key in llm_agents.iter_registered_agent_llm_keys(
+        application_services=application_services
+    ):
+        spec = llm_agents.get_agent_llm_spec(
+            key,
+            application_services=application_services,
+        )
         row = {}
         for k, v in spec.items():
             if k == "openai_api_key":
@@ -441,8 +460,10 @@ def _build_llm_settings_payload(system_configuration: Config) -> dict:
     return {
         "type": "llm_settings",
         "agents": agents_payload,
-        "labels": llm_agents.get_agent_llm_labels_dictionary(),
-        "token_usage": get_token_usage_store().to_payload(),
+        "labels": llm_agents.get_agent_llm_labels_dictionary(
+            application_services=application_services
+        ),
+        "token_usage": application_services.token_usage_store.to_payload(),
         "xai_model_suggestions": xai_model_suggestions,
         "openai_compatible_model_suggestions": openai_model_suggestions,
         "model_id_suggestions": combined_suggestions,

@@ -21,6 +21,73 @@ from core.run_log import log_event
 
 _config_logger = logging.getLogger("eternal.config")
 
+# Single registry of CSV keys required for a valid ``Config`` (must match rows in system_config.csv).
+SYSTEM_CONFIG_REQUIRED_CSV_KEYS: frozenset[str] = frozenset({
+    "grid_width", "grid_height", "max_districts", "chunk_size", "world_scale_meters",
+    "elevation_scale", "max_elevation", "max_building_height", "min_building_height",
+    "terrain_max_gradient", "terrain_gradient_iterations",
+    "max_buildings_per_district", "survey_buildings_per_chunk", "urbanista_max_concurrent",
+    "survey_max_concurrent", "save_state_every_n_structures", "chat_persist_debounce_s",
+    "heartbeat_interval_s", "expansion_cooldown", "chat_history_max_messages",
+    "chat_replay_max_messages", "token_telemetry_interval_s", "timeline_window", "step_delay",
+    "max_generations", "claude_cli_binary", "max_batch_size", "max_batch_tiles",
+    "cost_per_1m_input", "cost_per_1m_output", "max_retries", "retry_backoff_base", "retry_jitter",
+    "max_prompt_tokens", "max_response_tokens", "agent_timeout_short", "agent_timeout_medium",
+    "agent_timeout_long", "open_terrain_types",
+    "wave1_building_types", "batchable_types", "terrain_defaults", "ui_agents",
+    "llm_defaults_path", "data_dir", "saves_dir", "log_level", "max_society_file_size",
+    "max_blueprint_file_size", "max_city_name_length", "max_building_name_length",
+    "max_coordinate_value", "min_coordinate_value", "performance_warning_threshold",
+    "http_timeout_short", "http_timeout_medium", "http_timeout_long",
+    "rate_limit_requests", "rate_limit_window",
+    "llm_settings_path",
+    "run_log_buffer_max_lines", "blueprint_incremental_tile_threshold", "blueprint_halo_expand_iterations",
+    "spatial_optimal_shift_step_tiles", "procedural_terrain_description_max_chars",
+    "procedural_terrain_fallback_hex_color",
+    "urbanista_commentary_display_max_chars", "urbanista_geometry_collision_report_max_entries",
+    "urbanista_max_consecutive_failures_before_pause", "urbanista_batchable_tile_max_count",
+    "footprint_width_depth_scale_factor", "district_coherence_reference_area",
+    "claude_cli_base_timeout_haiku_seconds", "claude_cli_base_timeout_other_seconds",
+    "claude_cli_result_preview_char_limit", "claude_cli_connection_error_preview_chars",
+    "claude_cli_scaled_input_chars_threshold", "claude_cli_scaled_chars_per_extra_minute_block",
+    "claude_cli_scaled_extra_seconds_per_block",
+    "agent_status_idle_string", "agent_status_active_string", "agent_status_error_string",
+    "skeleton_planner_debug_json_max_chars", "skeleton_planner_inter_retry_wait_seconds",
+    "district_spacing_by_style", "road_bridge_default_elevation", "agent_failure_detail_max_chars",
+    "material_roughness_low_default", "material_roughness_medium_default", "material_roughness_high_default",
+    "world_place_tile_min_elevation", "world_build_log_max_entries", "world_build_log_trim_keep_entries",
+    "terrain_type_display_colors", "terrain_display_icons", "building_type_display_icons",
+    "api_pause_auto_retry_delay_seconds", "api_pause_retriable_reasons",
+    "society_file_extension",
+    "cities_json_relative",
+    "known_cities_json_relative",
+    "architectural_reference_file_relative",
+    "openai_compatible_temperature",
+    "skeleton_cli_kill_subprocess_on_timeout",
+    "terrain_classification_thresholds",
+    "terrain_stability_terrain_type_modifiers",
+    "terrain_stability_soil_type_modifiers",
+    "road_surface_colors_by_type",
+    "blueprint_climate_determination_dictionary",
+    "known_cartography_map_dictionary",
+    "building_material_hex_colors_dictionary",
+    "http_server_listen_host",
+    "http_server_listen_port",
+    "uvicorn_log_level",
+    "uvicorn_reload_delay_seconds",
+    "world_reset_default_year",
+    "server_reload_sentinel_pre_touch_sleep_seconds",
+    "token_estimate_chars_per_token",
+    "blueprint_default_primary_stone",
+    "blueprint_default_secondary_stone",
+    "blueprint_default_brick_type",
+    "blueprint_default_roof_material",
+    "master_plan_fail_on_intra_plan_tile_overlap",
+    "society_validation_strict",
+    "token_telemetry_broadcast_failure_raises",
+    "master_plan_duplicate_tile_policy",
+})
+
 
 @functools.lru_cache(maxsize=16)
 def _cached_llm_defaults_raw_dict(path_str: str, mtime_ns: int) -> Dict[str, Any]:
@@ -200,6 +267,9 @@ class Config:
     blueprint_default_brick_type_string: str
     blueprint_default_roof_material_string: str
     master_plan_fail_on_intra_plan_tile_overlap_flag: int
+    society_validation_strict_flag: int
+    token_telemetry_broadcast_failure_raises_flag: int
+    master_plan_duplicate_tile_policy_string: str
 
     @classmethod
     def load_from_system_config(cls, csv_path_relative: str = "data/system_config.csv") -> "Config":
@@ -273,69 +343,7 @@ class Config:
             raise
 
         # Strict check for all required parameters (no defaults allowed)
-        required = {
-            "grid_width", "grid_height", "max_districts", "chunk_size", "world_scale_meters",
-            "elevation_scale", "max_elevation", "max_building_height", "min_building_height",
-            "terrain_max_gradient", "terrain_gradient_iterations",
-            "max_buildings_per_district", "survey_buildings_per_chunk", "urbanista_max_concurrent",
-            "survey_max_concurrent", "save_state_every_n_structures", "chat_persist_debounce_s",
-            "heartbeat_interval_s", "expansion_cooldown", "chat_history_max_messages",
-            "chat_replay_max_messages", "token_telemetry_interval_s", "timeline_window", "step_delay",
-            "max_generations", "claude_cli_binary", "max_batch_size", "max_batch_tiles",
-            "cost_per_1m_input", "cost_per_1m_output", "max_retries", "retry_backoff_base", "retry_jitter",
-            "max_prompt_tokens", "max_response_tokens", "agent_timeout_short", "agent_timeout_medium",
-            "agent_timeout_long", "open_terrain_types",
-            "wave1_building_types", "batchable_types", "terrain_defaults", "ui_agents",
-            "llm_defaults_path", "data_dir", "saves_dir", "log_level", "max_society_file_size",
-            "max_blueprint_file_size", "max_city_name_length", "max_building_name_length",
-            "max_coordinate_value", "min_coordinate_value", "performance_warning_threshold",
-            "http_timeout_short", "http_timeout_medium", "http_timeout_long",
-            "rate_limit_requests", "rate_limit_window",
-            "llm_settings_path",
-            "run_log_buffer_max_lines", "blueprint_incremental_tile_threshold", "blueprint_halo_expand_iterations",
-            "spatial_optimal_shift_step_tiles", "procedural_terrain_description_max_chars",
-            "procedural_terrain_fallback_hex_color",
-            "urbanista_commentary_display_max_chars", "urbanista_geometry_collision_report_max_entries",
-            "urbanista_max_consecutive_failures_before_pause", "urbanista_batchable_tile_max_count",
-            "footprint_width_depth_scale_factor", "district_coherence_reference_area",
-            "claude_cli_base_timeout_haiku_seconds", "claude_cli_base_timeout_other_seconds",
-            "claude_cli_result_preview_char_limit", "claude_cli_connection_error_preview_chars",
-            "claude_cli_scaled_input_chars_threshold", "claude_cli_scaled_chars_per_extra_minute_block",
-            "claude_cli_scaled_extra_seconds_per_block",
-            "agent_status_idle_string", "agent_status_active_string", "agent_status_error_string",
-            "skeleton_planner_debug_json_max_chars", "skeleton_planner_inter_retry_wait_seconds",
-            "district_spacing_by_style", "road_bridge_default_elevation", "agent_failure_detail_max_chars",
-            "material_roughness_low_default", "material_roughness_medium_default", "material_roughness_high_default",
-            "world_place_tile_min_elevation", "world_build_log_max_entries", "world_build_log_trim_keep_entries",
-            "terrain_type_display_colors", "terrain_display_icons", "building_type_display_icons",
-            "api_pause_auto_retry_delay_seconds", "api_pause_retriable_reasons",
-            "society_file_extension",
-            "cities_json_relative",
-            "known_cities_json_relative",
-            "architectural_reference_file_relative",
-            "openai_compatible_temperature",
-            "skeleton_cli_kill_subprocess_on_timeout",
-            "terrain_classification_thresholds",
-            "terrain_stability_terrain_type_modifiers",
-            "terrain_stability_soil_type_modifiers",
-            "road_surface_colors_by_type",
-            "blueprint_climate_determination_dictionary",
-            "known_cartography_map_dictionary",
-            "building_material_hex_colors_dictionary",
-            "http_server_listen_host",
-            "http_server_listen_port",
-            "uvicorn_log_level",
-            "uvicorn_reload_delay_seconds",
-            "world_reset_default_year",
-            "server_reload_sentinel_pre_touch_sleep_seconds",
-            "token_estimate_chars_per_token",
-            "blueprint_default_primary_stone",
-            "blueprint_default_secondary_stone",
-            "blueprint_default_brick_type",
-            "blueprint_default_roof_material",
-            "master_plan_fail_on_intra_plan_tile_overlap",
-        }
-        missing_params = required - set(params.keys())
+        missing_params = SYSTEM_CONFIG_REQUIRED_CSV_KEYS - set(params.keys())
         if missing_params:
             log_event(
                 "config",
@@ -355,6 +363,17 @@ class Config:
         overlap_flag = int(params["master_plan_fail_on_intra_plan_tile_overlap"])
         if overlap_flag not in (0, 1):
             raise ConfigLoadError("master_plan_fail_on_intra_plan_tile_overlap must be 0 or 1")
+        society_validation_strict_flag = int(params["society_validation_strict"])
+        if society_validation_strict_flag not in (0, 1):
+            raise ConfigLoadError("society_validation_strict must be 0 or 1")
+        token_telemetry_broadcast_failure_raises_flag = int(params["token_telemetry_broadcast_failure_raises"])
+        if token_telemetry_broadcast_failure_raises_flag not in (0, 1):
+            raise ConfigLoadError("token_telemetry_broadcast_failure_raises must be 0 or 1")
+        master_plan_duplicate_tile_policy_string = str(params["master_plan_duplicate_tile_policy"]).strip().lower()
+        if master_plan_duplicate_tile_policy_string not in ("repair", "fail"):
+            raise ConfigLoadError(
+                "master_plan_duplicate_tile_policy must be 'repair' or 'fail' (from system_config.csv)"
+            )
         for stone_key in (
             "blueprint_default_primary_stone",
             "blueprint_default_secondary_stone",
@@ -564,6 +583,9 @@ class Config:
                     params["blueprint_default_roof_material"]
                 ).strip(),
                 master_plan_fail_on_intra_plan_tile_overlap_flag=overlap_flag,
+                society_validation_strict_flag=society_validation_strict_flag,
+                token_telemetry_broadcast_failure_raises_flag=token_telemetry_broadcast_failure_raises_flag,
+                master_plan_duplicate_tile_policy_string=master_plan_duplicate_tile_policy_string,
             )
             _config_logger.info(
                 "config_loaded_successfully source=system_config.csv params_count=%s",

@@ -3,6 +3,9 @@ LLM routing per agent (defaults from data/llm_defaults.json via core.config).
 
 **Runtime overrides:** “Configure AI” in the web app; persisted in data/llm_settings.json.
 
+All lookups require an explicit ``application_services`` bundle from the composition root
+(``main.py`` / ``AppState`` / tests ``conftest``) — no hidden globals on correctness paths.
+
 Keys must match what BuildEngine passes as llm_agent_key.
 
 Optional override fields (from UI):
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from core.application_services import get_application_services
+from core.application_services import ApplicationServices
 
 KEY_CARTOGRAPHUS_SKELETON = "cartographus_skeleton"
 KEY_CARTOGRAPHUS_REFINE = "cartographus_refine"
@@ -37,26 +40,37 @@ class AgentLlmSpec(TypedDict, total=False):
     openai_api_key: str | None
 
 
-def iter_registered_agent_llm_keys() -> tuple[str, ...]:
+def iter_registered_agent_llm_keys(
+    *, application_services: ApplicationServices
+) -> tuple[str, ...]:
     """Stable ordering of agent keys after bootstrap."""
-    return tuple(sorted(get_application_services().agent_llm_specs_dictionary.keys()))
+    return tuple(sorted(application_services.agent_llm_specs_dictionary.keys()))
 
 
-def get_agent_llm_specs_dictionary() -> dict[str, dict[str, Any]]:
+def get_agent_llm_specs_dictionary(
+    *, application_services: ApplicationServices
+) -> dict[str, dict[str, Any]]:
     """Shallow copy of base routing specs (not merged with runtime overrides)."""
-    return {k: dict(v) for k, v in get_application_services().agent_llm_specs_dictionary.items()}
+    return {
+        k: dict(v) for k, v in application_services.agent_llm_specs_dictionary.items()
+    }
 
 
-def get_agent_llm_labels_dictionary() -> dict[str, str]:
+def get_agent_llm_labels_dictionary(
+    *, application_services: ApplicationServices
+) -> dict[str, str]:
     """Copy of display labels keyed by llm_agent_key."""
-    return dict(get_application_services().agent_llm_labels_dictionary)
+    return dict(application_services.agent_llm_labels_dictionary)
 
 
-def set_runtime_overrides(overrides: dict[str, dict[str, Any]] | None) -> None:
+def set_runtime_overrides(
+    overrides: dict[str, dict[str, Any]] | None,
+    *,
+    application_services: ApplicationServices,
+) -> None:
     """Replace runtime overrides (only keys in registered agent specs are kept)."""
-    services = get_application_services()
-    services.runtime_llm_overrides_dictionary.clear()
-    base = services.agent_llm_specs_dictionary
+    application_services.runtime_llm_overrides_dictionary.clear()
+    base = application_services.agent_llm_specs_dictionary
     if not overrides:
         return
     for agent_key, patch in overrides.items():
@@ -64,28 +78,33 @@ def set_runtime_overrides(overrides: dict[str, dict[str, Any]] | None) -> None:
             continue
         cleaned = {attribute_key: value for attribute_key, value in patch.items() if value is not None}
         if cleaned:
-            services.runtime_llm_overrides_dictionary[agent_key] = cleaned
+            application_services.runtime_llm_overrides_dictionary[agent_key] = cleaned
 
 
-def get_runtime_overrides() -> dict[str, dict[str, Any]]:
+def get_runtime_overrides(
+    *, application_services: ApplicationServices
+) -> dict[str, dict[str, Any]]:
     """Copy of persisted/runtime-only fields (may include API keys)."""
     return {
         agent_key: dict(patch)
-        for agent_key, patch in get_application_services().runtime_llm_overrides_dictionary.items()
+        for agent_key, patch in application_services.runtime_llm_overrides_dictionary.items()
     }
 
 
-def get_agent_llm_spec(agent_key: str) -> dict[str, Any]:
+def get_agent_llm_spec(
+    agent_key: str,
+    *,
+    application_services: ApplicationServices,
+) -> dict[str, Any]:
     """Base agent specs merged with runtime overrides (from file or UI)."""
-    services = get_application_services()
-    base_specs = services.agent_llm_specs_dictionary
+    base_specs = application_services.agent_llm_specs_dictionary
     if agent_key not in base_specs:
         raise KeyError(
             f"Unknown llm_agent_key={agent_key!r}. Add it to llm_defaults.json agents section. "
             f"Valid keys: {sorted(base_specs.keys())}"
         )
     merged: dict[str, Any] = dict(base_specs[agent_key])
-    patch = services.runtime_llm_overrides_dictionary.get(agent_key)
+    patch = application_services.runtime_llm_overrides_dictionary.get(agent_key)
     if patch:
         for attribute_key, value in patch.items():
             if value is None:

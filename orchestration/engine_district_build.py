@@ -15,10 +15,9 @@ from orchestration.build_pipeline import (
 )
 from orchestration.engine_terrain import generate_terrain_procedurally
 from orchestration.prompt_builder import build_building_prompt
+from orchestration.urbanista_place_pipeline import run_traced_urbanista_arch_sanitize_and_validate
 from orchestration.validation import (
     validate_urbanista_tiles,
-    validate_urbanista_arch_result,
-    sanitize_urbanista_output,
     check_component_collisions,
 )
 from orchestration.world_commit import apply_tile_placements
@@ -449,8 +448,11 @@ async def run_district_build(
                 anchor_y = job["anchor_y"]
 
                 try:
-                    arch_result = sanitize_urbanista_output(arch_result)
-                    validate_urbanista_arch_result(arch_result)
+                    arch_result = run_traced_urbanista_arch_sanitize_and_validate(
+                        arch_result,
+                        district_key=district_key,
+                        structure_name=name,
+                    )
                 except UrbanistaValidationError as err:
                     skipped += 1
                     logger.warning("Urbanista validation failed for %s: %s — skipping", name, err)
@@ -492,8 +494,11 @@ async def run_district_build(
                                 engine.urbanista.generate(fix_prompt),
                                 timeout=engine.system_configuration.llm.agent_timeout_long_seconds,
                             )
-                            fixed = sanitize_urbanista_output(fixed)
-                            validate_urbanista_arch_result(fixed)
+                            fixed = run_traced_urbanista_arch_sanitize_and_validate(
+                                fixed,
+                                district_key=district_key,
+                                structure_name=name + "_geometry_fix",
+                            )
                             fixed_anchor = None
                             for td in fixed.get("tiles", []):
                                 if isinstance(td, dict) and td.get("spec") and isinstance(td["spec"].get("components"), list):

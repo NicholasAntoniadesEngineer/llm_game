@@ -4,6 +4,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from core.application_services import ApplicationServices
     from core.config import Config
 
 from world.state import WorldState
@@ -12,9 +13,14 @@ from core.run_session import RunSession
 
 
 class AppState:
-    def __init__(self, system_configuration: "Config"):
-        """Accepts the injected Config instance. No globals. Descriptive param name."""
+    def __init__(
+        self,
+        system_configuration: "Config",
+        application_services: "ApplicationServices",
+    ):
+        """Injected ``Config`` plus single application context (LLM routing, token store)."""
         self.system_configuration = system_configuration
+        self.application_services = application_services
         self.world = WorldState(
             chunk_size_tiles=system_configuration.grid.chunk_size_tiles,
             system_configuration=system_configuration,

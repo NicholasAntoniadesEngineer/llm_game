@@ -14,16 +14,21 @@ from core.errors import AgentGenerationError
 from agents import llm_routing as llm_agents
 from agents.ui_notifier import NoOpUiNotifier
 
-from tests.conftest import SYSTEM_CONFIGURATION
+from tests.conftest import APPLICATION_SERVICES, SYSTEM_CONFIGURATION
 
 
 class TestLlmRouting:
     def setup_method(self):
         # Reset runtime overrides before each test
-        llm_agents.set_runtime_overrides(None)
+        llm_agents.set_runtime_overrides(
+            None,
+            application_services=APPLICATION_SERVICES,
+        )
 
     def test_all_agent_keys_exist(self):
-        specs = llm_agents.get_agent_llm_specs_dictionary()
+        specs = llm_agents.get_agent_llm_specs_dictionary(
+            application_services=APPLICATION_SERVICES,
+        )
         for key in (
             llm_agents.KEY_CARTOGRAPHUS_SKELETON,
             llm_agents.KEY_CARTOGRAPHUS_REFINE,
@@ -33,55 +38,100 @@ class TestLlmRouting:
             assert key in specs
 
     def test_get_agent_llm_spec_returns_dict(self):
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         assert isinstance(spec, dict)
         assert "provider" in spec
         assert "model" in spec
 
     def test_get_agent_llm_spec_unknown_key_raises(self):
         with pytest.raises(KeyError, match="Unknown llm_agent_key"):
-            llm_agents.get_agent_llm_spec("nonexistent_key")
+            llm_agents.get_agent_llm_spec(
+                "nonexistent_key",
+                application_services=APPLICATION_SERVICES,
+            )
 
     def test_set_runtime_overrides(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"model": "sonnet"},
-        })
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"model": "sonnet"},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         assert spec["model"] == "sonnet"
 
     def test_set_runtime_overrides_none_clears(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"model": "sonnet"},
-        })
-        llm_agents.set_runtime_overrides(None)
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"model": "sonnet"},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        llm_agents.set_runtime_overrides(
+            None,
+            application_services=APPLICATION_SERVICES,
+        )
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         expected = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA]["model"]
         assert spec["model"] == expected
 
     def test_runtime_overrides_ignores_unknown_keys(self):
-        llm_agents.set_runtime_overrides({
-            "unknown_key_999": {"model": "sonnet"},
-        })
-        assert llm_agents.get_runtime_overrides() == {}
+        llm_agents.set_runtime_overrides(
+            {
+                "unknown_key_999": {"model": "sonnet"},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        assert llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        ) == {}
 
     def test_runtime_overrides_ignores_non_dict_values(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: "not_a_dict",
-        })
-        assert llm_agents.get_runtime_overrides() == {}
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: "not_a_dict",
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        assert llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        ) == {}
 
     def test_runtime_overrides_strips_none_values(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"model": "sonnet", "extra": None},
-        })
-        overrides = llm_agents.get_runtime_overrides()
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"model": "sonnet", "extra": None},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        overrides = llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        )
         assert "extra" not in overrides.get(llm_agents.KEY_URBANISTA, {})
 
     def test_get_agent_llm_spec_merges_overrides(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"model": "opus", "openai_base_url": "http://localhost:1234"},
-        })
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {
+                    "model": "opus",
+                    "openai_base_url": "http://localhost:1234",
+                },
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         assert spec["model"] == "opus"
         assert spec["openai_base_url"] == "http://localhost:1234"
         expected_provider = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA][
@@ -90,27 +140,49 @@ class TestLlmRouting:
         assert spec["provider"] == expected_provider
 
     def test_blank_openai_api_key_not_applied(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"openai_api_key": "   "},
-        })
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"openai_api_key": "   "},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         # blank key should not be in spec (no openai_api_key in base either)
         assert "openai_api_key" not in spec or not spec.get("openai_api_key", "").strip()
 
     def test_get_runtime_overrides_returns_copy(self):
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"model": "sonnet"},
-        })
-        copy1 = llm_agents.get_runtime_overrides()
-        copy2 = llm_agents.get_runtime_overrides()
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"model": "sonnet"},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
+        copy1 = llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        )
+        copy2 = llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        )
         assert copy1 == copy2
         # Mutating the copy should not affect the store
         copy1[llm_agents.KEY_URBANISTA]["model"] = "modified"
-        assert llm_agents.get_runtime_overrides()[llm_agents.KEY_URBANISTA]["model"] == "sonnet"
+        assert (
+            llm_agents.get_runtime_overrides(
+                application_services=APPLICATION_SERVICES,
+            )[llm_agents.KEY_URBANISTA]["model"]
+            == "sonnet"
+        )
 
     def test_labels_match_agent_keys(self):
-        labels = llm_agents.get_agent_llm_labels_dictionary()
-        for key in llm_agents.iter_registered_agent_llm_keys():
+        labels = llm_agents.get_agent_llm_labels_dictionary(
+            application_services=APPLICATION_SERVICES,
+        )
+        for key in llm_agents.iter_registered_agent_llm_keys(
+            application_services=APPLICATION_SERVICES,
+        ):
             assert key in labels
 
     def test_xai_model_suggestions_in_config(self):
@@ -268,6 +340,7 @@ class TestBaseAgentParseJson:
             system_prompt="You are a test agent.",
             llm_agent_key=llm_agents.KEY_URBANISTA,
             system_configuration=SYSTEM_CONFIGURATION,
+            application_services=APPLICATION_SERVICES,
             ui_notifier=NoOpUiNotifier(),
         )
         return agent

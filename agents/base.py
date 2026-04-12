@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from agents import llm_routing as llm_agents
 
 if TYPE_CHECKING:
+    from core.application_services import ApplicationServices
     from core.config import Config
 from agents.memory import ConversationMemory
 from agents.providers import LlmProvider, build_provider_from_spec
@@ -24,7 +25,6 @@ from core.token_usage import (
     aggregate_for_ui,
     estimate_tokens_from_text,
     get_token_summary,
-    get_token_usage_store,
 )
 from core.run_log import log_event
 from core.errors import AgentGenerationError, classify_agent_failure
@@ -122,10 +122,12 @@ class BaseAgent:
         *,
         llm_agent_key: str,
         system_configuration: "Config",
+        application_services: "ApplicationServices",
         ui_notifier: UiNotifier,
         provider: LlmProvider | None = None,
     ):
         self.system_configuration = system_configuration
+        self._application_services = application_services
         self._ui_notifier = ui_notifier
         self._agent_failure_detail_max_chars = system_configuration.agent_failure_detail_max_chars
         self.role = role
@@ -136,7 +138,10 @@ class BaseAgent:
             "Start with '{' and end with '}'."
         )
         self.llm_agent_key = llm_agent_key
-        spec = llm_agents.get_agent_llm_spec(llm_agent_key)
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agent_key,
+            application_services=self._application_services,
+        )
         self.model = spec["model"]
         self._provider_override = provider
 
@@ -206,7 +211,7 @@ class BaseAgent:
                     int(tt) if isinstance(tt, int) else (prompt_tokens + completion_tokens),
                 )
                 exact = True
-        get_token_usage_store().record(
+        self._application_services.token_usage_store.record(
             agent_key=self.llm_agent_key,
             provider=provider_kind,
             model=str(model or ""),
@@ -356,7 +361,10 @@ class BaseAgent:
 
     def _resolve_llm_provider(self) -> tuple[LlmProvider, str, str]:
         """Return ``(provider, provider_kind, model)`` for this agent's routing spec."""
-        spec = llm_agents.get_agent_llm_spec(self.llm_agent_key)
+        spec = llm_agents.get_agent_llm_spec(
+            self.llm_agent_key,
+            application_services=self._application_services,
+        )
         model = str(spec["model"])
         provider_kind = str(spec.get("provider") or "xai")
         provider = (
@@ -541,9 +549,12 @@ class BaseAgent:
             await self._ui_notifier.send_message(
                 {
                     "type": "token_usage",
-                    "by_ui_agent": aggregate_for_ui(),
-                    "by_llm_key": get_token_usage_store().to_payload(),
-                    "summary": get_token_summary(system_configuration=self.system_configuration),
+                    "by_ui_agent": aggregate_for_ui(self._application_services.token_usage_store),
+                    "by_llm_key": self._application_services.token_usage_store.to_payload(),
+                    "summary": get_token_summary(
+                        system_configuration=self.system_configuration,
+                        token_usage_store=self._application_services.token_usage_store,
+                    ),
                 }
             )
         except Exception as token_broadcast_error:

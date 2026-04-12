@@ -13,7 +13,7 @@ from agents.providers import build_provider_from_spec
 from agents.providers.claude_cli import ClaudeCliProvider
 from agents.providers.openai_compatible import OpenAICompatibleProvider
 
-from tests.conftest import SYSTEM_CONFIGURATION
+from tests.conftest import APPLICATION_SERVICES, SYSTEM_CONFIGURATION
 from orchestration.bus import BusMessage, MessageBus
 from orchestration import reference_db
 from orchestration.placement import (
@@ -23,7 +23,7 @@ from orchestration.placement import (
     WATER_ADJACENT_TYPES,
     CEREMONIAL_APPROACH_TYPES,
 )
-from core.errors import UrbanistaValidationError
+from core.errors import AgentGenerationError, UrbanistaValidationError
 from orchestration.validation import (
     validate_master_plan,
     validate_urbanista_arch_result,
@@ -253,13 +253,19 @@ class LlmAgentsConfigTests(unittest.TestCase):
             llm_agents.KEY_CARTOGRAPHUS_SURVEY,
             llm_agents.KEY_URBANISTA,
         ):
-            spec = llm_agents.get_agent_llm_spec(key)
+            spec = llm_agents.get_agent_llm_spec(
+                key,
+                application_services=APPLICATION_SERVICES,
+            )
             self.assertIn("provider", spec)
             self.assertIn("model", spec)
 
     def test_default_specs_match_llm_defaults_file(self):
         base = SYSTEM_CONFIGURATION.load_llm_defaults()["agents"][llm_agents.KEY_URBANISTA]
-        spec = llm_agents.get_agent_llm_spec(llm_agents.KEY_URBANISTA)
+        spec = llm_agents.get_agent_llm_spec(
+            llm_agents.KEY_URBANISTA,
+            application_services=APPLICATION_SERVICES,
+        )
         self.assertEqual(spec.get("provider"), base["provider"])
         self.assertEqual(spec.get("model"), base["model"])
         p = build_provider_from_spec(spec, SYSTEM_CONFIGURATION)
@@ -529,6 +535,17 @@ class TestValidationEdgeCases:
             for t in s["tiles"]:
                 all_coords.append((t["x"], t["y"]))
         assert len(all_coords) == len(set(all_coords))
+
+    def test_validate_master_plan_duplicate_policy_fail_raises(self):
+        class _PolicyFailCfg:
+            master_plan_duplicate_tile_policy_string = "fail"
+
+        mp = [
+            {"name": "A", "tiles": [{"x": 0, "y": 0}]},
+            {"name": "B", "tiles": [{"x": 0, "y": 0}]},
+        ]
+        with pytest.raises(AgentGenerationError, match="duplicate tile"):
+            validate_master_plan(mp, system_configuration=_PolicyFailCfg())
 
     def test_validate_master_plan_none_xy_skipped(self):
         mp = [{"name": "A", "tiles": [{"x": None, "y": 0}, {"x": 0, "y": 0}]}]

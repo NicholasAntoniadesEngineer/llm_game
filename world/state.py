@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from typing import TYPE_CHECKING
 
+from world.tile_payload import normalize_tile_dict_for_world
 from world.tiles import Tile
 
 if TYPE_CHECKING:
@@ -114,12 +115,10 @@ class WorldState:
 
     def place_tile(self, x: int, y: int, data: dict) -> bool:
         """Place or update a tile. World expands to fit — never rejects."""
-        elev_min = self.system_configuration.world_place_tile_min_elevation
-        elev_max = self.system_configuration.grid.maximum_elevation_value
-        elev = data.get("elevation")
-        if isinstance(elev, (int, float)):
-            data = dict(data)
-            data["elevation"] = max(float(elev_min), min(float(elev), float(elev_max)))
+        data = normalize_tile_dict_for_world(
+            data,
+            system_configuration=self.system_configuration,
+        )
 
         tile = self.tiles.get((x, y))
         if tile is None:

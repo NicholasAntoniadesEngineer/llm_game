@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+from core.errors import AgentGenerationError
+
+if TYPE_CHECKING:
+    from core.config import Config
 
 logger = logging.getLogger("eternal.validation")
 
 
-def validate_master_plan(master_plan: list) -> list[dict]:
+def validate_master_plan(
+    master_plan: list,
+    *,
+    system_configuration: "Config | None" = None,
+) -> list[dict]:
     """
     Keep structures with at least one tile; enforce global uniqueness of (x, y)
     — first claim wins. Logs dropped duplicates.
@@ -61,6 +71,19 @@ def validate_master_plan(master_plan: list) -> list[dict]:
             cleaned.append(out)
 
     if dup_dropped:
+        if (
+            system_configuration is not None
+            and system_configuration.master_plan_duplicate_tile_policy_string == "fail"
+        ):
+            raise AgentGenerationError(
+                "bad_model_output",
+                "Master plan contains "
+                + str(dup_dropped)
+                + " duplicate tile assignment(s); first duplicate at "
+                + str(dup_first)
+                + " in "
+                + (dup_first_structure_name or "?"),
+            )
         logger.warning(
             "Master plan: dropped %s duplicate tile assignments (first structure wins per tile); "
             "first duplicate at %s in %s",

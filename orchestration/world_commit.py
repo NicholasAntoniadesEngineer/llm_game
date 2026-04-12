@@ -1,7 +1,7 @@
-"""Single path for orchestration-driven tile writes: normalize payloads then place.
+"""Orchestration-driven tile writes: validate coordinates then ``WorldState.place_tile``.
 
-Elevation clamp matches ``WorldState.place_tile`` (config min/max). Callers that bypass
-this module (persistence restore, road rasterization) still rely on ``place_tile`` clamp.
+Elevation clamp is implemented once in ``world.tile_payload.normalize_tile_dict_for_world``;
+``WorldState.place_tile`` applies it for every path (orchestration, roads, persistence).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Sequence
 
 from world.state import WorldState
+from world.tile_payload import normalize_tile_dict_for_world
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -22,20 +23,6 @@ class TileApplyBatchResult:
     placed_tile_dicts: list[dict]
     attempted_coordinate_pairs: int
     skipped_invalid_coordinates: int
-
-
-def normalize_tile_dict_for_world(tile_data: dict, *, system_configuration: Config) -> dict:
-    """Shallow copy with numeric elevation clamped to configured world bounds.
-
-    Same rule as ``WorldState.place_tile`` so pre-normalization is idempotent there.
-    """
-    out = dict(tile_data)
-    elev_min = system_configuration.world_place_tile_min_elevation
-    elev_max = system_configuration.grid.maximum_elevation_value
-    elev = out.get("elevation")
-    if isinstance(elev, (int, float)):
-        out["elevation"] = max(float(elev_min), min(float(elev), float(elev_max)))
-    return out
 
 
 def apply_tile_placements(

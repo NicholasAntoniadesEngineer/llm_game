@@ -12,7 +12,7 @@ from server.state import AppState
 from server.broadcast import broadcast
 from server.app import build_app, _build_llm_settings_payload
 from world.state import WorldState
-from tests.conftest import SYSTEM_CONFIGURATION
+from tests.conftest import APPLICATION_SERVICES, SYSTEM_CONFIGURATION
 
 
 # ---------------------------------------------------------------------------
@@ -22,7 +22,10 @@ from tests.conftest import SYSTEM_CONFIGURATION
 
 class TestAppState:
     def test_initial_state(self):
-        state = AppState(system_configuration=SYSTEM_CONFIGURATION)
+        state = AppState(
+            system_configuration=SYSTEM_CONFIGURATION,
+            application_services=APPLICATION_SERVICES,
+        )
         assert isinstance(state.world, WorldState)
         assert isinstance(state.bus, MessageBus)
         assert state.ws_connections == []
@@ -35,7 +38,10 @@ class TestAppState:
         assert state.engine_is_running is None
 
     def test_asset_version_is_timestamp(self):
-        state = AppState(system_configuration=SYSTEM_CONFIGURATION)
+        state = AppState(
+            system_configuration=SYSTEM_CONFIGURATION,
+            application_services=APPLICATION_SERVICES,
+        )
         # Should be a numeric string
         assert state.asset_version.isdigit()
 
@@ -48,7 +54,10 @@ class TestAppState:
 class TestBroadcast:
     @pytest.fixture
     def state(self):
-        return AppState(system_configuration=SYSTEM_CONFIGURATION)
+        return AppState(
+            system_configuration=SYSTEM_CONFIGURATION,
+            application_services=APPLICATION_SERVICES,
+        )
 
     @pytest.mark.asyncio
     async def test_chat_message_appended_to_history(self, state):
@@ -112,7 +121,10 @@ class TestFastAPIEndpoints:
     @pytest.fixture
     def app_and_state(self):
         cfg = SYSTEM_CONFIGURATION
-        state = AppState(system_configuration=cfg)
+        state = AppState(
+            system_configuration=cfg,
+            application_services=APPLICATION_SERVICES,
+        )
         app = build_app(state, system_configuration=cfg)
         return app, state
 
@@ -247,7 +259,10 @@ class TestFastAPIEndpoints:
 
 class TestBuildLlmSettingsPayload:
     def test_payload_structure(self):
-        payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
+        payload = _build_llm_settings_payload(
+            SYSTEM_CONFIGURATION,
+            APPLICATION_SERVICES,
+        )
         assert payload["type"] == "llm_settings"
         assert "agents" in payload
         assert "labels" in payload
@@ -256,7 +271,10 @@ class TestBuildLlmSettingsPayload:
         assert "model_id_suggestions" in payload
 
     def test_agents_have_provider_and_model(self):
-        payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
+        payload = _build_llm_settings_payload(
+            SYSTEM_CONFIGURATION,
+            APPLICATION_SERVICES,
+        )
         for key, row in payload["agents"].items():
             assert "provider" in row
             assert "model" in row
@@ -265,14 +283,25 @@ class TestBuildLlmSettingsPayload:
         """openai_api_key should be replaced with has_openai_api_key."""
         from agents import llm_routing as llm_agents
 
-        orig = llm_agents.get_runtime_overrides()
-        llm_agents.set_runtime_overrides({
-            llm_agents.KEY_URBANISTA: {"openai_api_key": "sk-secret"},
-        })
+        orig = llm_agents.get_runtime_overrides(
+            application_services=APPLICATION_SERVICES,
+        )
+        llm_agents.set_runtime_overrides(
+            {
+                llm_agents.KEY_URBANISTA: {"openai_api_key": "sk-secret"},
+            },
+            application_services=APPLICATION_SERVICES,
+        )
         try:
-            payload = _build_llm_settings_payload(SYSTEM_CONFIGURATION)
+            payload = _build_llm_settings_payload(
+                SYSTEM_CONFIGURATION,
+                APPLICATION_SERVICES,
+            )
             agent = payload["agents"][llm_agents.KEY_URBANISTA]
             assert "openai_api_key" not in agent
             assert agent.get("has_openai_api_key") is True
         finally:
-            llm_agents.set_runtime_overrides(orig)
+            llm_agents.set_runtime_overrides(
+                orig,
+                application_services=APPLICATION_SERVICES,
+            )

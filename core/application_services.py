@@ -1,16 +1,16 @@
-"""Process-wide application services: token accounting, LLM routing tables, broadcast.
+"""Single application context: CSV-backed ``Config`` plus runtime LLM routing and token store.
 
-``system_configuration`` is stored here only for startup convenience (LLM routing bootstrap,
-token summaries). **Disk IO** (``core.persistence``), ``orchestration.reference_db``, and build
-code paths must take an explicit ``system_configuration: Config`` argument so tests and tools
-never rely on an implicit global config resolution.
+The composition root (``main.py``, tests ``conftest``) constructs one ``ApplicationServices``
+instance and injects it into ``AppState``, ``BuildEngine``, agents, and HTTP handlers.
+Library code must not call ``get_application_services()`` for correctness paths; use the
+injected bundle. ``get_application_services`` remains for narrow server/bootstrap glue only.
 """
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeAlias
 
 from core.config import Config
 from core.errors import EternalCitiesError
@@ -28,6 +28,8 @@ class ApplicationServices:
     runtime_llm_overrides_dictionary: dict[str, dict[str, Any]] = field(default_factory=dict)
     broadcast_async: Callable[..., Awaitable[Any]] | None = None
 
+
+ApplicationContext: TypeAlias = ApplicationServices
 
 _application_services: ApplicationServices | None = None
 
@@ -58,7 +60,9 @@ def get_application_services() -> ApplicationServices:
     return _application_services
 
 
-def set_broadcast_async(broadcast_async: Callable[..., Awaitable[Any]]) -> None:
+def set_broadcast_async(
+    application_services: ApplicationServices,
+    broadcast_async: Callable[..., Awaitable[Any]],
+) -> None:
     """Attach the UI broadcast coroutine after ``AppState`` exists (avoids import cycles)."""
-    svc = get_application_services()
-    svc.broadcast_async = broadcast_async
+    application_services.broadcast_async = broadcast_async

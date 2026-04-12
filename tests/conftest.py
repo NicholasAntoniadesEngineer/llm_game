@@ -12,11 +12,11 @@ from core.config import load_config
 from core.token_usage import TokenUsageStore
 
 SYSTEM_CONFIGURATION = load_config()
-configure_application_services(
+APPLICATION_SERVICES = configure_application_services(
     system_configuration=SYSTEM_CONFIGURATION,
     token_usage_store=TokenUsageStore(),
 )
-apply_llm_routing_from_config(SYSTEM_CONFIGURATION)
+apply_llm_routing_from_config(SYSTEM_CONFIGURATION, APPLICATION_SERVICES)
 
 
 @pytest.fixture(scope="session")

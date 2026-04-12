@@ -97,13 +97,6 @@ class TokenUsageStore:
         return out
 
 
-def get_token_usage_store() -> TokenUsageStore:
-    """Token accounting store from the configured application services."""
-    from core.application_services import get_application_services
-
-    return get_application_services().token_usage_store
-
-
 def _agent_keys_by_ui_group() -> dict[str, list[str]]:
     """Map toolbar agent names to underlying LLM routing keys (single source of truth)."""
     from agents.llm_routing import (
@@ -123,9 +116,9 @@ def _agent_keys_by_ui_group() -> dict[str, list[str]]:
     }
 
 
-def aggregate_for_ui() -> dict[str, dict[str, int]]:
+def aggregate_for_ui(token_usage_store: TokenUsageStore) -> dict[str, dict[str, int]]:
     """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
-    store = get_token_usage_store()
+    store = token_usage_store
     detail = store.to_payload()
     groups = _agent_keys_by_ui_group()
     out: dict[str, dict[str, int]] = {}
@@ -157,7 +150,11 @@ def estimate_tokens_from_text(text: str, *, system_configuration: "Config") -> i
     return max(1, int(len(text) / divisor))
 
 
-def get_token_summary(*, system_configuration: "Config") -> dict:
+def get_token_summary(
+    *,
+    system_configuration: "Config",
+    token_usage_store: TokenUsageStore,
+) -> dict:
     """Return a comprehensive per-agent breakdown for the UI dashboard.
 
     Includes:
@@ -166,7 +163,7 @@ def get_token_summary(*, system_configuration: "Config") -> dict:
     - Average tokens per building (urbanista calls)
     - Estimated cost
     """
-    store = get_token_usage_store()
+    store = token_usage_store
     detail = store.to_payload()
 
     # Per-agent detail with call counts
