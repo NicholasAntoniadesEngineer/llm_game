@@ -1,33 +1,25 @@
-"""Terrain classification and slope analysis (thresholds from system_config.csv)."""
+"""Procedural terrain math and environment finalization helpers.
+
+All classification thresholds and stability modifiers are passed in from
+``Config`` / ``system_config.csv`` — this module contains no standalone numeric
+policy defaults for terrain rules.
+"""
 
 from __future__ import annotations
 
 import math
-from enum import Enum
-from typing import List, Tuple
+from typing import TYPE_CHECKING, List, Tuple
 
+from world.tile import TerrainType
 
-class TerrainType(Enum):
-    """Terrain classification values written to tiles and used for stability."""
-
-    FLAT = "flat"
-    GENTLE_SLOPE = "gentle_slope"
-    STEEP_SLOPE = "steep_slope"
-    CLIFF = "cliff"
-    VALLEY = "valley"
-    RIDGE = "ridge"
-    PLATEAU = "plateau"
-    DEPRESSION = "depression"
-    WATER = "water"
-    MARSH = "marsh"
-    SAND = "sand"
-    ROCK = "rock"
-    FOREST = "forest"
-    URBAN = "urban"
+if TYPE_CHECKING:
+    from core.config import Config
+    from world.blueprint import CityBlueprint
+    from world.state import WorldState
 
 
 class TerrainAnalysis:
-    """Terrain analysis and classification for blueprint elevation passes."""
+    """Terrain classification and slope analysis (thresholds supplied by caller)."""
 
     @staticmethod
     def classify_terrain(
@@ -40,7 +32,7 @@ class TerrainAnalysis:
         temperature: float = 20.0,
         roughness: float = 0.0,
     ) -> TerrainType:
-        """Classify terrain type based on multiple factors (thresholds from system_config.csv)."""
+        """Classify terrain type based on multiple factors."""
 
         tc = classification_thresholds
         water_max = float(tc["water_elevation_max"])
@@ -82,11 +74,7 @@ class TerrainAnalysis:
 
     @staticmethod
     def calculate_slope(elevation: float, neighbors: List[float]) -> Tuple[float, float]:
-        """Calculate slope magnitude and aspect from neighboring elevations.
-
-        ``neighbors`` must be eight floats in fixed ring order:
-        NW, N, NE, W, E, SW, S, SE — same order as ``CityBlueprint._get_neighbor_elevations``.
-        """
+        """Slope magnitude and aspect from eight neighbor elevations (NW,N,NE,W,E,SW,S,SE)."""
         if len(neighbors) < 8:
             return 0.0, 0.0
 
@@ -104,7 +92,7 @@ class TerrainAnalysis:
 
     @staticmethod
     def calculate_roughness(elevations: List[float]) -> float:
-        """Calculate terrain roughness from elevation variance."""
+        """Terrain roughness from elevation variance."""
         if len(elevations) < 2:
             return 0.0
 
@@ -123,7 +111,7 @@ class TerrainAnalysis:
         terrain_type_modifiers: dict[str, float],
         soil_type_modifiers: dict[str, float],
     ) -> float:
-        """Assess terrain stability for construction (modifiers from system_config.csv)."""
+        """Assess terrain stability for construction."""
         base_stability = 1.0
         tc = classification_thresholds
         slope_threshold = float(tc["assess_stability_slope_threshold"])
@@ -146,3 +134,68 @@ class TerrainAnalysis:
             base_stability *= 0.9
 
         return max(0.0, min(1.0, base_stability))
+
+
+def generate_terrain(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    *,
+    system_configuration: Config,
+) -> int:
+    """Run smoothed elevation and full per-tile ``terrain_analysis`` on placed tiles."""
+    return blueprint.populate_elevation(world, system_configuration=system_configuration)
+
+
+def resolve_road_water_conflicts(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    *,
+    system_configuration: Config,
+) -> None:
+    """Reserved hook for procedural bridge insertion across water channels.
+
+    Road rasterization already consults ``water_channel_tile_set`` to avoid
+    painting roads into channels; additional graph-level repairs belong here.
+    """
+    _ = world, blueprint, system_configuration
+
+
+def compute_valid_buildable_cells(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    districts: list[dict] | None,
+    *,
+    system_configuration: Config,
+) -> dict[str, set[tuple[int, int]]]:
+    """Per-district cells inside each region rect that are not water channels or roads."""
+    out: dict[str, set[tuple[int, int]]] = {}
+    if not districts:
+        return out
+    water_ch = blueprint.water_channel_tile_set(system_configuration=system_configuration)
+    road_xy: set[tuple[int, int]] = {
+        (tx, ty)
+        for (tx, ty), tile in world.tiles.items()
+        if tile.terrain == "road" or (tile.building_type or "").lower() == "road"
+    }
+    for d in districts:
+        name = str(d.get("name", "")).strip()
+        if not name:
+            continue
+        region = d.get("region") or {}
+        try:
+            x1 = int(region["x1"])
+            y1 = int(region["y1"])
+            x2 = int(region["x2"])
+            y2 = int(region["y2"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lo_x, hi_x = (x1, x2) if x1 <= x2 else (x2, x1)
+        lo_y, hi_y = (y1, y2) if y1 <= y2 else (y2, y1)
+        cells: set[tuple[int, int]] = set()
+        for gx in range(lo_x, hi_x + 1):
+            for gy in range(lo_y, hi_y + 1):
+                if (gx, gy) in water_ch or (gx, gy) in road_xy:
+                    continue
+                cells.add((gx, gy))
+        out[name] = cells
+    return out

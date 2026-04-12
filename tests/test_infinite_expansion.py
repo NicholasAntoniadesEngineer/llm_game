@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
 
 from world.state import WorldState
-from world.tiles import Tile
+from world.tile import Tile
 
 from tests.conftest import SYSTEM_CONFIGURATION
 

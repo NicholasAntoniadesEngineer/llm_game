@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import deque
 from typing import TYPE_CHECKING
 
+from world.tile import Tile
 from world.tile_payload import normalize_tile_dict_for_world
-from world.tiles import Tile
 
 if TYPE_CHECKING:
     from core.config import Config

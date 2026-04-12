@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any, List
 
 from core.config import Config
 from core.errors import ConfigLoadError
-from core.terrain_analysis import TerrainAnalysis
 from orchestration.district_inference import infer_district_character_from_description
+from world.environment import TerrainAnalysis
 from world.roads import compute_elevation, smooth_elevation_max_gradient, water_features_channel_tiles
 
 if TYPE_CHECKING:
@@ -49,6 +49,12 @@ class CityBlueprint:
     # Sightlines
     vista_corridors: list[dict] = field(default_factory=list)
     # {road_name, terminus_building, points}
+
+    # Procedural environment (elevation, roads, water masks) before structure placement
+    environment_finalized: bool = False
+    road_tiles: set[tuple[int, int]] = field(default_factory=set)
+    water_channel_tiles: set[tuple[int, int]] = field(default_factory=set)
+    valid_buildable_cells: dict[str, set[tuple[int, int]]] = field(default_factory=dict)
 
     _water_adjacency_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
     _water_channel_tile_cache: set[tuple[int, int]] | None = field(default=None, init=False, repr=False)
@@ -261,6 +267,64 @@ class CityBlueprint:
             system_configuration=system_configuration,
             update_full_terrain_analysis=False,
         )
+
+    def refresh_environment_artifact_caches(
+        self,
+        world: WorldState,
+        *,
+        system_configuration: Config,
+        districts: list[dict] | None = None,
+    ) -> None:
+        """Recompute ``road_tiles``, water masks, and district buildable sets from current ``world``."""
+        from world.environment import compute_valid_buildable_cells
+
+        self.road_tiles = {
+            (tx, ty)
+            for (tx, ty), tile in world.tiles.items()
+            if tile.terrain == "road"
+        }
+        self.water_channel_tiles = set(
+            self.water_channel_tile_set(system_configuration=system_configuration)
+        )
+        self.valid_buildable_cells = compute_valid_buildable_cells(
+            world,
+            self,
+            districts,
+            system_configuration=system_configuration,
+        )
+
+    def finalize_environment(
+        self,
+        world: WorldState,
+        *,
+        system_configuration: Config,
+        districts: list[dict] | None = None,
+    ) -> tuple[int, int]:
+        """Elevation + terrain analysis, water/road conflict pass, road raster, derived masks.
+
+        Safe to call again when ``environment_finalized`` is already true (refreshes caches only).
+        Returns ``(road_tile_writes, elevation_tiles_updated)`` from the procedural passes.
+        """
+        from world.environment import generate_terrain, resolve_road_water_conflicts
+
+        if self.environment_finalized:
+            self.refresh_environment_artifact_caches(
+                world,
+                system_configuration=system_configuration,
+                districts=districts,
+            )
+            return (len(self.road_tiles), 0)
+
+        elev_count = generate_terrain(world, self, system_configuration=system_configuration)
+        resolve_road_water_conflicts(world, self, system_configuration=system_configuration)
+        road_count = self.rasterize_roads(world)
+        self.environment_finalized = True
+        self.refresh_environment_artifact_caches(
+            world,
+            system_configuration=system_configuration,
+            districts=districts,
+        )
+        return (road_count, elev_count)
 
     # ── Roads ─────────────────────────────────────────────────────────
 
@@ -728,6 +792,7 @@ class CityBlueprint:
             "roof_material": self.roof_material,
             "district_characters": self.district_characters,
             "vista_corridors": self.vista_corridors,
+            "environment_finalized": self.environment_finalized,
         }
 
     @classmethod
@@ -768,6 +833,7 @@ class CityBlueprint:
         bp.roof_material = _mat("roof_material", bp.roof_material)
         bp.district_characters = d.get("district_characters", {})
         bp.vista_corridors = d.get("vista_corridors", [])
+        bp.environment_finalized = bool(d.get("environment_finalized", False))
         return bp
 
     @classmethod

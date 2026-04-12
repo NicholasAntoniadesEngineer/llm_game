@@ -4,7 +4,7 @@ import pytest
 
 from core.errors import ConfigLoadError
 from orchestration.district_model import parse_district_dict
-from orchestration.master_plan_geometry import (
+from orchestration.placement import (
     intra_plan_tile_overlaps,
     normalize_master_plan_tile_coordinates,
 )

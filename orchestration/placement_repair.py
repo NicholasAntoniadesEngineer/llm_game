@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from orchestration.placement import _cardinally_adjacent_to_set, _footprint
 
@@ -49,3 +50,20 @@ def prune_bridges_not_adjacent_to_water_when_water_exists(master_plan: list) -> 
         master_plan.clear()
         master_plan.extend(kept)
     return removed
+
+
+def repair_placement(
+    master_plan: list[dict[str, Any]],
+    *,
+    region: dict[str, int],
+    max_radius_tiles: int = 12,
+) -> list[dict[str, Any]]:
+    """Deterministic spiral-space search for local bridge / connector fixes (placeholder pass-through).
+
+    ``region`` bounds the search; ``max_radius_tiles`` caps work for future extensions.
+    The current implementation returns a shallow copy after ``prune_bridges`` invariants.
+    """
+    _ = region, max_radius_tiles
+    out = list(master_plan)
+    prune_bridges_not_adjacent_to_water_when_water_exists(out)
+    return out

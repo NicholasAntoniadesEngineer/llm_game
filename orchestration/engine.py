@@ -342,14 +342,17 @@ class BuildEngine:
                             system_configuration=self.system_configuration,
                         )
                 if self.blueprint:
-                    # Pre-rasterize roads as immutable infrastructure
-                    road_count = self.blueprint.rasterize_roads(self.world)
-                    # Apply elevation from hills data
-                    elev_count = self.blueprint.populate_elevation(
-                        self.world, system_configuration=self.system_configuration
+                    road_count, elev_count = self.blueprint.finalize_environment(
+                        self.world,
+                        system_configuration=self.system_configuration,
+                        districts=self.districts,
                     )
                     if road_count or elev_count:
-                        logger.info("Blueprint applied: %d road tiles, %d elevation tiles", road_count, elev_count)
+                        logger.info(
+                            "Blueprint environment finalized: %d road writes, %d elevation tiles",
+                            road_count,
+                            elev_count,
+                        )
                         # Broadcast terrain data (hills/water) for 3D terrain mesh
                         await self.broadcast({
                             "type": "terrain_data",

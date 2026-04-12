@@ -33,6 +33,7 @@ class BuildGenerationEnginePort(Protocol):
     districts: list
     running: bool
     world: WorldState
+    blueprint: Any
     system_configuration: Config
     _wave_one_building_types_set: frozenset
     tasks: Any

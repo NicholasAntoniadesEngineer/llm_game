@@ -615,18 +615,22 @@ class Generators:
         if cached_plan is not None:
             if isinstance(cached_plan, list) and len(cached_plan) > 0:
                 if all(isinstance(s, dict) and "name" in s for s in cached_plan):
-                    # Sanity: if district lists many buildings but cache has very few, re-survey
                     expected = len(district.get("buildings", []))
                     if expected > 3 and len(cached_plan) < 3:
                         logger.warning(
-                            "Survey cache for %s has only %d structures but district lists %d buildings — re-surveying",
-                            district_key, len(cached_plan), expected,
+                            "Survey cache for %s has only %d structures but district lists %d buildings — "
+                            "keeping cache (clear surveys cache manually if a full re-survey is required)",
+                            district_key,
+                            len(cached_plan),
+                            expected,
                         )
-                    else:
-                        logger.info("Survey cache hit: %s (%d structures)", district_key, len(cached_plan))
-                        await self._chat("cartographus", "survey", f"Using cached survey of {district_key} ({len(cached_plan)} structures).")
-                        return cached_plan
-            # If validation fails, fall through to re-survey
+                    logger.info("Survey cache hit: %s (%d structures)", district_key, len(cached_plan))
+                    await self._chat(
+                        "cartographus",
+                        "survey",
+                        f"Using cached survey of {district_key} ({len(cached_plan)} structures).",
+                    )
+                    return cached_plan
             logger.warning("Survey cache invalid for %s — re-surveying", district_key)
 
         if district_index == 0 and self._fused_seed_master_plan:

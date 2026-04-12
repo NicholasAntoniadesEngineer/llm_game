@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
+
+from core.config import Config
+from world.blueprint import CityBlueprint
+from world.state import WorldState
 
 logger = logging.getLogger("eternal.placement")
 
@@ -127,3 +132,73 @@ def check_functional_placement(master_plan: list) -> list[str]:
 def log_functional_placement_warnings(master_plan: list, context: str) -> None:
     for w in check_functional_placement(master_plan):
         logger.warning("Functional placement [%s]: %s", context, w)
+
+
+# --- Master-plan geometry (shared by build pipeline; deterministic only) ---
+
+
+def normalize_master_plan_tile_coordinates(master_plan: list[dict[str, Any]]) -> int:
+    """Coerce each tile ``x``/``y`` to ``int`` in-place. Returns count of tiles touched."""
+    touched = 0
+    for struct in master_plan:
+        tiles = struct.get("tiles")
+        if not isinstance(tiles, list):
+            continue
+        for t in tiles:
+            if not isinstance(t, dict):
+                continue
+            try:
+                t["x"] = int(t["x"])
+                t["y"] = int(t["y"])
+                touched += 1
+            except (KeyError, TypeError, ValueError):
+                continue
+    return touched
+
+
+def intra_plan_tile_overlaps(master_plan: list[dict[str, Any]]) -> list[str]:
+    """Return human-readable overlap descriptions (empty list if none)."""
+    all_tiles: dict[tuple[int, int], str] = {}
+    messages: list[str] = []
+    for struct in master_plan:
+        sname = str(struct.get("name", "?"))
+        for t in struct.get("tiles", []):
+            if not isinstance(t, dict):
+                continue
+            try:
+                key = (int(t["x"]), int(t["y"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if key in all_tiles:
+                messages.append(
+                    f"Tile overlap: {sname!r} and {all_tiles[key]!r} at {key}"
+                )
+            else:
+                all_tiles[key] = sname
+    return messages
+
+
+def generate_valid_candidates(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    district_key: str,
+    *,
+    system_configuration: Config,
+) -> list[tuple[int, int]]:
+    """Procedural candidate cells from ``CityBlueprint.valid_buildable_cells`` (deterministic)."""
+    _ = world, system_configuration
+    cells = (blueprint.valid_buildable_cells or {}).get(district_key) or set()
+    return sorted(cells)
+
+
+def place_buildings_in_district(
+    world: WorldState,
+    blueprint: CityBlueprint,
+    district_key: str,
+    structures: list[dict[str, Any]],
+    *,
+    system_configuration: Config,
+) -> int:
+    """Reserved batch placement hook; district wave still commits via ``apply_tile_placements``."""
+    _ = world, blueprint, district_key, structures, system_configuration
+    return 0

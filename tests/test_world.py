@@ -2,7 +2,7 @@
 
 import pytest
 
-from world.tiles import Tile
+from world.tile import Building, Tile
 from world.state import WorldState
 from world.blueprint import CityBlueprint
 from world.roads import rasterize_road, road_dict_allows_water_crossing, water_features_channel_tiles
@@ -28,7 +28,7 @@ class TestTile:
         assert t.spec is None
 
     def test_to_dict_includes_required_keys(self):
-        t = Tile(x=5, y=10, terrain="building", building_name="Temple")
+        t = Tile(x=5, y=10, terrain="building", building=Building("Temple", "building", "", {}))
         d = t.to_dict()
         assert d["x"] == 5
         assert d["y"] == 10
@@ -48,7 +48,11 @@ class TestTile:
         assert "terrain" in d
 
     def test_to_dict_includes_spec_when_set(self):
-        t = Tile(x=0, y=0, spec={"components": [{"type": "podium"}]})
+        t = Tile(
+            x=0,
+            y=0,
+            building=Building("", "building", "", {"components": [{"type": "podium"}]}),
+        )
         d = t.to_dict()
         assert d["spec"] == {"components": [{"type": "podium"}]}
 

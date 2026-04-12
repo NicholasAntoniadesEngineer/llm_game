@@ -47,6 +47,7 @@ from core.persistence import (
     save_state,
     validate_blueprint_tile_invariants,
 )
+from core.quick_integrity import quick_integrity_check
 from core.application_services import configure_application_services, set_broadcast_async
 from core.config import load_config
 from core.bootstrap import apply_llm_routing_from_config
@@ -392,10 +393,15 @@ if saved:
     engine.build_wave_phase = loaded_build_wave_phase
     engine.district_build_cursor = loaded_district_build_cursor
     state.run_session.scenario = loaded_scenario
-    for msg in validate_blueprint_tile_invariants(
-        state.world, load_blueprint(system_configuration=system_configuration)
-    ):
+    _bp_raw = load_blueprint(system_configuration=system_configuration)
+    for msg in validate_blueprint_tile_invariants(state.world, _bp_raw):
         logging.warning("Blueprint invariant: %s", msg)
+    for note in quick_integrity_check(
+        state.world,
+        blueprint_dict=_bp_raw if isinstance(_bp_raw, dict) else None,
+        restored_from_save=True,
+    ):
+        logging.warning("Post-restore integrity: %s", note)
     logging.info(
         "Restored from disk: district #%s, %s districts, %s chat messages — world + scenario kept for restart",
         district_index,

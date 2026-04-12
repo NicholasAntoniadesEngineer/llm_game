@@ -1,4 +1,9 @@
-"""Named, ordered pre-place steps for district master plans (trace tags only; semantics unchanged)."""
+"""Named, ordered pre-place steps for district master plans (trace tags only; semantics unchanged).
+
+Structures are filtered per footprint (``filter_already_occupied``); there is no loop that
+discards an entire plan and re-fetches a survey — invalid cache or empty plans surface as
+logged skips or hard failures upstream.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +14,12 @@ from typing import Awaitable, Callable, Sequence
 from core.errors import AgentGenerationError
 from core.run_log import trace_event
 from orchestration.engine_ports import MasterPlanPreplaceEnginePort
-from orchestration.master_plan_geometry import (
+from orchestration.placement import (
+    check_functional_placement,
     intra_plan_tile_overlaps,
+    log_functional_placement_warnings,
     normalize_master_plan_tile_coordinates,
 )
-from orchestration.placement import check_functional_placement, log_functional_placement_warnings
 from orchestration.placement_repair import prune_bridges_not_adjacent_to_water_when_water_exists
 
 logger = logging.getLogger("eternal.engine")
@@ -57,8 +63,7 @@ async def _step_validate_master_plan(ctx: MasterPlanPreplaceContext) -> None:
         list(ctx.master_plan),
         f"District {ctx.district_key!r} master plan",
     )
-    ctx.master_plan.clear()
-    ctx.master_plan.extend(validated)
+    ctx.master_plan[:] = validated
 
 
 async def _step_normalize_master_plan_tile_coordinates(
@@ -140,8 +145,7 @@ async def _step_filter_already_occupied_structures(ctx: MasterPlanPreplaceContex
             len(filtered_plan),
             len(ctx.master_plan),
         )
-        ctx.master_plan.clear()
-        ctx.master_plan.extend(filtered_plan)
+        ctx.master_plan[:] = filtered_plan
 
 
 MASTER_PLAN_PREPLACE_STEPS: tuple[BuildPipelineStep, ...] = (
