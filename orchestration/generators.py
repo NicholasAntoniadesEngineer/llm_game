@@ -15,6 +15,7 @@ from core.config import (
     TERRAIN_MAX_GRADIENT,
 )
 from core.run_log import trace_event
+from core.fingerprint import district_survey_key, ensure_district_ids
 from core.persistence import (
     load_districts_cache,
     load_surveys_cache,
@@ -106,14 +107,6 @@ class Generators:
     @property
     def _district_palettes(self):
         return self.engine._district_palettes
-
-    @property
-    def _map_refine_task(self):
-        return self.engine.tasks._map_refine_task
-
-    @_map_refine_task.setter
-    def _map_refine_task(self, value):
-        self.engine.tasks._map_refine_task = value
 
     async def _chat(self, *args, **kwargs):
         return await self.engine._chat(*args, **kwargs)
@@ -312,30 +305,36 @@ class Generators:
 
     async def discover_districts(self) -> bool:
         """Load cached layout, or run phase-1 skeleton planner then background map refine."""
-        cached = load_districts_cache()
+        scen = self.engine.scenario
+        if not isinstance(scen, dict):
+            logger.error("discover_districts: RunSession.scenario is missing or not a dict")
+            return False
+        run_fp = self.engine.run_fingerprint
+        cached = load_districts_cache(expected_run_fingerprint=run_fp)
         if cached:
             self.districts, map_desc = cached
+            ensure_district_ids(self.districts)
             self._fused_seed_master_plan = None
             logger.info(f"Using cached districts: {len(self.districts)}")
             trace_event("discovery", "Using cached districts layout", districts=len(self.districts))
             self.engine.update_trace_snapshot(phase="discover_cached", districts=len(self.districts))
             await self._chat("cartographus", "research",
-                f"Using cached survey of {config_module.SCENARIO['location']} — {len(self.districts)} districts mapped.")
+                f"Using cached survey of {scen['location']} — {len(self.districts)} districts mapped.")
             if map_desc:
                 await self.broadcast({"type": "map_description", "description": map_desc})
             asyncio.create_task(self.find_map_image())
             return True
 
-        trace_event("discovery", "No district cache — running skeleton planner (long-running)", location=config_module.SCENARIO.get("location", ""))
+        trace_event("discovery", "No district cache — running skeleton planner (long-running)", location=scen.get("location", ""))
         self.engine.update_trace_snapshot(phase="skeleton_planner", step="before_generate")
 
         await self.broadcast({
             "type": "loading",
             "agent": "cartographus",
-            "message": f"Mapping districts for {config_module.SCENARIO['location']}...",
+            "message": f"Mapping districts for {scen['location']}...",
         })
         await self._chat("cartographus", "research",
-            f"Phase 1 — district skeleton for {config_module.SCENARIO['location']} ({config_module.SCENARIO['period']}). "
+            f"Phase 1 — district skeleton for {scen['location']} ({scen['period']}). "
             f"A detailed map narrative will follow in the background while we build.")
         await self._set_status(
             "cartographus",
@@ -343,12 +342,12 @@ class Generators:
             detail="Mapping districts — first AI pass can take several minutes.",
         )
         plan_prompt = (
-            f"Research and map the city of {config_module.SCENARIO['location']} during {config_module.SCENARIO['period']}.\n"
-            f"Time span: {config_module.SCENARIO['year_start']} to {config_module.SCENARIO['year_end']}.\n"
-            f"Ruler context: {config_module.SCENARIO['ruler']}.\n\n"
-            f"ABOUT THIS CITY:\n{config_module.SCENARIO.get('description', '')}\n"
-            f"Key features: {config_module.SCENARIO.get('features', '')}\n"
-            f"Layout notes: {config_module.SCENARIO.get('grid_note', '')}\n\n"
+            f"Research and map the city of {scen['location']} during {scen['period']}.\n"
+            f"Time span: {scen['year_start']} to {scen['year_end']}.\n"
+            f"Ruler context: {scen['ruler']}.\n\n"
+            f"ABOUT THIS CITY:\n{scen.get('description', '')}\n"
+            f"Key features: {scen.get('features', '')}\n"
+            f"Layout notes: {scen.get('grid_note', '')}\n\n"
             f"Grid size: {GRID_WIDTH}x{GRID_HEIGHT} (each tile ≈ 10 meters = {GRID_WIDTH*10}m x {GRID_HEIGHT*10}m).\n\n"
             f"RESEARCH DEEPLY: What districts existed at this exact time? Which buildings had been built? "
             f"Which hadn't been constructed yet? What was the terrain like?\n\n"
@@ -380,7 +379,11 @@ class Generators:
                 # Second attempt or non-retriable
                 await self._set_status("cartographus", "idle")
                 if isinstance(err, asyncio.TimeoutError):
-                    await self._pause_for_api_issue("network", "Skeleton planner timed out after 3 minutes.", "cartographus")
+                    await self._pause_for_api_issue(
+                        "network",
+                        "Skeleton planner timed out after 5 minutes (300s wait limit).",
+                        "cartographus",
+                    )
                 else:
                     await self._pause_for_api_issue(err.pause_reason, err.pause_detail, "cartographus")
                 return False
@@ -429,6 +432,8 @@ class Generators:
             )
             return False
 
+        ensure_district_ids(self.districts)
+
         seed = result.get("seed_master_plan")
         if isinstance(seed, list) and len(seed) > 0:
             self._fused_seed_master_plan = seed
@@ -436,15 +441,15 @@ class Generators:
         else:
             self._fused_seed_master_plan = None
 
-        save_districts_cache(self.districts, "")
-        self._map_refine_task = asyncio.create_task(self.refine_map_description_background())
+        save_districts_cache(self.districts, "", run_fingerprint=self.engine.run_fingerprint)
+        self.engine.tasks.start_map_refine_background(self.refine_map_description_background())
         logger.info("Map refine started immediately after skeleton (non-blocking).")
         asyncio.create_task(self.find_map_image())
         return True
 
     async def expand_city(self) -> bool:
         """Discover new districts at the city edges. Returns True if new districts found."""
-        scenario = config_module.SCENARIO
+        scenario = self.engine.scenario
         if not scenario:
             return False
 
@@ -464,8 +469,9 @@ class Generators:
             existing_regions.append(r)
         existing_str = "\n".join(existing) if existing else "  (none)"
 
-        # Collect occupied tile positions for overlap checking
-        occupied_tiles = set(self.world.tiles.keys())
+        occupied_tiles: set[tuple[int, int]] = set()
+        for ck in self.world.chunk_keys_with_tiles():
+            occupied_tiles |= self.world.chunk_tile_coords(ck)
 
         # Build geography context from blueprint (if available)
         bp = self.engine.blueprint
@@ -576,13 +582,20 @@ class Generators:
             nd["expansion_generation"] = self.engine.generation + 1
             self.districts.append(nd)
 
+        ensure_district_ids(self.districts)
+
         await self._chat("cartographus", "info",
                          f"Discovered {len(validated)} new districts: "
                          + ", ".join(d['name'] for d in validated))
         await self._set_status("cartographus", "idle")
 
         # Save expanded districts cache
-        await asyncio.to_thread(save_districts_cache, self.districts, "")
+        await asyncio.to_thread(
+            save_districts_cache,
+            self.districts,
+            "",
+            run_fingerprint=self.engine.run_fingerprint,
+        )
         # Align index.json with expanded district list (crash safety before new tiles)
         await asyncio.to_thread(
             save_state,
@@ -591,6 +604,8 @@ class Generators:
             self.engine.district_index,
             self.engine.districts,
             self.engine.generation,
+            scenario=self.engine.scenario,
+            flush_mode="full",
         )
 
         # Start surveys for new districts
@@ -667,14 +682,17 @@ class Generators:
         try:
             if not self.running:
                 return
+            scen = self.engine.scenario
+            if not isinstance(scen, dict):
+                return
             skeleton_payload = json.dumps(
-                {"districts": self.districts, "city": config_module.SCENARIO.get("location", "")},
+                {"districts": self.districts, "city": scen.get("location", "")},
                 indent=2,
             )
             instruction = (
-                f"City: {config_module.SCENARIO['location']}, {config_module.SCENARIO['period']}.\n"
-                f"Year span: {config_module.SCENARIO['year_start']} — {config_module.SCENARIO['year_end']}.\n"
-                f"Ruler context: {config_module.SCENARIO['ruler']}.\n\n"
+                f"City: {scen['location']}, {scen['period']}.\n"
+                f"Year span: {scen['year_start']} — {scen['year_end']}.\n"
+                f"Ruler context: {scen['ruler']}.\n\n"
                 f"FIXED district skeleton (names and regions are authoritative):\n{skeleton_payload}\n\n"
                 f"Write map_description as a very long, multi-paragraph archaeologist's overview of the whole city at this time: "
                 f"terrain, hydrology, walls, arteries, landmark sightlines, district character, sensory texture, and what distinguishes "
@@ -686,7 +704,12 @@ class Generators:
             map_desc = (result.get("map_description") or "").strip()
             if map_desc:
                 await self.broadcast({"type": "map_description", "description": map_desc})
-                await asyncio.to_thread(save_districts_cache, self.districts, map_desc)
+                await asyncio.to_thread(
+                    save_districts_cache,
+                    self.districts,
+                    map_desc,
+                    run_fingerprint=self.engine.run_fingerprint,
+                )
                 logger.info("Background map_description saved (%s chars)", len(map_desc))
             commentary = result.get("commentary", "")
             if commentary:
@@ -703,13 +726,16 @@ class Generators:
         """Resolve master_plan for one district (cache, fused seed, or survey API)."""
         district = self.districts[district_index]
         district_key = district.get("name", "unknown")
+        survey_sid = district_survey_key(district)
 
         cached_plan = None
         async with self._survey_cache_lock:
             if not hasattr(self.engine, "_survey_cache"):
-                self.engine._survey_cache = load_surveys_cache()
-            if district_key in self.engine._survey_cache:
-                cached_plan = self.engine._survey_cache[district_key]
+                self.engine._survey_cache = load_surveys_cache(
+                    expected_run_fingerprint=self.engine.run_fingerprint,
+                )
+            if survey_sid in self.engine._survey_cache:
+                cached_plan = self.engine._survey_cache[survey_sid]
         if cached_plan is not None:
             if isinstance(cached_plan, list) and len(cached_plan) > 0:
                 if all(isinstance(s, dict) and "name" in s for s in cached_plan):
@@ -740,8 +766,12 @@ class Generators:
                     master_plan, f"Fused seed {district_key!r}"
                 )
                 async with self._survey_cache_lock:
-                    self.engine._survey_cache[district_key] = master_plan
-                    await asyncio.to_thread(save_surveys_cache, self.engine._survey_cache)
+                    self.engine._survey_cache[survey_sid] = master_plan
+                    await asyncio.to_thread(
+                        save_surveys_cache,
+                        self.engine._survey_cache,
+                        run_fingerprint=self.engine.run_fingerprint,
+                    )
                 logger.info("Using fused seed_master_plan for %s (%d structures)", district_key, len(master_plan))
                 return master_plan
             logger.warning("Fused seed_master_plan invalid — running full survey for first district.")
@@ -762,8 +792,12 @@ class Generators:
         await self._set_status("cartographus", "idle")
 
         async with self._survey_cache_lock:
-            self.engine._survey_cache[district_key] = master_plan
-            await asyncio.to_thread(save_surveys_cache, self.engine._survey_cache)
+            self.engine._survey_cache[survey_sid] = master_plan
+            await asyncio.to_thread(
+                save_surveys_cache,
+                self.engine._survey_cache,
+                run_fingerprint=self.engine.run_fingerprint,
+            )
 
         return master_plan
 
@@ -782,6 +816,7 @@ class Generators:
         buildings = district.get("buildings") or []
 
         district_key = district.get("name", "unknown")
+        survey_sid = district_survey_key(district)
 
         if len(buildings) <= SURVEY_BUILDINGS_PER_CHUNK:
             survey = await self.survey_district_single_pass(district, buildings_filter=None, prior_summary="")
@@ -803,10 +838,10 @@ class Generators:
                     )
             scenery_sum = (survey.get("district_scenery_summary") or "").strip()
             if scenery_sum:
-                self._district_scenery_summaries[district_key] = scenery_sum
+                self._district_scenery_summaries[survey_sid] = scenery_sum
             palette = survey.get("suggested_palette")
             if isinstance(palette, dict):
-                self._district_palettes[district_key] = palette
+                self._district_palettes[survey_sid] = palette
                 logger.info("District %s palette: %s", district_key, palette)
             gap = get_district_spacing(self._district_style(district))
             mp = enforce_spacing(master_plan, min_gap=gap)
@@ -836,14 +871,14 @@ class Generators:
                         )
                 merged.extend(part)
                 # Capture scenery summary and palette from the first successful chunk
-                if district_key not in self._district_scenery_summaries:
+                if survey_sid not in self._district_scenery_summaries:
                     scenery_sum = (survey.get("district_scenery_summary") or "").strip()
                     if scenery_sum:
-                        self._district_scenery_summaries[district_key] = scenery_sum
-                if district_key not in self._district_palettes:
+                        self._district_scenery_summaries[survey_sid] = scenery_sum
+                if survey_sid not in self._district_palettes:
                     palette = survey.get("suggested_palette")
                     if isinstance(palette, dict):
-                        self._district_palettes[district_key] = palette
+                        self._district_palettes[survey_sid] = palette
                 occupied_summary = occupancy_summary_for_survey(merged)
             except Exception as exc:
                 chunks_failed += 1
@@ -886,6 +921,9 @@ class Generators:
         existing = self.world.get_region_summary(region["x1"], region["y1"], region["x2"], region["y2"])
         district_elev = district.get("elevation", 0.0)
         terrain_notes = district.get("terrain_notes", "")
+        scen = self.engine.scenario
+        if not isinstance(scen, dict):
+            raise AgentGenerationError("bad_model_output", "survey_district_single_pass: missing RunSession.scenario")
 
         scope_extra = ""
         if buildings_filter is not None:
@@ -897,7 +935,7 @@ class Generators:
 
         return await self.surveyor_generate_bounded(
             f"Survey district: {district['name']}\n"
-            f"City: {config_module.SCENARIO['location']}, {config_module.SCENARIO['period']}\n"
+            f"City: {scen['location']}, {scen['period']}\n"
             f"Description: {district.get('description', '')}\n"
             f"Terrain: {terrain_notes}\n"
             f"Base elevation: {district_elev} (0.0=water level, 0.3=gentle hill, 0.6=steep hill)\n"
@@ -959,7 +997,8 @@ class Generators:
             "Chang'an": ("https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Chang%27an_of_Tang.png/800px-Chang%27an_of_Tang.png", "Map of Tang dynasty Chang'an"),
         }
         try:
-            location = config_module.SCENARIO.get("location", "Rome")
+            scen = self.engine.scenario
+            location = scen.get("location", "Rome") if isinstance(scen, dict) else "Rome"
             if location in known_maps:
                 url, source = known_maps[location]
                 await self.broadcast({"type": "map_image", "url": url, "source": source})

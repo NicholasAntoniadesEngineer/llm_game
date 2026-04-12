@@ -38,6 +38,14 @@ _LLM_AGENT_KEY_ORDER = (
 )
 _LLM_REQUIRED_AGENT_KEYS = frozenset(_LLM_AGENT_KEY_ORDER)
 
+# Single source for orchestration / llm_routing (must match llm_defaults.json agents).
+(
+    KEY_CARTOGRAPHUS_SKELETON,
+    KEY_CARTOGRAPHUS_REFINE,
+    KEY_CARTOGRAPHUS_SURVEY,
+    KEY_URBANISTA,
+) = _LLM_AGENT_KEY_ORDER
+
 
 def _load_llm_defaults(path: Path) -> dict[str, Any]:
     """Load LLM routing defaults from JSON (xAI defaults, per-agent routing, optional OpenAI-compatible defaults)."""
@@ -287,7 +295,7 @@ def get_city(name):
     return None
 
 def create_scenario(city_name, year):
-    """Create a SCENARIO dict from user-selected city and year."""
+    """Create a scenario dict from user-selected city and year."""
     import time
     city = get_city(city_name)
     if not city:
@@ -307,5 +315,16 @@ def create_scenario(city_name, year):
         "climate": city.get("climate"),
     }
 
-# Default scenario (set by user selection via /api/start)
-SCENARIO = None
+
+def _read_token_telemetry_interval_s() -> int:
+    raw = os.environ.get("ETERNAL_TOKEN_TELEMETRY_INTERVAL_S", "").strip()
+    if not raw:
+        return 5
+    try:
+        v = int(raw)
+    except ValueError:
+        return 5
+    return 1 if v < 1 else v
+
+
+TOKEN_TELEMETRY_INTERVAL_S = _read_token_telemetry_interval_s()

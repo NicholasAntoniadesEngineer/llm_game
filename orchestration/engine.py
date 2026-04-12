@@ -123,7 +123,9 @@ from orchestration.validation import (
 from core.errors import UrbanistaValidationError
 from orchestration.placement import check_functional_placement, log_functional_placement_warnings
 from orchestration.prompt_builder import build_terrain_prompt, build_building_prompt
+from core.fingerprint import compute_run_fingerprint, district_survey_key, ensure_district_ids
 from core.persistence import save_state, load_districts_cache, save_blueprint, load_blueprint
+from core.run_session import RunSession
 from orchestration.generators import Generators
 
 logger = logging.getLogger("eternal.engine")
@@ -133,11 +135,22 @@ class BuildEngine:
     # Toolbar / start-screen status strip (must match static/tiles.js AGENT_NAMES keys).
     UI_STATUS_STRIP_AGENT_KEYS = ("cartographus", "urbanista")
 
-    def __init__(self, world: WorldState, bus: MessageBus, broadcast_fn, chat_history_ref: list):
+    def __init__(
+        self,
+        world: WorldState,
+        bus: MessageBus,
+        broadcast_fn,
+        chat_history_ref: list,
+        *,
+        run_session: RunSession,
+    ):
+        if run_session is None:
+            raise TypeError("BuildEngine requires run_session")
         self.world = world
         self.bus = bus
         self.broadcast = broadcast_fn
         self.chat_history = chat_history_ref
+        self._run_session = run_session
         self.district_index = 0
         self.districts = []  # Discovered by Cartographus, NOT hardcoded
 
@@ -189,10 +202,40 @@ class BuildEngine:
             set_status_fn=self._set_status,
             district_index_fn=lambda: self.district_index,
             generation_fn=lambda: self.generation,
+            scenario_fn=lambda: self.scenario,
         )
 
         # Generators — extracted discovery/survey/expansion methods.
         self.generators = Generators(self)
+
+    @property
+    def scenario(self) -> dict[str, Any] | None:
+        return self._run_session.scenario
+
+    @property
+    def run_fingerprint(self) -> str:
+        return compute_run_fingerprint(
+            self.scenario if isinstance(self.scenario, dict) else None,
+            self.world.chunk_size_tiles,
+            GRID_WIDTH,
+            GRID_HEIGHT,
+        )
+
+    async def _save_state_thread(self, flush_mode: str = "incremental") -> None:
+        scen = self.scenario
+        if not isinstance(scen, dict):
+            logger.warning("_save_state_thread skipped: scenario dict missing")
+            return
+        await asyncio.to_thread(
+            save_state,
+            self.world,
+            self.chat_history,
+            self.district_index,
+            self.districts,
+            self.generation,
+            scenario=scen,
+            flush_mode=flush_mode,
+        )
 
     # --- running flag delegates to TaskManager (single source of truth) ---
     @property
@@ -256,17 +299,28 @@ class BuildEngine:
             self._auto_retry_pending = False
             self.tasks.start_token_telemetry()
             logger.info("BuildEngine started — infinite generation mode")
-            log_event("engine", "Build started",
-                      scenario=str(config_module.SCENARIO.get("location", "?") if config_module.SCENARIO else "none"),
-                      period=str(config_module.SCENARIO.get("period", "?") if config_module.SCENARIO else "none"),
-                      grid=f"{GRID_WIDTH}x{GRID_HEIGHT}")
+            scen = self.scenario
+            if not isinstance(scen, dict):
+                logger.error("BuildEngine.run() requires RunSession.scenario dict — stopping")
+                self.running = False
+                return
+            log_event(
+                "engine",
+                "Build started",
+                scenario=str(scen.get("location", "?") if isinstance(scen, dict) else "none"),
+                period=str(scen.get("period", "?") if isinstance(scen, dict) else "none"),
+                grid=f"{GRID_WIDTH}x{GRID_HEIGHT}",
+            )
             trace_event(
                 "engine",
                 "run() entered — main build loop",
-                scenario=str(config_module.SCENARIO.get("location", "?") if config_module.SCENARIO else "none"),
+                scenario=str(scen.get("location", "?") if isinstance(scen, dict) else "none"),
                 districts_loaded=len(self.districts),
             )
             self.update_trace_snapshot(phase="run", step="after_start")
+
+            if self.districts:
+                ensure_district_ids(self.districts)
 
             # ─── PHASE 0: initial district discovery ───
             if not self.districts:
@@ -297,11 +351,13 @@ class BuildEngine:
                 )
                 self.update_trace_snapshot(phase="resume_loaded_districts", districts=len(self.districts))
                 self._fused_seed_master_plan = None
-                if self.tasks._map_refine_task is None or self.tasks._map_refine_task.done():
-                    cached = load_districts_cache()
+                if self.tasks.map_refine_task_idle():
+                    cached = load_districts_cache(expected_run_fingerprint=self.run_fingerprint)
                     map_desc = cached[1] if cached else ""
                     if not map_desc:
-                        self.tasks._map_refine_task = asyncio.create_task(self.generators.refine_map_description_background())
+                        self.tasks.start_map_refine_background(
+                            self.generators.refine_map_description_background()
+                        )
                     asyncio.create_task(self.generators.find_map_image())
 
             # ─── BLUEPRINT: create city coherence data ───
@@ -342,7 +398,7 @@ class BuildEngine:
                                 "turn": self.world.turn,
                             })
 
-            await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts, self.generation)
+            await self._save_state_thread(flush_mode="full")
             trace_event("engine", "Entering infinite generation loop", generation=self.generation, district_index=self.district_index)
             self.update_trace_snapshot(phase="generation_loop", step="pre_while")
 
@@ -392,7 +448,7 @@ class BuildEngine:
                 trace_event("engine", "expand_city returned True — incrementing generation", districts=len(self.districts))
                 self.generation += 1
                 self.update_trace_snapshot(phase="post_expansion", generation=self.generation)
-                await asyncio.to_thread(save_state, self.world, self.chat_history, self.district_index, self.districts, self.generation)
+                await self._save_state_thread(flush_mode="full")
 
             await self.tasks.await_map_refine_task()
             await self.broadcast_all_agents_idle()
@@ -416,7 +472,7 @@ class BuildEngine:
             districts_total=len(self.districts),
         )
         self.update_trace_snapshot(phase="_build_generation", step="start", generation=self.generation)
-        self.tasks._survey_task_by_index.clear()
+        self.tasks.clear_survey_prefetch_handles()
         self.tasks.start_survey_tasks_from_index(self.district_index, self.district_index + 1)
         if len(self.districts) > self.district_index + 1:
             logger.info("Survey priority: district %s/%s first", self.district_index + 1, len(self.districts))
@@ -449,7 +505,8 @@ class BuildEngine:
                 self.world.current_period = district.get("period", "")
                 self.world.current_year = district.get("year", -44)
 
-                scenery = self._district_scenery_summaries.get(district_name, "")
+                survey_sid = district_survey_key(district)
+                scenery = self._district_scenery_summaries.get(survey_sid, "")
                 region = district.get("region", {})
                 await self.broadcast({
                     "type": "phase",
@@ -525,7 +582,7 @@ class BuildEngine:
                         await self.schedule_run()
                     return False
 
-                await asyncio.to_thread(save_state, self.world, self.chat_history, di, self.districts, self.generation)
+                await self._save_state_thread(flush_mode="incremental")
 
         self.district_index = len(self.districts)
         return True
@@ -587,14 +644,7 @@ class BuildEngine:
         self.running = False
         await self.tasks.stop_token_telemetry()
         # Always save on pause — ensures no progress is lost
-        await asyncio.to_thread(
-            save_state,
-            self.world,
-            self.chat_history,
-            self.district_index,
-            self.districts,
-            self.generation,
-        )
+        await self._save_state_thread(flush_mode="full")
         self.tasks._structures_since_save = 0
         await self.tasks._cancel_survey_and_refine_tasks()
         summaries = {
@@ -637,7 +687,7 @@ class BuildEngine:
         Falls back to known_cities.json only as a reference seed, not as the primary source.
         The AI RESEARCHES the geography — it's never hardcoded."""
 
-        scenario = config_module.SCENARIO
+        scenario = self.scenario
         if not scenario:
             return None
 
@@ -767,6 +817,7 @@ class BuildEngine:
 
     async def _build_district(self, district: dict, master_plan: list) -> bool:
         district_key = district.get("name", "unknown")
+        survey_sid = district_survey_key(district)
         trace_event(
             "engine",
             "_build_district() entered",
@@ -843,10 +894,10 @@ class BuildEngine:
         logger.info(f"Master plan: {len(master_plan)} structures")
         await self.broadcast({"type": "master_plan", "plan": master_plan})
 
-        scenario = config_module.SCENARIO or {}
+        scenario = self.scenario or {}
         city_loc = scenario.get("location") or ""
-        district_scenery = self._district_scenery_summaries.get(district_key, "")
-        district_palette = self._district_palettes.get(district_key)
+        district_scenery = self._district_scenery_summaries.get(survey_sid, "")
+        district_palette = self._district_palettes.get(survey_sid)
         district_ref_year = district.get("year")
         if district_ref_year is None:
             district_ref_year = scenario.get("year_start", 0)
@@ -1429,14 +1480,7 @@ class BuildEngine:
             await self._set_status("urbanista", "idle")
 
         if self.tasks._structures_since_save > 0:
-            await asyncio.to_thread(
-                save_state,
-                self.world,
-                self.chat_history,
-                self.district_index,
-                self.districts,
-                self.generation,
-            )
+            await self._save_state_thread(flush_mode="incremental")
             self.tasks._structures_since_save = 0
 
         if skipped:
@@ -1480,6 +1524,13 @@ class BuildEngine:
         try:
             async with self.generators._urbanista_semaphore:
                 results = await self.urbanista.generate_batch(batch_prompt, len(jobs))
+        except AgentGenerationError as err:
+            logger.warning(
+                "Batch Urbanista failed (%s): %s — falling back to individual",
+                err.pause_reason,
+                (err.pause_detail or "")[:200],
+            )
+            results = []
         except Exception as e:
             logger.warning("Batch Urbanista call failed: %s — falling back to individual", e)
             results = []

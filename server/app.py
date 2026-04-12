@@ -106,9 +106,7 @@ def build_app(state: AppState, lifespan=None):
     @app.get("/api/session")
     async def api_session():
         """Whether a saved scenario exists (for Continue vs new city on reload)."""
-        from core import config as config_module
-
-        scen = getattr(config_module, "SCENARIO", None)
+        scen = state.run_session.scenario
         if not scen or not isinstance(scen, dict):
             return {"has_active_scenario": False}
         return {
@@ -177,21 +175,20 @@ def build_app(state: AppState, lifespan=None):
         logger.info(f"[ws#{conn_id}] CONNECTED client={_ws_label(websocket)} (replay pending)")
 
         try:
-            from core import config as config_module
-
             logger.info(f"[ws#{conn_id}] send world_state")
             _world_payload = attach_engine_ui_to_message(state, state.world.to_dict())
             await websocket.send_json(_world_payload)
             # Send scenario if already started (reconnect case)
-            if config_module.SCENARIO:
-                logger.info(f"[ws#{conn_id}] send scenario city={config_module.SCENARIO.get('location')} period={config_module.SCENARIO.get('period')}")
+            if state.run_session.scenario:
+                _sc = state.run_session.scenario
+                logger.info(f"[ws#{conn_id}] send scenario city={_sc.get('location')} period={_sc.get('period')}")
                 _scenario_payload = {
                     "type": "scenario",
-                    "city": config_module.SCENARIO["location"],
-                    "period": config_module.SCENARIO["period"],
-                    "year": config_module.SCENARIO.get("focus_year"),
-                    "description": config_module.SCENARIO.get("description", ""),
-                    "started_at_s": config_module.SCENARIO.get("started_at_s"),
+                    "city": _sc["location"],
+                    "period": _sc["period"],
+                    "year": _sc.get("focus_year"),
+                    "description": _sc.get("description", ""),
+                    "started_at_s": _sc.get("started_at_s"),
                 }
                 await websocket.send_json(attach_engine_ui_to_message(state, _scenario_payload))
             # Do not replay old "paused" messages: they re-open the error overlay on every refresh
@@ -246,7 +243,7 @@ def build_app(state: AppState, lifespan=None):
             if (
                 state.engine_is_running is not None
                 and not state.engine_is_running()
-                and getattr(config_module, "SCENARIO", None)
+                and state.run_session.scenario
                 and state.chat_history
                 and state.chat_history[-1].get("type") == "paused"
             ):
@@ -267,7 +264,7 @@ def build_app(state: AppState, lifespan=None):
                 "agent_status_cached=%s token_usage_sent=%s engine_running=%s chat_history_len=%s",
                 conn_id,
                 len(state.world.tiles),
-                bool(config_module.SCENARIO),
+                bool(state.run_session.scenario),
                 len(replay),
                 len(state.agent_status_by_agent),
                 _token_sent,
@@ -352,8 +349,6 @@ def build_app(state: AppState, lifespan=None):
                             {"type": "reset_timeline_result", "ok": False, "error": "not configured"}
                         )
                 elif msg_type == "ping":
-                    from core import config as config_module
-
                     engine_running = False
                     if state.engine_is_running is not None:
                         try:
@@ -365,7 +360,7 @@ def build_app(state: AppState, lifespan=None):
                             "type": "pong",
                             "server_time": time.time(),
                             "engine_running": engine_running,
-                            "scenario_active": bool(getattr(config_module, "SCENARIO", None)),
+                            "scenario_active": bool(state.run_session.scenario),
                         }
                     )
                 else:

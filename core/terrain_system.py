@@ -95,8 +95,14 @@ class TerrainAnalysis:
     """Advanced terrain analysis and classification system."""
 
     @staticmethod
-    def classify_terrain(elevation: float, slope: float, neighbors: List[float],
-                        moisture: float = 0.5, temperature: float = 20.0) -> TerrainType:
+    def classify_terrain(
+        elevation: float,
+        slope: float,
+        neighbors: List[float],
+        moisture: float = 0.5,
+        temperature: float = 20.0,
+        roughness: float = 0.0,
+    ) -> TerrainType:
         """Classify terrain type based on multiple factors."""
 
         # Water detection

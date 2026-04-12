@@ -18,6 +18,7 @@ except ImportError:
     ValidationError = Exception
     SchemaError = Exception
 
+from core.errors import EternalCitiesError
 from .constants import (
     MAX_SOCIETY_FILE_SIZE,
     SOCIETY_FILE_EXTENSION,
@@ -140,8 +141,8 @@ SOCIETY_SCHEMA = {
 }
 
 
-class SocietyValidationError(Exception):
-    """Custom exception for society validation errors."""
+class SocietyValidationError(EternalCitiesError):
+    """Society JSON failed schema or business-rule validation."""
 
     def __init__(self, message: str, file_path: Optional[Path] = None, errors: Optional[List[str]] = None):
         self.file_path = file_path

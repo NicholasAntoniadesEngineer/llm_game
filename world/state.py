@@ -1,13 +1,17 @@
 """WorldState — sparse, unbounded tile map for infinite world generation."""
 
+from __future__ import annotations
+
 from world.tiles import Tile, TERRAIN_COLORS, BUILDING_ICONS, TERRAIN_ICONS
-from core.config import CHUNK_SIZE
 
 
 class WorldState:
     """Sparse tile storage with no fixed bounds. World grows as tiles are placed."""
 
-    def __init__(self):
+    def __init__(self, *, chunk_size_tiles: int):
+        if chunk_size_tiles < 1:
+            raise ValueError("chunk_size_tiles must be >= 1")
+        self.chunk_size_tiles = chunk_size_tiles
         self.tiles: dict[tuple[int, int], Tile] = {}
         self.min_x: int = 0
         self.max_x: int = 0
@@ -18,6 +22,39 @@ class WorldState:
         self.turn: int = 0
         self.build_log: list[dict] = []
         self._dirty_chunks: set[tuple[int, int]] = set()
+        # Non-empty tiles per chunk — speeds region queries and incremental saves.
+        self._tiles_by_chunk: dict[tuple[int, int], set[tuple[int, int]]] = {}
+
+    def _chunk_coord_for_tile(self, x: int, y: int) -> tuple[int, int]:
+        cs = self.chunk_size_tiles
+        return (x // cs, y // cs)
+
+    def rebuild_chunk_tile_index(self) -> None:
+        """Rebuild ``_tiles_by_chunk`` from ``tiles`` (e.g. after load)."""
+        self._tiles_by_chunk.clear()
+        for (tx, ty), tile in self.tiles.items():
+            if tile.terrain == "empty":
+                continue
+            ck = self._chunk_coord_for_tile(tx, ty)
+            self._tiles_by_chunk.setdefault(ck, set()).add((tx, ty))
+
+    def chunk_tile_coords(self, ck: tuple[int, int]) -> set[tuple[int, int]]:
+        """Tile coordinates in chunk ``ck`` that are tracked as non-empty."""
+        return set(self._tiles_by_chunk.get(ck, ()))
+
+    def chunk_keys_with_tiles(self) -> set[tuple[int, int]]:
+        """All chunk coordinates that currently contain at least one non-empty tile."""
+        return {ck for ck, coords in self._tiles_by_chunk.items() if coords}
+
+    def _sync_chunk_index_for_tile(self, x: int, y: int, tile: Tile) -> None:
+        ck = self._chunk_coord_for_tile(x, y)
+        st = self._tiles_by_chunk.setdefault(ck, set())
+        if tile.terrain == "empty":
+            st.discard((x, y))
+            if not st:
+                del self._tiles_by_chunk[ck]
+        else:
+            st.add((x, y))
 
     @property
     def width(self) -> int:
@@ -41,6 +78,7 @@ class WorldState:
         self.turn = 0
         self.build_log.clear()
         self._dirty_chunks.clear()
+        self._tiles_by_chunk.clear()
 
     def place_tile(self, x: int, y: int, data: dict) -> bool:
         """Place or update a tile. World expands to fit — never rejects."""
@@ -86,11 +124,10 @@ class WorldState:
             self.min_y = min(self.min_y, y)
             self.max_y = max(self.max_y, y)
 
-        # Track dirty chunk for persistence
-        self._dirty_chunks.add((x // CHUNK_SIZE, y // CHUNK_SIZE))
+        self._dirty_chunks.add(self._chunk_coord_for_tile(x, y))
+        self._sync_chunk_index_for_tile(x, y, tile)
 
         self.build_log.append({"turn": self.turn, "x": x, "y": y, **data})
-        # Cap build_log to prevent unbounded memory growth during long sessions
         if len(self.build_log) > 5000:
             self.build_log = self.build_log[-2500:]
         return True
@@ -98,8 +135,7 @@ class WorldState:
     def get_tile(self, x: int, y: int) -> Tile | None:
         return self.tiles.get((x, y))
 
-    def get_region_summary(self, x1: int, y1: int, x2: int, y2: int,
-                           max_tiles: int = 40) -> str:
+    def get_region_summary(self, x1: int, y1: int, x2: int, y2: int, max_tiles: int = 40) -> str:
         """Text summary of occupied tiles in a region for agent context."""
         entries: list[str] = []
         for (tx, ty), tile in self.tiles.items():
@@ -121,8 +157,7 @@ class WorldState:
 
     def occupied_tile_dicts(self) -> list[dict]:
         """Return list of to_dict() for all non-empty tiles."""
-        return [tile.to_dict() for tile in self.tiles.values()
-                if tile.terrain != "empty"]
+        return [tile.to_dict() for tile in self.tiles.values() if tile.terrain != "empty"]
 
     def to_dict(self) -> dict:
         """Full serialization for WebSocket initial state (sparse format)."""
@@ -137,9 +172,13 @@ class WorldState:
             "period": self.current_period,
             "year": self.current_year,
             "tiles": tiles,
+            "chunk_size": self.chunk_size_tiles,
         }
 
     def tiles_since(self, since_turn: int) -> list[dict]:
         """Get tiles changed since a given turn."""
-        return [tile.to_dict() for tile in self.tiles.values()
-                if tile.turn >= since_turn and tile.terrain != "empty"]
+        return [
+            tile.to_dict()
+            for tile in self.tiles.values()
+            if tile.turn >= since_turn and tile.terrain != "empty"
+        ]

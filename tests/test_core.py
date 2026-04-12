@@ -18,6 +18,7 @@ import pytest
 from core.errors import (
     AgentGenerationError,
     EternalCitiesError,
+    SaveIndexError,
     UrbanistaValidationError,
     classify_agent_failure,
 )
@@ -43,6 +44,9 @@ class TestErrorHierarchy:
     def test_urbanista_validation_error_message(self):
         err = UrbanistaValidationError("bad tile")
         assert "bad tile" in str(err)
+
+    def test_save_index_error_is_eternal(self):
+        assert issubclass(SaveIndexError, EternalCitiesError)
 
 
 class TestClassifyAgentFailure:
@@ -489,25 +493,26 @@ class TestRunLog:
 # ---------------------------------------------------------------------------
 
 from core import persistence
+from core.fingerprint import compute_run_fingerprint
 from world.state import WorldState
 
 
 class TestPersistenceChunkKey:
     def test_chunk_key_origin(self):
-        assert persistence._chunk_key(0, 0) == (0, 0)
+        assert persistence._chunk_key(0, 0, config.CHUNK_SIZE) == (0, 0)
 
     def test_chunk_key_within_chunk(self):
         cs = config.CHUNK_SIZE
-        assert persistence._chunk_key(cs - 1, cs - 1) == (0, 0)
+        assert persistence._chunk_key(cs - 1, cs - 1, cs) == (0, 0)
 
     def test_chunk_key_next_chunk(self):
         cs = config.CHUNK_SIZE
-        assert persistence._chunk_key(cs, 0) == (1, 0)
-        assert persistence._chunk_key(0, cs) == (0, 1)
+        assert persistence._chunk_key(cs, 0, cs) == (1, 0)
+        assert persistence._chunk_key(0, cs, cs) == (0, 1)
 
     def test_chunk_key_negative(self):
         # Python integer division with negatives
-        assert persistence._chunk_key(-1, -1) == (-1, -1)
+        assert persistence._chunk_key(-1, -1, config.CHUNK_SIZE) == (-1, -1)
 
 
 class TestPersistenceChunkFilename:
@@ -539,18 +544,21 @@ class TestPersistenceSaveLoad:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_save_and_load_round_trip(self):
-        world = WorldState()
+        world = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
         world.current_period = "Republican Rome"
         world.current_year = -44
         world.turn = 5
         world.place_tile(10, 20, {"terrain": "building", "building_name": "Temple"})
         world.place_tile(11, 20, {"terrain": "road"})
 
-        config.SCENARIO = {
+        scenario = {
             "location": "Rome",
             "period": "around 44 BC",
             "focus_year": -44,
             "started_at_s": time.time(),
+            "year_start": -50,
+            "year_end": -40,
+            "ruler": "Caesar",
         }
 
         chat = [{"type": "chat", "text": "hello"}]
@@ -560,13 +568,14 @@ class TestPersistenceSaveLoad:
             district_index=2,
             districts=[{"name": "Forum"}],
             generation=3,
+            scenario=scenario,
         )
 
         # Load into a fresh world
-        world2 = WorldState()
+        world2 = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
         result = persistence.load_state(world2)
         assert result is not None
-        loaded_chat, loaded_idx, loaded_districts, loaded_gen = result
+        loaded_chat, loaded_idx, loaded_districts, loaded_gen, _loaded_scen = result
         assert loaded_idx == 2
         assert loaded_gen == 3
         assert loaded_chat == chat
@@ -580,7 +589,7 @@ class TestPersistenceSaveLoad:
         assert t.terrain == "building"
 
     def test_load_state_no_index_returns_none(self):
-        world = WorldState()
+        world = WorldState(chunk_size_tiles=config.CHUNK_SIZE)
         result = persistence.load_state(world)
         assert result is None
 
@@ -596,8 +605,10 @@ class TestPersistenceSaveLoad:
 
     def test_districts_cache_round_trip(self):
         districts = [{"name": "Forum", "region": {"x1": 0, "y1": 0, "x2": 10, "y2": 10}}]
-        persistence.save_districts_cache(districts, "A description")
-        result = persistence.load_districts_cache()
+        scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
+        fp = compute_run_fingerprint(scen, config.CHUNK_SIZE, config.GRID_WIDTH, config.GRID_HEIGHT)
+        persistence.save_districts_cache(districts, "A description", run_fingerprint=fp)
+        result = persistence.load_districts_cache(expected_run_fingerprint=fp)
         assert result is not None
         loaded_districts, map_desc = result
         assert len(loaded_districts) == 1
@@ -608,18 +619,19 @@ class TestPersistenceSaveLoad:
         result = persistence.load_districts_cache()
         assert result is None
 
-    def test_districts_cache_malformed_raises(self):
+    def test_districts_cache_malformed_skipped(self):
         persistence._ensure_dirs()
         # Write malformed district entry
         data = {"districts": [{"bad": "data"}], "map_description": ""}
         persistence.DISTRICTS_CACHE.write_text(json.dumps(data))
-        with pytest.raises(ValueError, match="Malformed"):
-            persistence.load_districts_cache()
+        assert persistence.load_districts_cache() is None
 
     def test_surveys_cache_round_trip(self):
         surveys = {"Forum": [{"name": "Temple", "tiles": [{"x": 0, "y": 0}]}]}
-        persistence.save_surveys_cache(surveys)
-        result = persistence.load_surveys_cache()
+        scen = {"location": "Rome", "period": "p", "focus_year": 0, "started_at_s": 1.0, "year_start": 0, "year_end": 1, "ruler": "x"}
+        fp = compute_run_fingerprint(scen, config.CHUNK_SIZE, config.GRID_WIDTH, config.GRID_HEIGHT)
+        persistence.save_surveys_cache(surveys, run_fingerprint=fp)
+        result = persistence.load_surveys_cache(expected_run_fingerprint=fp)
         assert "Forum" in result
         assert len(result["Forum"]) == 1
 
@@ -635,9 +647,17 @@ class TestPersistenceSaveLoad:
 
     def test_surveys_cache_entry_not_list_raises(self):
         persistence._ensure_dirs()
-        persistence.SURVEYS_CACHE.write_text(json.dumps({"Forum": "not_a_list"}))
+        persistence.SURVEYS_CACHE.write_text(
+            json.dumps(
+                {
+                    "cache_wrap_version": 1,
+                    "run_fingerprint": "0" * 32,
+                    "plans": {"Forum": "not_a_list"},
+                }
+            )
+        )
         with pytest.raises(ValueError, match="not a list"):
-            persistence.load_surveys_cache()
+            persistence.load_surveys_cache(expected_run_fingerprint="0" * 32)
 
     def test_atomic_write(self):
         path = self._tmpdir / "test.txt"

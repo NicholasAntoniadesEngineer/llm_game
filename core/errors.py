@@ -7,6 +7,10 @@ class EternalCitiesError(Exception):
     """Base exception for all Eternal Cities errors."""
 
 
+class SaveIndexError(EternalCitiesError):
+    """Corrupt or unreadable ``index.json`` (and no usable backup)."""
+
+
 class AgentGenerationError(EternalCitiesError):
     """CLI or model output failed; no synthetic substitute is allowed."""
 

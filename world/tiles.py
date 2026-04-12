@@ -24,6 +24,15 @@ class Tile:
     turn: int = 0
     scene: Optional[str] = None
     spec: Optional[dict] = None  # AI-generated building spec (dimensions, features, colors)
+    # Terrain analysis (blueprint / elevation pass; optional on sparsely populated tiles)
+    terrain_type: Optional[str] = None
+    slope: Optional[float] = None
+    aspect: Optional[float] = None
+    roughness: Optional[float] = None
+    stability: Optional[float] = None
+    soil_type: Optional[str] = None
+    moisture: Optional[float] = None
+    temperature: Optional[float] = None
 
     def to_dict(self) -> dict:
         d: dict = {}

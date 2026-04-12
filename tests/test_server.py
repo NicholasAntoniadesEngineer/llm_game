@@ -190,23 +190,21 @@ class TestFastAPIEndpoints:
     @pytest.mark.asyncio
     async def test_get_session_no_scenario(self, app_and_state):
         app, state = app_and_state
-        from core import config as config_module
-        orig = getattr(config_module, "SCENARIO", None)
-        config_module.SCENARIO = None
+        orig = state.run_session.scenario
+        state.run_session.scenario = None
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 resp = await client.get("/api/session")
             assert resp.status_code == 200
             assert resp.json()["has_active_scenario"] is False
         finally:
-            config_module.SCENARIO = orig
+            state.run_session.scenario = orig
 
     @pytest.mark.asyncio
     async def test_get_session_with_scenario(self, app_and_state):
         app, state = app_and_state
-        from core import config as config_module
-        orig = getattr(config_module, "SCENARIO", None)
-        config_module.SCENARIO = {
+        orig = state.run_session.scenario
+        state.run_session.scenario = {
             "location": "Rome",
             "period": "around 44 BC",
             "focus_year": -44,
@@ -219,7 +217,7 @@ class TestFastAPIEndpoints:
             assert data["has_active_scenario"] is True
             assert data["city"] == "Rome"
         finally:
-            config_module.SCENARIO = orig
+            state.run_session.scenario = orig
 
     @pytest.mark.asyncio
     async def test_get_llm_settings(self, app_and_state):

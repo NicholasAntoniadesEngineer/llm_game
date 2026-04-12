@@ -13,8 +13,6 @@ logger = logging.getLogger("eternal.broadcast")
 
 def _engine_ui_fields(state: "AppState") -> dict:
     """Snapshot for client header (build running / scenario loaded)."""
-    from core import config as config_module
-
     engine_running = False
     if state.engine_is_running is not None:
         try:
@@ -23,7 +21,7 @@ def _engine_ui_fields(state: "AppState") -> dict:
             engine_running = False
     return {
         "engine_running": engine_running,
-        "scenario_active": bool(getattr(config_module, "SCENARIO", None)),
+        "scenario_active": bool(state.run_session.scenario),
     }
 
 

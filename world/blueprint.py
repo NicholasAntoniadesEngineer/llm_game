@@ -57,26 +57,66 @@ class CityBlueprint:
             return 0.0
         return float(compute_elevation(self.hills, x, y))
 
+    def _recompute_smoothed_elevation_for_world(self, world: WorldState) -> dict[tuple[int, int], float]:
+        """Rebuild ``elevation_map`` and return smoothed elevations for placed tiles.
+
+        Uses a dirty-chunk + halo subset when the world is large and ``_dirty_chunks`` is
+        non-empty; otherwise recomputes all occupied tiles (full pass).
+        """
+        from world.roads import compute_elevation, smooth_elevation_max_gradient
+        from core.config import TERRAIN_GRADIENT_ITERATIONS, TERRAIN_MAX_GRADIENT
+
+        if not self.hills:
+            return {}
+
+        tile_keys = set(world.tiles.keys())
+        dirty = getattr(world, "_dirty_chunks", None) or set()
+        incremental_threshold = 4000
+        use_full = (not dirty) or (len(tile_keys) < incremental_threshold)
+
+        if use_full:
+            raw_coords = tile_keys
+        else:
+            inner: set[tuple[int, int]] = set()
+            for ck in dirty:
+                inner |= world.chunk_tile_coords(ck)
+            if not inner:
+                use_full = True
+                raw_coords = tile_keys
+            else:
+                expanded = set(inner)
+                for _ in range(4):
+                    nxt = set(expanded)
+                    for tx, ty in expanded:
+                        for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                            p = (tx + ddx, ty + ddy)
+                            if p in world.tiles:
+                                nxt.add(p)
+                    expanded = nxt
+                raw_coords = expanded
+
+        raw: dict[tuple[int, int], float] = {}
+        for (x, y) in raw_coords:
+            raw[(x, y)] = float(compute_elevation(self.hills, x, y))
+
+        smoothed = smooth_elevation_max_gradient(raw, TERRAIN_MAX_GRADIENT, TERRAIN_GRADIENT_ITERATIONS)
+        if use_full:
+            self.elevation_map.clear()
+        for k, v in smoothed.items():
+            self.elevation_map[k] = v
+        return smoothed
+
     def populate_elevation(self, world: WorldState) -> int:
         """Set tile elevation from hills (Gaussian), then bound slope between neighbors.
 
         Returns number of tiles updated.
         """
-        from world.roads import compute_elevation, smooth_elevation_max_gradient
         from core.config import TERRAIN_GRADIENT_ITERATIONS, TERRAIN_MAX_GRADIENT
         from core.terrain_system import terrain_analyzer
 
-        if not self.hills:
+        smoothed = self._recompute_smoothed_elevation_for_world(world)
+        if not smoothed:
             return 0
-
-        raw: dict[tuple[int, int], float] = {}
-        for (x, y) in world.tiles.keys():
-            raw[(x, y)] = float(compute_elevation(self.hills, x, y))
-
-        smoothed = smooth_elevation_max_gradient(raw, TERRAIN_MAX_GRADIENT, TERRAIN_GRADIENT_ITERATIONS)
-        self.elevation_map.clear()
-        for k, v in smoothed.items():
-            self.elevation_map[k] = v
 
         updated = 0
         for (x, y), elev in smoothed.items():
@@ -89,15 +129,24 @@ class CityBlueprint:
             slope, aspect = terrain_analyzer.calculate_slope(elev, neighbors)
             roughness = terrain_analyzer.calculate_roughness([elev] + neighbors)
 
+            moisture_val = tile.moisture
+            if moisture_val is None:
+                moisture_val = 0.5
+            temperature_val = tile.temperature
+            if temperature_val is None:
+                temperature_val = 20.0
+
             terrain_type = terrain_analyzer.classify_terrain(
-                elev, slope, neighbors,
-                moisture=getattr(tile, "moisture", 0.5),
-                temperature=getattr(tile, "temperature", 20.0),
+                elev,
+                slope,
+                neighbors,
+                moisture=moisture_val,
+                temperature=temperature_val,
+                roughness=roughness,
             )
 
-            soil_type = getattr(tile, "soil_type", "loam")
-            moisture = getattr(tile, "moisture", 0.5)
-            stability = terrain_analyzer.assess_stability(terrain_type, slope, soil_type, moisture)
+            soil_type = tile.soil_type or "loam"
+            stability = terrain_analyzer.assess_stability(terrain_type, slope, soil_type, moisture_val)
 
             tile.terrain_type = terrain_type.value
             tile.slope = slope
@@ -127,7 +176,8 @@ class CityBlueprint:
                 if neighbor_tile:
                     neighbors.append(neighbor_tile.elevation)
                 else:
-                    neighbors.append(0.0)  # Default for missing neighbors
+                    nx, ny = x + dx, y + dy
+                    neighbors.append(float(self.elevation_at(nx, ny)))
         return neighbors
 
     def apply_elevation_to_world(self, world: WorldState) -> int:
@@ -135,20 +185,9 @@ class CityBlueprint:
 
         Returns number of tiles updated.
         """
-        from world.roads import compute_elevation, smooth_elevation_max_gradient
-        from core.config import TERRAIN_GRADIENT_ITERATIONS, TERRAIN_MAX_GRADIENT
-
-        if not self.hills:
+        smoothed = self._recompute_smoothed_elevation_for_world(world)
+        if not smoothed:
             return 0
-
-        raw: dict[tuple[int, int], float] = {}
-        for (x, y) in world.tiles.keys():
-            raw[(x, y)] = float(compute_elevation(self.hills, x, y))
-
-        smoothed = smooth_elevation_max_gradient(raw, TERRAIN_MAX_GRADIENT, TERRAIN_GRADIENT_ITERATIONS)
-        self.elevation_map.clear()
-        for k, v in smoothed.items():
-            self.elevation_map[k] = v
 
         updated = 0
         for (x, y), elev in smoothed.items():

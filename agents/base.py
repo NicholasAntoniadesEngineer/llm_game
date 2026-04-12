@@ -21,34 +21,47 @@ from core.errors import AgentGenerationError, classify_agent_failure
 
 logger = logging.getLogger("eternal.agents")
 
+_ui_broadcast = None
+
+
+def set_ui_broadcast(fn):
+    """Inject async broadcast callable (same signature as ``server.state.broadcast_fn``)."""
+    global _ui_broadcast
+    _ui_broadcast = fn
+
+
+def _resolve_ui_broadcast():
+    if _ui_broadcast is not None:
+        return _ui_broadcast
+    from server.state import broadcast_fn
+    return broadcast_fn
+
 
 def _broadcast_prompt_event(msg: dict):
     """Fire-and-forget broadcast of prompt/response data to WebSocket clients."""
     try:
-        from server.state import broadcast_fn
-        if not broadcast_fn:
+        fn = _resolve_ui_broadcast()
+        if not fn:
             return
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(broadcast_fn(msg))
-    except Exception:
+        loop = asyncio.get_running_loop()
+        loop.create_task(fn(msg))
+    except (RuntimeError, Exception):
         pass  # Never let UI broadcasting break agent calls
 
 
 def _broadcast_agent_activity(agent_role: str, detail: str):
     """Short-lived activity line while the LLM HTTP call is in flight (no timer reset)."""
     try:
-        from server.state import broadcast_fn
-        if not broadcast_fn or not detail:
+        fn = _resolve_ui_broadcast()
+        if not fn or not detail:
             return
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(broadcast_fn({
-                "type": "agent_activity",
-                "agent": agent_role,
-                "detail": str(detail).strip()[:280],
-            }))
-    except Exception:
+        loop = asyncio.get_running_loop()
+        loop.create_task(fn({
+            "type": "agent_activity",
+            "agent": agent_role,
+            "detail": str(detail).strip()[:280],
+        }))
+    except (RuntimeError, Exception):
         pass
 
 
@@ -180,13 +193,10 @@ class BaseAgent:
         return result
 
     async def generate_batch(self, instruction: str, count: int) -> list[dict]:
-        """Call LLM once expecting a JSON array of `count` results.
+        """Call LLM once expecting a JSON array of ``count`` results.
 
-        Returns a list of parsed dicts. On failure, returns an empty list
-        (caller should fall back to individual calls).
-
-        This is used for batching multiple small buildings into a single
-        Urbanista call to reduce token overhead from repeated system prompts.
+        Raises ``AgentGenerationError`` on transport/parse failures (same contract as
+        :meth:`generate`). Used to batch small buildings into one Urbanista call.
         """
         enriched = self._prepend_memory_context(instruction)
         prompt = (
@@ -289,15 +299,16 @@ class BaseAgent:
                             )
                             return results
 
-            logger.warning(
-                "Batch parse failed for %s — returning empty (caller will retry individually)",
-                self.role,
+            raise AgentGenerationError(
+                "bad_model_output",
+                f"Batch for {self.role}: expected a JSON array of ~{count} objects; parse failed.",
             )
-            return []
 
+        except AgentGenerationError:
+            raise
         except Exception as e:
-            logger.warning("Batch generate failed for %s: %s — returning empty", self.role, e)
-            return []
+            pr, pd = classify_agent_failure("", e)
+            raise AgentGenerationError(pr, pd)
 
     def _prepend_memory_context(self, instruction: str) -> str:
         """Prepend compact memory context to an instruction if available.
@@ -503,10 +514,9 @@ class BaseAgent:
 
     async def _broadcast_token_usage(self) -> None:
         try:
-            from server.state import broadcast_fn
-
-            if broadcast_fn is not None:
-                await broadcast_fn(
+            fn = _resolve_ui_broadcast()
+            if fn is not None:
+                await fn(
                     {
                         "type": "token_usage",
                         "by_ui_agent": aggregate_for_ui(),

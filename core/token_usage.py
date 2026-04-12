@@ -97,8 +97,8 @@ class TokenUsageStore:
 STORE = TokenUsageStore()
 
 
-def aggregate_for_ui() -> dict[str, dict[str, int]]:
-    """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
+def _agent_keys_by_ui_group() -> dict[str, list[str]]:
+    """Map toolbar agent names to underlying LLM routing keys (single source of truth)."""
     from agents.llm_routing import (
         KEY_CARTOGRAPHUS_REFINE,
         KEY_CARTOGRAPHUS_SKELETON,
@@ -106,8 +106,7 @@ def aggregate_for_ui() -> dict[str, dict[str, int]]:
         KEY_URBANISTA,
     )
 
-    detail = STORE.to_payload()
-    groups: dict[str, list[str]] = {
+    return {
         "cartographus": [
             KEY_CARTOGRAPHUS_SKELETON,
             KEY_CARTOGRAPHUS_REFINE,
@@ -115,6 +114,12 @@ def aggregate_for_ui() -> dict[str, dict[str, int]]:
         ],
         "urbanista": [KEY_URBANISTA],
     }
+
+
+def aggregate_for_ui() -> dict[str, dict[str, int]]:
+    """Sum session token totals by header agent (Cartographus = skeleton+refine+survey)."""
+    detail = STORE.to_payload()
+    groups = _agent_keys_by_ui_group()
     out: dict[str, dict[str, int]] = {}
     for ui, keys in groups.items():
         pt = ct = tt = 0
@@ -152,13 +157,6 @@ def get_token_summary() -> dict:
     - Average tokens per building (urbanista calls)
     - Estimated cost
     """
-    from agents.llm_routing import (
-        KEY_CARTOGRAPHUS_REFINE,
-        KEY_CARTOGRAPHUS_SKELETON,
-        KEY_CARTOGRAPHUS_SURVEY,
-        KEY_URBANISTA,
-    )
-
     detail = STORE.to_payload()
 
     # Per-agent detail with call counts
@@ -174,14 +172,7 @@ def get_token_summary() -> dict:
         }
 
     # UI groups
-    groups: dict[str, list[str]] = {
-        "cartographus": [
-            KEY_CARTOGRAPHUS_SKELETON,
-            KEY_CARTOGRAPHUS_REFINE,
-            KEY_CARTOGRAPHUS_SURVEY,
-        ],
-        "urbanista": [KEY_URBANISTA],
-    }
+    groups = _agent_keys_by_ui_group()
     by_group: dict[str, dict] = {}
     for ui_name, keys in groups.items():
         pt = ct = tt = calls = 0
@@ -202,6 +193,8 @@ def get_token_summary() -> dict:
         }
 
     # Average tokens per building (urbanista calls)
+    from agents.llm_routing import KEY_URBANISTA
+
     urbanista_calls = STORE.call_count(KEY_URBANISTA)
     urbanista_total = int(
         (detail.get(KEY_URBANISTA, {}).get("total", {}).get("total_tokens", 0))

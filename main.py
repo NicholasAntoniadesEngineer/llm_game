@@ -30,13 +30,17 @@ from server.broadcast import broadcast as _broadcast_impl
 from server.app import build_app
 from agents import llm_routing as llm_agents
 from orchestration.engine import BuildEngine
+from agents import base as agents_base
+from core.errors import SaveIndexError
 from core.persistence import (
     clear_saves,
     load_llm_settings,
+    load_blueprint,
     load_state,
     merge_llm_overrides_from_save,
     save_llm_settings,
     save_state,
+    validate_blueprint_tile_invariants,
 )
 from core.config import CHAT_PERSIST_DEBOUNCE_S, HEARTBEAT_INTERVAL_S, LOG_LEVEL, create_scenario
 
@@ -95,15 +99,16 @@ broadcast = functools.partial(_broadcast_impl, state)
 # Make the bound broadcast available for late imports (e.g. agents/base.py token_usage push).
 import server.state as _server_state_mod
 _server_state_mod.broadcast_fn = broadcast
+agents_base.set_ui_broadcast(broadcast)
 
-engine = BuildEngine(state.world, state.bus, broadcast, state.chat_history)
+engine = BuildEngine(state.world, state.bus, broadcast, state.chat_history, run_session=state.run_session)
 
 _heartbeat_thread = None
 
 
 def _make_heartbeat_snapshot() -> dict[str, Any]:
     """Read-only snapshot for the background heartbeat (must not touch the asyncio loop)."""
-    scen = getattr(config, "SCENARIO", None)
+    scen = state.run_session.scenario
     loc = ""
     if isinstance(scen, dict):
         loc = str(scen.get("location") or "")
@@ -118,7 +123,7 @@ def _make_heartbeat_snapshot() -> dict[str, Any]:
                 else:
                     agents[str(agent_key)] = str(st)
     except Exception:
-        pass
+        logging.getLogger("eternal.main").exception("heartbeat snapshot: failed to read agent status")
     trace_snap = getattr(engine, "_trace_snapshot", None)
     if not isinstance(trace_snap, dict):
         trace_snap = {}
@@ -138,13 +143,20 @@ def _make_heartbeat_snapshot() -> dict[str, Any]:
 
 
 # Load saved state if available (tiles, chat, districts, scenario — survives server restarts)
-saved = load_state(state.world)
+try:
+    saved = load_state(state.world)
+except SaveIndexError:
+    logging.exception("Save index is corrupt or unreadable — starting without disk restore")
+    saved = None
 if saved:
-    loaded_chat, district_index, districts, loaded_generation = saved
+    loaded_chat, district_index, districts, loaded_generation, loaded_scenario = saved
     state.chat_history.extend(loaded_chat)
     engine.district_index = district_index
     engine.districts = districts
     engine.generation = loaded_generation
+    state.run_session.scenario = loaded_scenario
+    for msg in validate_blueprint_tile_invariants(state.world, load_blueprint()):
+        logging.warning("Blueprint invariant: %s", msg)
     logging.info(
         "Restored from disk: district #%s, %s districts, %s chat messages — world + scenario kept for restart",
         district_index,
@@ -167,7 +179,7 @@ async def _debounced_persist_after_chat(gen: int) -> None:
     if gen != _persist_chat_generation:
         return
     async with _engine_action_lock:
-        if not getattr(config, "SCENARIO", None):
+        if not state.run_session.scenario:
             return
         await asyncio.to_thread(
             save_state,
@@ -176,6 +188,8 @@ async def _debounced_persist_after_chat(gen: int) -> None:
             engine.district_index,
             engine.districts,
             engine.generation,
+            scenario=state.run_session.scenario,
+            flush_mode="incremental",
         )
 
 
@@ -212,13 +226,14 @@ async def _handle_start_inner(city_name, year):
     await engine.broadcast_all_agents_idle()
 
     # Create and set the scenario
-    config.SCENARIO = create_scenario(city_name, year)
-    logging.info(f"Starting: {config.SCENARIO['location']}, {config.SCENARIO['period']}")
+    new_scenario = create_scenario(city_name, year)
+    state.run_session.scenario = new_scenario
+    logging.info(f"Starting: {new_scenario['location']}, {new_scenario['period']}")
 
     # Reset world state for fresh build
     state.world.clear()
-    state.world.current_period = config.SCENARIO["period"]
-    state.world.current_year = config.SCENARIO["focus_year"]
+    state.world.current_period = new_scenario["period"]
+    state.world.current_year = new_scenario["focus_year"]
 
     state.chat_history.clear()
     engine.districts = []
@@ -230,14 +245,14 @@ async def _handle_start_inner(city_name, year):
     # Broadcast scenario to all clients (engine UI fields added in server.broadcast.attach_engine_ui_to_message)
     await broadcast(state.world.to_dict())
     # Include climate data for atmosphere system
-    climate = config.SCENARIO.get("climate")
+    climate = new_scenario.get("climate")
     await broadcast({
         "type": "scenario",
-        "city": config.SCENARIO["location"],
-        "period": config.SCENARIO["period"],
-        "year": config.SCENARIO.get("focus_year"),
-        "description": config.SCENARIO.get("description", ""),
-        "started_at_s": config.SCENARIO.get("started_at_s"),
+        "city": new_scenario["location"],
+        "period": new_scenario["period"],
+        "year": new_scenario.get("focus_year"),
+        "description": new_scenario.get("description", ""),
+        "started_at_s": new_scenario.get("started_at_s"),
         "climate": climate,
     })
 
@@ -273,7 +288,7 @@ async def _handle_reset_inner():
     clear_saves()
 
     # Back to selection screen
-    config.SCENARIO = None
+    state.run_session.scenario = None
     await broadcast(state.world.to_dict())
 
 
@@ -284,7 +299,7 @@ async def handle_pause():
 
 
 async def _handle_pause_inner():
-    if not config.SCENARIO:
+    if not state.run_session.scenario:
         logging.warning("Pause ignored: no active scenario")
         return
     if not engine.running:
@@ -305,6 +320,8 @@ async def _handle_pause_inner():
         engine.district_index,
         engine.districts,
         engine.generation,
+        scenario=state.run_session.scenario,
+        flush_mode="full",
     )
     await broadcast({
         "type": "paused",
@@ -317,7 +334,7 @@ async def _handle_pause_inner():
 async def handle_resume():
     """Continue build after API rate limit / error / network pause."""
     async with _engine_action_lock:
-        if not config.SCENARIO:
+        if not state.run_session.scenario:
             logging.warning("Resume ignored: no active scenario")
             return
         if engine.running:
@@ -364,7 +381,7 @@ async def handle_restart_server() -> dict:
         await engine.abort_pipeline_tasks()
     import subprocess as _sp
     await asyncio.to_thread(_sp.run, ["pkill", "-f", CLAUDE_AGENT_PKILL_PATTERN], capture_output=True)
-    if getattr(config, "SCENARIO", None):
+    if state.run_session.scenario:
         await asyncio.to_thread(
             save_state,
             state.world,
@@ -372,6 +389,8 @@ async def handle_restart_server() -> dict:
             engine.district_index,
             engine.districts,
             engine.generation,
+            scenario=state.run_session.scenario,
+            flush_mode="full",
         )
 
     async def _touch_reload_sentinel_after_response() -> None:
@@ -389,14 +408,14 @@ async def handle_restart_server() -> dict:
 async def handle_reset_timeline() -> dict:
     """New run clock (started_at_s) only; keeps tiles, chat, districts, and caches on disk."""
     async with _engine_action_lock:
-        scen = getattr(config, "SCENARIO", None)
+        scen = state.run_session.scenario
         if not scen or not isinstance(scen, dict):
             return {"ok": False, "error": "No active scenario"}
 
         t = time.time()
         merged = dict(scen)
         merged["started_at_s"] = t
-        config.SCENARIO = merged
+        state.run_session.scenario = merged
         await asyncio.to_thread(
             save_state,
             state.world,
@@ -404,6 +423,8 @@ async def handle_reset_timeline() -> dict:
             engine.district_index,
             engine.districts,
             engine.generation,
+            scenario=merged,
+            flush_mode="incremental",
         )
     await broadcast(
         {

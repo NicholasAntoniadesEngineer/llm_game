@@ -2,13 +2,13 @@
 
 import asyncio
 import logging
-import os
-from typing import Callable, Awaitable
+from typing import Any, Callable, Awaitable
 
 from core.config import (
     SURVEY_MAX_CONCURRENT,
     URBANISTA_MAX_CONCURRENT,
     SAVE_STATE_EVERY_N_STRUCTURES,
+    TOKEN_TELEMETRY_INTERVAL_S,
 )
 from core.persistence import save_state
 from core.run_log import trace_event
@@ -36,6 +36,7 @@ class TaskManager:
         set_status_fn: Callable[..., Awaitable],
         district_index_fn: Callable[[], int],
         generation_fn: Callable[[], int],
+        scenario_fn: Callable[[], Any] | None = None,
     ):
         # Shared references
         self.broadcast = broadcast_fn
@@ -46,6 +47,7 @@ class TaskManager:
         self._set_status_fn = set_status_fn
         self._district_index_fn = district_index_fn  # callable returning current index
         self._generation_fn = generation_fn
+        self._scenario_fn = scenario_fn
 
         # Authoritative running flag
         self.running: bool = False
@@ -68,16 +70,6 @@ class TaskManager:
     # Token telemetry
     # ------------------------------------------------------------------
 
-    def _token_telemetry_interval_s(self) -> int:
-        raw = os.environ.get("ROMA_TOKEN_TELEMETRY_INTERVAL_S", "").strip()
-        if not raw:
-            return 5
-        try:
-            v = int(raw)
-        except ValueError:
-            return 5
-        return 1 if v < 1 else v
-
     def start_token_telemetry(self) -> None:
         if self._token_telemetry_task is not None and not self._token_telemetry_task.done():
             return
@@ -87,7 +79,7 @@ class TaskManager:
                 from core.token_usage import STORE as TOKEN_USAGE_STORE
                 from core.token_usage import aggregate_for_ui as token_aggregate_for_ui
                 prev_totals: dict[str, int] = {}
-                interval_s = self._token_telemetry_interval_s()
+                interval_s = TOKEN_TELEMETRY_INTERVAL_S
                 logger.info("Token telemetry enabled: interval_s=%s", interval_s)
                 while self.running:
                     await asyncio.sleep(interval_s)
@@ -297,6 +289,18 @@ class TaskManager:
             return await self._survey_work_item_fn(index)
         return await task
 
+    def clear_survey_prefetch_handles(self) -> None:
+        """Drop survey task handles before rescheduling (same as prior ``_survey_task_by_index.clear()``)."""
+        self._survey_task_by_index.clear()
+
+    def map_refine_task_idle(self) -> bool:
+        t = self._map_refine_task
+        return t is None or t.done()
+
+    def start_map_refine_background(self, coro) -> None:
+        """Run map-description refine in the background (non-blocking)."""
+        self._map_refine_task = asyncio.create_task(coro)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -312,6 +316,11 @@ class TaskManager:
                 generation=self._generation_fn(),
                 structures_since_reset=SAVE_STATE_EVERY_N_STRUCTURES,
             )
+            scen = self._scenario_fn() if self._scenario_fn else None
+            if not isinstance(scen, dict):
+                logger.debug("persist_progress_after_structure: skip save (no scenario dict)")
+                self._structures_since_save = 0
+                return
             await asyncio.to_thread(
                 save_state,
                 self.world,
@@ -319,5 +328,7 @@ class TaskManager:
                 self._district_index_fn(),
                 self._districts_ref,
                 self._generation_fn(),
+                scenario=scen,
+                flush_mode="incremental",
             )
             self._structures_since_save = 0

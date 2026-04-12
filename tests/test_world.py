@@ -2,8 +2,10 @@
 
 import pytest
 
+from core.config import CHUNK_SIZE
 from world.tiles import Tile, TERRAIN_COLORS, BUILDING_ICONS, TERRAIN_ICONS
 from world.state import WorldState
+from world.blueprint import CityBlueprint
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,7 @@ class TestTerrainMaps:
 
 class TestWorldStateInit:
     def test_empty_world(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         assert len(w.tiles) == 0
         assert w.width == 0
         assert w.height == 0
@@ -79,7 +81,7 @@ class TestWorldStateInit:
         assert w.current_year == 0
 
     def test_clear(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 5, {"terrain": "road"})
         w.turn = 10
         w.clear()
@@ -92,7 +94,7 @@ class TestWorldStateInit:
 
 class TestWorldStatePlaceTile:
     def test_place_single_tile(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         result = w.place_tile(10, 20, {"terrain": "building", "building_name": "Temple"})
         assert result is True
         tile = w.tiles[(10, 20)]
@@ -100,7 +102,7 @@ class TestWorldStatePlaceTile:
         assert tile.building_name == "Temple"
 
     def test_place_updates_bounds(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 10, {"terrain": "road"})
         assert w.min_x == 5
         assert w.max_x == 5
@@ -108,7 +110,7 @@ class TestWorldStatePlaceTile:
         assert w.max_y == 10
 
     def test_multiple_tiles_expand_bounds(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "road"})
         w.place_tile(10, 20, {"terrain": "building"})
         assert w.min_x == 0
@@ -117,14 +119,14 @@ class TestWorldStatePlaceTile:
         assert w.max_y == 20
 
     def test_width_and_height(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 10, {"terrain": "road"})
         w.place_tile(15, 30, {"terrain": "road"})
         assert w.width == 11   # 15 - 5 + 1
         assert w.height == 21  # 30 - 10 + 1
 
     def test_overwrite_existing_tile(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "road"})
         w.place_tile(0, 0, {"terrain": "building", "building_name": "Temple"})
         tile = w.tiles[(0, 0)]
@@ -132,49 +134,49 @@ class TestWorldStatePlaceTile:
         assert tile.building_name == "Temple"
 
     def test_elevation_clamping_high(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "building", "elevation": 100.0})
         assert w.tiles[(0, 0)].elevation == 30.0
 
     def test_elevation_clamping_low(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "water", "elevation": -50.0})
         assert w.tiles[(0, 0)].elevation == -5.0
 
     def test_normal_elevation(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "building", "elevation": 2.5})
         assert w.tiles[(0, 0)].elevation == 2.5
 
     def test_default_color_for_terrain(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "road"})
         assert w.tiles[(0, 0)].color == TERRAIN_COLORS["road"]
 
     def test_default_icon_for_building_type(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "building", "building_type": "temple"})
         assert w.tiles[(0, 0)].icon == BUILDING_ICONS["temple"]
 
     def test_default_icon_for_terrain_type(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "water"})
         assert w.tiles[(0, 0)].icon == TERRAIN_ICONS["water"]
 
     def test_dirty_chunks_tracked(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "road"})
         assert len(w._dirty_chunks) >= 1
 
     def test_build_log_appended(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 10, {"terrain": "building"})
         assert len(w.build_log) == 1
         assert w.build_log[0]["x"] == 5
         assert w.build_log[0]["y"] == 10
 
     def test_negative_coordinates(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(-10, -20, {"terrain": "road"})
         assert w.min_x == -10
         assert w.min_y == -20
@@ -184,7 +186,7 @@ class TestWorldStatePlaceTile:
 
     def test_x_y_not_overwritten_from_data(self):
         """Tile x,y should be set by place_tile args, not from data dict."""
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 10, {"terrain": "road", "x": 999, "y": 888})
         tile = w.tiles[(5, 10)]
         assert tile.x == 5
@@ -193,37 +195,37 @@ class TestWorldStatePlaceTile:
 
 class TestWorldStateGetTile:
     def test_get_existing_tile(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(3, 4, {"terrain": "garden"})
         tile = w.get_tile(3, 4)
         assert tile is not None
         assert tile.terrain == "garden"
 
     def test_get_nonexistent_tile(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         assert w.get_tile(100, 200) is None
 
 
 class TestWorldStateGetRegionSummary:
     def test_empty_region(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         result = w.get_region_summary(0, 0, 10, 10)
         assert "empty" in result.lower()
 
     def test_region_with_tiles(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 5, {"terrain": "building", "building_name": "Temple"})
         result = w.get_region_summary(0, 0, 10, 10)
         assert "Temple" in result
 
     def test_region_excludes_empty_tiles(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(5, 5, {"terrain": "empty"})
         result = w.get_region_summary(0, 0, 10, 10)
         assert "empty" in result.lower()
 
     def test_region_truncates_large(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         for i in range(100):
             w.place_tile(i, 0, {"terrain": "road"})
         result = w.get_region_summary(0, 0, 100, 0, max_tiles=10)
@@ -232,11 +234,11 @@ class TestWorldStateGetRegionSummary:
 
 class TestWorldStateOccupiedTileDicts:
     def test_empty_world(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         assert w.occupied_tile_dicts() == []
 
     def test_excludes_empty_tiles(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "empty"})
         w.place_tile(1, 0, {"terrain": "building"})
         dicts = w.occupied_tile_dicts()
@@ -246,7 +248,7 @@ class TestWorldStateOccupiedTileDicts:
 
 class TestWorldStateToDict:
     def test_to_dict_structure(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.current_period = "Late Republic"
         w.current_year = -44
         w.place_tile(5, 10, {"terrain": "building"})
@@ -259,7 +261,7 @@ class TestWorldStateToDict:
         assert d["min_y"] == 10
 
     def test_to_dict_empty_world(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         d = w.to_dict()
         assert d["width"] == 0
         assert d["height"] == 0
@@ -268,7 +270,7 @@ class TestWorldStateToDict:
 
 class TestWorldStateTilesSince:
     def test_tiles_since(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.turn = 1
         w.place_tile(0, 0, {"terrain": "road"})
         w.turn = 5
@@ -278,14 +280,14 @@ class TestWorldStateTilesSince:
         assert result[0]["x"] == 1
 
     def test_tiles_since_excludes_empty(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.turn = 1
         w.place_tile(0, 0, {"terrain": "empty"})
         result = w.tiles_since(0)
         assert len(result) == 0
 
     def test_tiles_since_includes_all_recent(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.turn = 0
         w.place_tile(0, 0, {"terrain": "road"})
         w.place_tile(1, 0, {"terrain": "road"})
@@ -300,7 +302,7 @@ class TestWorldStateTilesSince:
 
 class TestWorldStateSparse:
     def test_widely_separated_tiles(self):
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(-1000, -1000, {"terrain": "water"})
         w.place_tile(1000, 1000, {"terrain": "building"})
         # Only 2 tiles stored, even though bounding box is huge
@@ -310,7 +312,38 @@ class TestWorldStateSparse:
 
     def test_no_preallocated_grid(self):
         """World should not allocate tiles for the entire bounding box."""
-        w = WorldState()
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
         w.place_tile(0, 0, {"terrain": "road"})
         w.place_tile(100, 100, {"terrain": "road"})
         assert len(w.tiles) == 2  # Not 101*101
+
+
+class TestWorldStateRegionSummary:
+    def test_region_summary_only_lists_tiles_in_bbox(self):
+        w = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        for x in range(80):
+            w.place_tile(x, 0, {"terrain": "road"})
+        w.place_tile(5, 5, {"terrain": "building", "building_name": "Target"})
+        summary = w.get_region_summary(5, 5, 5, 5, max_tiles=20)
+        assert "Target" in summary
+        assert summary.count("(0,0)") <= 1
+
+
+class TestCityBlueprintElevationParity:
+    def test_populate_matches_apply_elevation_numeric(self):
+        w1 = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        w1.place_tile(0, 0, {"terrain": "grass"})
+        w1.place_tile(2, 1, {"terrain": "grass"})
+        bp1 = CityBlueprint()
+        bp1.hills = [{"name": "test_hill", "cx": 1, "cy": 1, "radius": 8, "peak": 3.0}]
+        assert bp1.populate_elevation(w1) > 0
+
+        w2 = WorldState(chunk_size_tiles=CHUNK_SIZE)
+        w2.place_tile(0, 0, {"terrain": "grass"})
+        w2.place_tile(2, 1, {"terrain": "grass"})
+        bp2 = CityBlueprint()
+        bp2.hills = list(bp1.hills)
+        assert bp2.apply_elevation_to_world(w2) > 0
+
+        for coord in ((0, 0), (2, 1)):
+            assert w1.get_tile(*coord).elevation == w2.get_tile(*coord).elevation
